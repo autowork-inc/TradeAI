@@ -167,3 +167,93 @@ def test_exit_plan_comes_from_the_strategy_registry_like_in_shadow(tmp_path):
     m.release("XRPUSDT", signal(symbol="XRPUSDT", strategy="SMC_Counter_Trend", entry=2.0, sl=1.9).signal_id)
     assert m.evaluate(signal(symbol="XRPUSDT", strategy="OBI_Breakout", entry=2.0, sl=1.9, n=9), NOW).exit_plan == DEFAULT_PLAN  # нет в словаре: общий
     assert isinstance(DEFAULT_PLAN, ScaleOutPlan)
+
+
+# ---------------------------------------------------------------------------------------------- сквозной лимит по площадкам
+
+
+def two_venues(tmp_path) -> LiveRiskManager:
+    return manager(tmp_path, venues=("binance", "mt5"))
+
+
+def test_total_daily_pnl_is_binance_plus_mt5_and_none_until_both_reported(tmp_path):
+    m = two_venues(tmp_path)
+    assert m.daily_pnl is None
+    m.update_venue_pnl("binance", -12.0, NOW)
+    assert m.daily_pnl is None and m.venue_pnl == {"binance": -12.0}  # суммы нет без второго слагаемого
+    m.update_venue_pnl("mt5", -8.0, NOW)
+    assert m.daily_pnl == -20.0 and m.venue_pnl == {"binance": -12.0, "mt5": -8.0}
+
+
+def test_combined_loss_trips_the_single_latch_for_all_venues(tmp_path):
+    m = two_venues(tmp_path)
+    assert m.update_venue_pnl("binance", -30.0, NOW) is False  # вторая площадка ещё не сообщила
+    assert m.update_venue_pnl("mt5", -19.99, NOW) is False and not m.blocked(NOW)
+    assert m.update_venue_pnl("mt5", -20.0, NOW) is True  # -30 + -20 = -50: ровно лимит
+    assert m.blocked(NOW) and m.blocked_until_ms == utc_day_start_ms(NOW) + DAY_MS
+    assert m.update_venue_pnl("binance", -31.0, NOW) is False  # уже заблокировано: повторного срабатывания нет
+    payload = json.loads((tmp_path / "risk.json").read_text(encoding="utf-8"))
+    assert payload["pnl_usdt"] == -50.0 and payload["pnl_by_venue"] == {"binance": -30.0, "mt5": -20.0}
+    for sym in ("SOLUSDT", "EURUSD"):  # блокировка не зависит от символа/площадки
+        r = m.gate(signal(symbol=sym), NOW)
+        assert r.reason == "trading_blocked" and r.detail["pnl_by_venue"] == {"binance": -31.0, "mt5": -20.0}
+
+
+def test_profit_on_one_venue_offsets_loss_on_the_other(tmp_path):
+    m = two_venues(tmp_path)
+    m.update_venue_pnl("binance", -60.0, NOW)
+    assert m.update_venue_pnl("mt5", +25.0, NOW) is False and not m.blocked(NOW) and m.daily_pnl == -35.0
+
+
+def test_latch_survives_restart_for_both_venues(tmp_path):
+    m = two_venues(tmp_path)
+    m.update_venue_pnl("binance", -25.0, NOW)
+    m.update_venue_pnl("mt5", -25.0, NOW)
+    reborn = two_venues(tmp_path)
+    assert reborn.blocked(NOW) and reborn.gate(signal(symbol="EURUSD"), NOW).reason == "trading_blocked"
+    assert not reborn.blocked(utc_day_start_ms(NOW) + DAY_MS)  # со следующих суток UTC - снова можно
+
+
+def test_any_stale_venue_blocks_new_entries_everywhere(tmp_path):
+    m = two_venues(tmp_path)
+    m.update_venue_pnl("binance", 0.0, NOW)
+    m.update_venue_pnl("mt5", 0.0, NOW - 10 * 60_000)  # MT5 старше pnl_max_age_s (120 с)
+    r = m.gate(signal(), NOW)
+    assert r.reason == "pnl_unavailable" and r.detail["stale_venues"] == ["mt5"]
+    assert m.stale_venues(NOW) == ["mt5"]
+    m.update_venue_pnl("mt5", 0.0, NOW)
+    assert m.gate(signal(), NOW) is None  # обе площадки свежие - ворота открыты
+
+
+def test_unknown_venue_and_bad_venue_sets_are_config_errors(tmp_path):
+    m = two_venues(tmp_path)
+    with pytest.raises(ConfigError, match="не зарегистрирована"):
+        m.update_venue_pnl("kraken", 0.0, NOW)
+    with pytest.raises(DataError, match="NaN"):
+        m.update_venue_pnl("mt5", float("nan"), NOW)
+    with pytest.raises(ConfigError, match="venues"):
+        manager(tmp_path, venues=())
+    with pytest.raises(ConfigError, match="venues"):
+        manager(tmp_path, venues=("binance", "binance"))
+
+
+def test_gate_does_not_reserve_but_reserve_does(tmp_path):
+    m = two_venues(tmp_path)
+    m.update_venue_pnl("binance", 0.0, NOW)
+    m.update_venue_pnl("mt5", 0.0, NOW)
+    s = signal(symbol="EURUSD")
+    assert m.gate(s, NOW) is None and m.busy() == {}
+    m.reserve("EURUSD", s.signal_id)
+    assert m.gate(s, NOW).reason == "symbol_busy"
+    with pytest.raises(DataError):
+        m.reserve("EURUSD", "other")
+    m.release("EURUSD", s.signal_id)
+    assert m.gate(s, NOW) is None
+
+
+def test_single_venue_manager_is_unchanged(tmp_path):
+    m = manager(tmp_path)
+    assert m.venues == ("binance",) and m.daily_pnl is None
+    m.update_daily_pnl(-49.99, NOW)
+    assert m.daily_pnl == -49.99 and not m.blocked(NOW)
+    assert m.update_daily_pnl(-50.0, NOW) is True and m.blocked(NOW)

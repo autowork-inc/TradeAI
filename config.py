@@ -168,6 +168,12 @@ LIVE_REST_URL = TESTNET_REST_URL if USE_TESTNET else REST_BASE_URL  # базов
 PREMIUM_INDEX_PATH = "/fapi/v1/premiumIndex"  # публичный: markPrice
 LIVE_PNL_MAX_AGE_S = 120.0  # PnL за сутки старше этого возраста для допуска новой сделки не годится (fail-closed)
 LIVE_RISK_STATE_NAME = ".live_risk_state.json"  # защёлка блокировки по суточному лимиту (переживает рестарт)
+# Мульти-биржевой боевой контур (решение пользователя 2026-10-13, вариант А): какой символ исполняется на какой площадке. Любой другой символ
+# получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - MetaApiLiveClient (MT5).
+LIVE_BINANCE_SYMBOLS = ("BTCUSDT", "ETHUSDT")
+LIVE_MT5_SYMBOLS = ("EURUSD", "XAUUSD", "XAGUSD")
+LIVE_ENABLE_MT5 = _env_bool("LIVE_ENABLE_MT5")  # подключать MT5 (MetaApi) к боевому контуру; по умолчанию выключено: Binance-контур работает без ключей MetaApi
+LIVE_MT5_ACCOUNT_CURRENCIES = ("USD", "USDT", "USDC")  # суточный PnL складывается с Binance 1:1: счёт MT5 в другой валюте не допускается
 BALANCE_PATH = os.environ.get("BINANCE_BALANCE_PATH", "/fapi/v3/balance")
 INCOME_PATH = "/fapi/v1/income"
 LEVERAGE_PATH = "/fapi/v1/leverage"
@@ -301,6 +307,11 @@ def validate() -> None:
     for name, symbols in (("SYMBOLS", SYMBOLS), ("SHADOW_SYMBOLS", SHADOW_SYMBOLS)):
         if not symbols or len(set(symbols)) != len(symbols) or any(s != s.upper() or not s.isalnum() for s in symbols):
             raise ConfigError(f"{name} должны быть непустыми, уникальными, в верхнем регистре: {symbols}")
+    for name, symbols in (("LIVE_BINANCE_SYMBOLS", LIVE_BINANCE_SYMBOLS), ("LIVE_MT5_SYMBOLS", LIVE_MT5_SYMBOLS)):
+        if not symbols or len(set(symbols)) != len(symbols) or any(s != s.upper() or not s.isalnum() for s in symbols):
+            raise ConfigError(f"{name} должны быть непустыми, уникальными, в верхнем регистре: {symbols}")
+    if set(LIVE_BINANCE_SYMBOLS) & set(LIVE_MT5_SYMBOLS):
+        raise ConfigError(f"Символ не может исполняться на двух площадках сразу: {sorted(set(LIVE_BINANCE_SYMBOLS) & set(LIVE_MT5_SYMBOLS))}")
     unknown = [i for i in KLINE_INTERVALS if i not in INTERVAL_MS]
     if unknown:
         raise ConfigError(f"Неизвестные таймфреймы {unknown}; известны: {sorted(INTERVAL_MS)}")

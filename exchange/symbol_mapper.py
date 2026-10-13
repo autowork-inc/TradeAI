@@ -25,7 +25,8 @@ Barnwell Industries, `GOLD` - акция Barrick Gold, `WTI` - акция W&T Of
 `contractSize`, `minVolume`, `maxVolume`, `volumeStep`, `tickSize`, `digits`, `point`, `stopsLevel`, `freezeLevel`, `fillingModes`,
 `tradeMode`, валюты. ВАЖНО: в спецификации MetaApi нет полей `tradeTickSize` / `tradeTickValue` (это поля MT5 API терминала); размер
 тика - `tickSize`, а стоимость тика в валюте счёта приходит вместе с котировкой (`lossTickValue` / `profitTickValue` у `get_price`),
-её использует `exchange.mt5_risk`. Символ с `tradeMode = SYMBOL_TRADE_MODE_DISABLED` отклоняется при загрузке.
+её использует `exchange.mt5_risk`. Символ с `tradeMode = SYMBOL_TRADE_MODE_DISABLED` отклоняется при загрузке (`ConfigError`), кроме режима `allow_disabled=True` боевого контура: там такой символ
+загружается, а новые входы получают отказ `market_closed` (режим торговли проверяется на каждом сигнале).
 """
 
 import logging
@@ -121,10 +122,10 @@ def _num(raw: Mapping[str, Any], key: str, symbol: str, *, positive: bool = True
     return float(value)
 
 
-def parse_spec(internal: str, broker: str, raw: Mapping[str, Any]) -> Mt5SymbolSpec:
+def parse_spec(internal: str, broker: str, raw: Mapping[str, Any], *, allow_disabled: bool = False) -> Mt5SymbolSpec:
     """Строгий разбор сырой спецификации MetaApi; любое нарушение - `ConfigError` (торговать по догадке нельзя)."""
     trade_mode = str(raw.get("tradeMode") or "")
-    if trade_mode == "SYMBOL_TRADE_MODE_DISABLED":
+    if trade_mode == "SYMBOL_TRADE_MODE_DISABLED" and not allow_disabled:
         raise ConfigError(f"{broker}: торговля символом запрещена брокером (tradeMode {trade_mode})")
     spec = Mt5SymbolSpec(
         internal=internal, broker=broker,
@@ -218,8 +219,10 @@ class SymbolMapper:
     """Кеш «внутреннее имя -> имя брокера -> спецификация». `load()` обязателен до торговли; повторный вызов обновляет кеш."""
 
     def __init__(self, client: SpecClient, *, overrides: Mapping[str, str] | None = None,
-                 aliases: Mapping[str, tuple[str, ...]] | None = None, asset_hints: Mapping[str, tuple[str, ...]] | None = None):
+                 aliases: Mapping[str, tuple[str, ...]] | None = None, asset_hints: Mapping[str, tuple[str, ...]] | None = None,
+                 allow_disabled: bool = False):
         self._client = client
+        self._allow_disabled = allow_disabled  # боевой контур: DISABLED/сессионное закрытие при старте не роняет процесс, а даёт отказ market_closed на сигнал
         self._hints = asset_hints
         self._overrides = {k.upper(): v for k, v in (overrides if overrides is not None else parse_overrides(os.environ.get(SYMBOL_MAP_ENV, ""))).items()}
         self._aliases = aliases
@@ -231,7 +234,7 @@ class SymbolMapper:
         loaded: dict[str, Mt5SymbolSpec] = {}
         for internal in internals:
             broker, raw = await self._pick(internal, available)
-            loaded[internal] = parse_spec(internal, broker, raw)
+            loaded[internal] = parse_spec(internal, broker, raw, allow_disabled=self._allow_disabled)
             log.info("MT5: %s -> %s (%s; контракт %g, лот %g..%g шаг %g, тик %g)", internal, broker, loaded[internal].path,
                      loaded[internal].contract_size, loaded[internal].min_volume, loaded[internal].max_volume, loaded[internal].volume_step,
                      loaded[internal].tick_size)

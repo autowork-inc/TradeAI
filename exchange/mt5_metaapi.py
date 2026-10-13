@@ -135,6 +135,28 @@ class MetaApiTradeError(MetaApiError):
         super().__init__(f"{message} [{numeric_code} {self.retcode_name}: {self.reason}]" if numeric_code is not None else message)
 
 
+RETCODE_MARKET_CLOSED = 10018
+_DEALS_PAGE, _DEALS_MAX = 1000, 20_000
+_PNL_DEAL_TYPES = frozenset({"DEAL_TYPE_BUY", "DEAL_TYPE_SELL", "DEAL_TYPE_COMMISSION", "DEAL_TYPE_COMMISSION_DAILY", "DEAL_TYPE_COMMISSION_MONTHLY",
+                             "DEAL_TYPE_CHARGE", "DEAL_TYPE_INTEREST"})  # деньги, заработанные/потерянные торговлей; DEAL_TYPE_BALANCE - нет
+TRADE_MODE_FULL = "SYMBOL_TRADE_MODE_FULL"
+
+
+class MarketClosedError(MetaApiTradeError):
+    """Рынок/символ сейчас недоступен для НОВЫХ входов: брокер ответил 10018 MARKET_CLOSED либо `tradeMode` символа не FULL
+    (выходные, дневная пауза, CLOSEONLY, DISABLED...). Это обычный отказ сигнала, а не сбой: Safe Mode не включается, процесс не падает -
+    вызывающий (`exchange.router.ExecutionRouter`) превращает его в отказ `market_closed`."""
+
+    def __init__(self, message: str, numeric_code: int | None = RETCODE_MARKET_CLOSED, string_code: str | None = "TRADE_RETCODE_MARKET_CLOSED"):
+        super().__init__(message, numeric_code, string_code)
+
+
+def _trade_error(message: str, numeric_code: int | None, string_code: str | None) -> MetaApiTradeError:
+    """Код 10018 - `MarketClosedError`, остальные - `MetaApiTradeError`."""
+    cls = MarketClosedError if numeric_code == RETCODE_MARKET_CLOSED else MetaApiTradeError
+    return cls(message, numeric_code, string_code)
+
+
 @dataclass(frozen=True)
 class MetaApiCredentials:
     token: str
@@ -284,7 +306,7 @@ def _order_from_trade(symbol: str, client_id: str | None, resp: Mapping[str, Any
     в нормальном ответе - тоже ошибка (страховка: молча принять отказ за успех нельзя)."""
     code = resp.get("numericCode")
     if code is not None and code not in RETCODES_OK:
-        raise MetaApiTradeError(f"{symbol}: {resp.get('message', '')}", code, resp.get("stringCode"))
+        raise _trade_error(f"{symbol}: {resp.get('message', '')}", code, resp.get("stringCode"))
     return MetaApiOrder(
         symbol=symbol, client_id=client_id, order_id=resp.get("orderId"), position_id=resp.get("positionId"),
         state=str(resp.get("stringCode", "")), message=str(resp.get("message", "")), numeric_code=code, string_code=resp.get("stringCode"),
@@ -334,7 +356,7 @@ class MetaApiLiveClient:
         try:
             return await awaitable
         except TradeException as exc:
-            raise MetaApiTradeError(f"{what}: брокер отклонил операцию: {exc}", getattr(exc, "numericCode", None), getattr(exc, "stringCode", None)) from exc
+            raise _trade_error(f"{what}: брокер отклонил операцию: {exc}", getattr(exc, "numericCode", None), getattr(exc, "stringCode", None)) from exc
         except (UnauthorizedException, ForbiddenException) as exc:
             raise ConfigError(f"{what}: MetaApi отказал в доступе (токен неверен или не имеет прав на аккаунт): {exc}") from exc
         except TimeoutException as exc:
@@ -485,6 +507,30 @@ class MetaApiLiveClient:
         """Имена всех символов, доступных у брокера (с его суффиксами: BTCUSDm, EURUSD.r...)."""
         return list(await self._call("get_symbols", self._rpc().get_symbols()))
 
+    async def realized_pnl_since(self, start_ms: int, end_ms: int | None = None) -> float:
+        """Реализованный результат счёта за интервал в валюте счёта: по истории сделок терминала сумма `profit + commission + swap` сделок
+        BUY/SELL, комиссий, сборов и процентов. Пополнения/снятия/кредит/бонус (DEAL_TYPE_BALANCE и др.) НЕ входят. Убыток отрицателен.
+
+        Данные истории ещё синхронизируются (`synchronizing`) - `MetaApiError` (неполную сумму принимать нельзя: лимит убытка решает по ней)."""
+        from datetime import timezone
+
+        end = end_ms if end_ms is not None else start_ms + 86_400_000
+        start_dt, end_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc), datetime.fromtimestamp(end / 1000, tz=timezone.utc)
+        total, offset = 0.0, 0
+        while True:
+            page = await self._call("get_deals_by_time_range", self._rpc().get_deals_by_time_range(start_dt, end_dt, offset, _DEALS_PAGE))
+            if page.get("synchronizing"):
+                raise MetaApiError("история сделок MT5 ещё синхронизируется: суточный результат неполон")
+            deals = page.get("deals") or []
+            for d in deals:
+                if str(d.get("type", "")) in _PNL_DEAL_TYPES:
+                    total += float(d.get("profit") or 0.0) + float(d.get("commission") or 0.0) + float(d.get("swap") or 0.0)
+            if len(deals) < _DEALS_PAGE:
+                return total
+            offset += _DEALS_PAGE
+            if offset > _DEALS_MAX:
+                raise MetaApiError(f"слишком много сделок за интервал (> {_DEALS_MAX}): суточный результат не посчитать")
+
     async def get_orders(self) -> list[Mapping[str, Any]]:
         """Открытые отложенные ордера (сырые словари MetaApi)."""
         return list(await self._call("get_orders", self._rpc().get_orders()))
@@ -531,6 +577,14 @@ class MetaApiLiveClient:
         if sl is not None and tp is not None and not (sl < tp if side == "BUY" else tp < sl):
             raise ConfigError(f"{symbol}: SL {sl} и TP {tp} расположены неверно для {side} (BUY: SL < TP, SELL: TP < SL)")
 
+    def ensure_entry_allowed(self, symbol: str) -> None:
+        """Новые входы разрешены только при `tradeMode = FULL` (по закешированной спецификации): иначе `MarketClosedError`.
+        CLOSEONLY / LONGONLY / SHORTONLY / DISABLED - для автоматической торговли равны «рынок закрыт» (закрытие позиций это не касается).
+        Спецификации нет или в ней нет `tradeMode` - проверить нельзя, решает брокер (ответом 10018)."""
+        mode = (self._specs.get(symbol) or {}).get("tradeMode")
+        if mode and mode != TRADE_MODE_FULL:
+            raise MarketClosedError(f"{symbol}: торговля символом сейчас ограничена брокером (tradeMode {mode}): новые входы запрещены")
+
     def filling_candidates(self, symbol: str) -> list[str]:
         """Допустимые для символа режимы исполнения MARKET в порядке предпочтения: FOK (всё или ничего: объём плана не дробится),
         затем IOC, затем RETURN. Пусто - спецификация не загружена или режимов нет: опция не передаётся, выбирает MetaApi (FOK, затем IOC).
@@ -554,6 +608,7 @@ class MetaApiLiveClient:
         _side(side)
         self._check_lots(symbol, _positive(volume, "volume"))
         self._check_stops(symbol, side, sl, tp)
+        self.ensure_entry_allowed(symbol)
         conn = self._rpc()
         send = conn.create_market_buy_order if side == "BUY" else conn.create_market_sell_order
         modes: list[str | None] = list(self.filling_candidates(symbol)) or [None]
@@ -581,6 +636,7 @@ class MetaApiLiveClient:
         self._check_lots(symbol, _positive(volume, "volume"))
         self._check_price(symbol, price, "цена лимитки")
         self._check_stops(symbol, side, sl, tp)
+        self.ensure_entry_allowed(symbol)
         options: dict[str, Any] = {}
         if client_id:
             options["clientId"] = client_id

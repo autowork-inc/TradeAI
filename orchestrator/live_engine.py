@@ -46,6 +46,7 @@ import aiohttp
 
 import config
 from exchange.binance_live import BinanceLiveClient, OrderResult, client_id
+from exchange.router import ExecutionRouter, Mt5Prepared, Mt5UnprotectedPosition, RouteRejected, Venue, build_router
 from execution.rest import ERR_WOULD_TRIGGER, BinanceAPIError
 from execution.state import SafeMode, SafeModeActive
 from features import defaults as D
@@ -202,11 +203,13 @@ class LiveExecutionEngine:
         max_hold_bars: int = config.LIVE_MAX_HOLD_BARS,
         be_trigger_r: float = D.BE_TRIGGER_R,
         max_entry_deviation: float | None = None,
+        router: ExecutionRouter | None = None,
     ):
         if not (interval_ms > 0 and limit_ttl_bars >= 1 and poll_interval_s > 0 and pnl_refresh_s > 0 and max_hold_bars >= 1 and be_trigger_r > 0):
             raise ConfigError("LiveExecutionEngine: interval_ms > 0, limit_ttl_bars >= 1, poll_interval_s > 0, pnl_refresh_s > 0, "
                               "max_hold_bars >= 1, be_trigger_r > 0")
         self.client, self.risk, self._journal, self._safe = client, risk, journal, safe
+        self.router = router  # мульти-биржевая маршрутизация (exchange/router.py); None - прежний однобиржевой контур (только Binance)
         self._now, self._interval_ms, self._ttl_bars = now_ms, interval_ms, limit_ttl_bars
         self._poll_s, self._pnl_refresh_ms = poll_interval_s, int(pnl_refresh_s * 1000)
         self._post_only = config.LIVE_POST_ONLY if post_only is None else post_only
@@ -313,21 +316,41 @@ class LiveExecutionEngine:
     # --------------------------------------------------------------------------------------- исполнение
 
     async def refresh_pnl(self, now_ms: int) -> None:
-        """Суточный результат счёта (биржа) -> риск-менеджер. Лимит достигнут -> отмена неисполненных входов (позиции не трогаем)."""
-        pnl = await self.client.realized_pnl_since(utc_day_start_ms(now_ms))
+        """Суточный результат ВСЕХ площадок (Binance, MT5) -> риск-менеджер (сквозной лимит: Total = Binance + MT5). Лимит достигнут ->
+        новых входов нет на обеих площадках, неисполненные входы (Binance и MT5) снимаются, открытые позиции не трогаем."""
+        start = utc_day_start_ms(now_ms)
+        if self.router is None:
+            by_venue = {Venue.BINANCE.value: await self.client.realized_pnl_since(start)}
+        else:
+            by_venue = await self.router.realized_pnl(start)
         self._pnl_at_ms = now_ms
-        if self.risk.update_daily_pnl(pnl, now_ms):
-            self._emit(now_ms, "live_daily_limit", "", "", None, {"pnl_usdt": pnl, "limit_usdt": self.risk.daily_loss_limit,
-                                                                  "blocked_until_ms": self.risk.blocked_until_ms})
+        tripped = False
+        for venue, pnl in by_venue.items():
+            tripped = self.risk.update_venue_pnl(venue, pnl, now_ms) or tripped
+        if tripped:
+            self._emit(now_ms, "live_daily_limit", "", "", None, {"pnl_usdt": self.risk.daily_pnl, "pnl_by_venue": self.risk.venue_pnl,
+                                                                  "limit_usdt": self.risk.daily_loss_limit, "blocked_until_ms": self.risk.blocked_until_ms})
         if self.risk.blocked(now_ms):
             for t in self._trades.values():
                 if t.status == ENTRY and t.cancel_reason is None:
                     t.cancel_reason = "risk_blocked"
+            if self.router is not None:
+                for mt in await self.router.cancel_pending_mt5():
+                    self.risk.release(mt.symbol, mt.signal_id)
+                    self._emit(now_ms, "live_trade_cancelled", mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", "reason": "risk_blocked"})
 
     async def execute(self, signal: Signal, now_ms: int) -> None:
         if self._safe.active:
             self._emit_signal(now_ms, "live_rejected", signal, {"reason": "safe_mode", "detail": self._safe.reason})
             return
+        if self.router is not None:
+            rejected = self.router.reject_unsupported(signal.symbol)
+            if rejected is not None:
+                self._emit_signal(now_ms, "live_rejected", signal, {**(rejected.detail or {}), "reason": rejected.reason})
+                return
+            if self.router.venue_of(signal.symbol) is Venue.MT5:
+                await self._execute_mt5(signal, now_ms)
+                return
         await self.refresh_pnl(now_ms)
         balance = await self.client.get_balance()
         if balance.available < self.risk.margin_usdt:
@@ -361,6 +384,45 @@ class LiveExecutionEngine:
                 self._finish(trade, CANCELLED, "aborted", now_ms)  # до отправки входа что-то упало/отказано: ордера нет, монета свободна
         if res is not None:
             await self._apply_entry(trade, res)
+
+    async def _execute_mt5(self, signal: Signal, now_ms: int) -> None:
+        """Сигнал по MT5-символу: общие ворота риска (одобрение, сквозной суточный лимит, свежий PnL ВСЕХ площадок, монета свободна) ->
+        маршрутизатор считает лоты и проверяет рынок -> намерение в журнал (R7) -> ордер со стопом. Отказы (в т.ч. `market_closed`) - значения:
+        Safe Mode не включается, процесс не падает; неизвестный исход отправки - исключение (R1)."""
+        assert self.router is not None
+        await self.refresh_pnl(now_ms)
+        gate = self.risk.gate(signal, now_ms)
+        if gate is not None:
+            self._emit_signal(now_ms, "live_rejected", signal, {**(gate.detail or {}), "reason": gate.reason, "venue": "mt5"})
+            return
+        self.risk.reserve(signal.symbol, signal.signal_id)
+        ok = False
+        try:
+            prepared = await self.router.prepare_mt5(signal, now_ms)
+            if isinstance(prepared, RouteRejected):
+                self._emit_signal(now_ms, "live_rejected", signal, {**(prepared.detail or {}), "reason": prepared.reason, "venue": "mt5"})
+                return
+            self._emit_mt5_intent(signal, prepared, now_ms)
+            if self._flush is not None:
+                await self._flush()
+            sent = await self.router.send_mt5(prepared)
+            if isinstance(sent, RouteRejected):
+                self._emit_signal(now_ms, "live_rejected", signal, {**(sent.detail or {}), "reason": sent.reason, "venue": "mt5"})
+                return
+            self._emit(now_ms, "live_entry_placed" if sent.status == "pending" else "live_entry_filled", sent.symbol, sent.strategy, sent.signal_id,
+                       {"venue": "mt5", "client_id": sent.client_id, "order_id": sent.order_id, "position_id": sent.position_id, "lots": sent.lots})
+            ok = True
+        finally:
+            if not ok:
+                self.risk.release(signal.symbol, signal.signal_id)
+
+    def _emit_mt5_intent(self, signal: Signal, p: Mt5Prepared, now_ms: int) -> None:
+        plan = p.plan
+        self._emit(now_ms, "live_intent", plan.symbol, signal.strategy, signal.signal_id, {  # R7: до первого запроса на ордер
+            "venue": "mt5", "broker_symbol": plan.broker_symbol, "side": plan.side, "kind": p.kind.value, "lots": plan.lots, "entry": p.price,
+            "sl": plan.sl, "tp": plan.tp, "risk_amount": plan.risk_amount, "risk_target": plan.risk_target, "loss_per_lot": plan.loss_per_lot,
+            "margin_required": plan.margin_required, "equity": plan.equity, "daily_pnl_usdt": self.risk.daily_pnl,
+            "pnl_by_venue": self.risk.venue_pnl, "geometry": list(signal.geometry), "meta": signal.meta})
 
     async def _price_ok(self, signal: Signal, now_ms: int) -> bool:
         """MARKET: mark price биржи не должна уйти от цены сигнала больше допустимого (иначе R и уровни плана уже не те)."""
@@ -547,6 +609,13 @@ class LiveExecutionEngine:
                 await self._poll_entry(trade, now)
             elif trade.status == OPEN:
                 await self._manage(trade, now)
+        if self.router is not None:
+            for ev in await self.router.poll_mt5():
+                mt = ev.trade
+                kind = {"opened": "live_entry_filled", "closed": "live_closed", "cancelled": "live_trade_cancelled"}[ev.kind]
+                self._emit(now, kind, mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", **ev.detail})
+                if ev.kind in ("closed", "cancelled"):
+                    self.risk.release(mt.symbol, mt.signal_id)
         self._save()
 
     async def _poll_entry(self, trade: LiveTrade, now: int) -> None:
@@ -719,6 +788,16 @@ class LiveExecutionEngine:
         for symbol in symbols:
             if symbol not in self._trades:
                 await self._adopt_or_clean(symbol, now)
+        if self.router is not None and self.router.mt5 is not None:
+            try:
+                adopted = await self.router.recover_mt5()
+            except Mt5UnprotectedPosition as exc:
+                self._trip(str(exc), {})
+                raise LiveExecutionError(str(exc)) from exc
+            for mt in adopted:
+                self.risk.adopt_busy(mt.symbol, mt.signal_id)
+                self._emit(now, "live_adopted", mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", "status": mt.status, "side": mt.side, "lots": mt.lots,
+                                                                                   "position_id": mt.position_id, "order_id": mt.order_id})
         self._save()
 
     async def _adopt_or_clean(self, symbol: str, now: int) -> None:
@@ -836,13 +915,14 @@ async def build_live_engine(
     client = BinanceLiveClient.from_env(session)
     await client.rest.sync_time()
     await client.load_filters(symbols)
+    router = await build_router(client, with_mt5=config.LIVE_ENABLE_MT5)  # MT5 - только по LIVE_ENABLE_MT5=true (ключи MetaApi обязательны)
     risk = LiveRiskManager(
         {s: client.filters(s) for s in symbols}, approved_strategies=config.APPROVED_STRATEGIES, margin_usdt=config.LIVE_MARGIN_USDT,
         leverage=config.LIVE_LEVERAGE, daily_loss_limit_usdt=config.LIVE_DAILY_LOSS_LIMIT_USDT,
-        state_path=config.DATA_DIR / config.LIVE_RISK_STATE_NAME, plans=plans,
+        state_path=config.DATA_DIR / config.LIVE_RISK_STATE_NAME, plans=plans, venues=router.venues,
     )
     clock = now_ms or (lambda: int(time.time() * 1000))
     engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush,
-                                 store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME))
+                                 store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router)
     await engine.recover(symbols)
     return engine

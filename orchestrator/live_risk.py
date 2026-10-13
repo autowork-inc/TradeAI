@@ -19,6 +19,10 @@
   4. Стоп ближе ликвидации: расстояние до SL < `liq_safety / leverage` от входа (при 10x и 0.8 - меньше 8%). Дальний стоп
      означает, что позицию ликвидирует раньше, чем он сработает.
   5. Одна позиция на монету (One-Way Mode: две позиции разных стратегий по одной монете биржа сольёт в одну чистую).
+  6. Сквозной суточный лимит (мульти-биржевой контур, 2026-10-13): `Total Daily PnL = Binance PnL + MT5 PnL` (каждый - реализованный результат
+     счёта с 00:00 UTC, в USD/USDT 1:1). Лимит одинаков для всей системы: суммарный убыток >= лимита блокирует новые входы на ВСЕХ площадках
+     сразу (защёлка одна). Результат каждой площадки обязан быть свежим (`pnl_max_age_s`), иначе новых сделок нет на ВСЕХ площадках
+     (`pnl_unavailable`, fail-closed: без одного из слагаемых суммы нет). Набор площадок задаёт `venues` (по умолчанию только Binance).
 """
 
 import json
@@ -93,6 +97,7 @@ class LiveRiskManager:
         liq_safety: float = config.LIVE_LIQ_SAFETY,
         pnl_max_age_s: float = config.LIVE_PNL_MAX_AGE_S,
         plans: Mapping[str, ScaleOutPlan] | None = None,
+        venues: Collection[str] = ("binance",),
     ):
         if not (margin_usdt > 0 and isinstance(leverage, int) and 1 <= leverage <= 125 and daily_loss_limit_usdt > 0):
             raise ConfigError("LiveRiskManager: margin_usdt > 0, leverage целое 1..125, daily_loss_limit_usdt > 0")
@@ -108,8 +113,10 @@ class LiveRiskManager:
         self._plans = dict(plans or {})  # strategy_id -> план выхода (нет в словаре - DEFAULT_PLAN, как у VirtualTracker)
         self._state_path = Path(state_path)
         self._busy: dict[str, str] = {}  # монета -> signal_id (резерв с момента одобрения до release)
-        self._pnl: float | None = None
-        self._pnl_at_ms = 0
+        self._venues = tuple(venues)
+        if not self._venues or len(set(self._venues)) != len(self._venues):
+            raise ConfigError(f"LiveRiskManager: venues пуст или с дублями: {self._venues}")
+        self._venue_pnl: dict[str, tuple[float, int]] = {}  # площадка -> (результат за сутки UTC, момент получения)
         self._blocked_until_ms = self._load_latch()
 
     # ------------------------------------------------------------------------------------- защёлка
@@ -126,11 +133,12 @@ class LiveRiskManager:
 
     def _trip(self, now_ms: int, pnl: float) -> None:
         self._blocked_until_ms = utc_day_start_ms(now_ms) + DAY_MS
+        by_venue = {v: p for v, (p, _) in self._venue_pnl.items()}
         payload = {"blocked_until_ms": self._blocked_until_ms, "tripped_at_ms": now_ms, "pnl_usdt": pnl,
-                   "limit_usdt": self.daily_loss_limit}
+                   "limit_usdt": self.daily_loss_limit, "pnl_by_venue": by_venue}
         atomic_write_text(self._state_path, json.dumps(payload) + "\n")
-        log.critical("СУТОЧНЫЙ ЛИМИТ УБЫТКА: %.2f USDT (лимит %.2f). Торговля заблокирована до %d (00:00 UTC)",
-                     pnl, self.daily_loss_limit, self._blocked_until_ms)
+        log.critical("СУТОЧНЫЙ ЛИМИТ УБЫТКА: %.2f USDT суммарно по площадкам %s (лимит %.2f). Торговля заблокирована на ВСЕХ площадках до %d (00:00 UTC)",
+                     pnl, by_venue, self.daily_loss_limit, self._blocked_until_ms)
 
     def blocked(self, now_ms: int) -> bool:
         return now_ms < self._blocked_until_ms
@@ -140,37 +148,76 @@ class LiveRiskManager:
         return self._blocked_until_ms
 
     @property
+    def venues(self) -> tuple[str, ...]:
+        return self._venues
+
+    @property
+    def venue_pnl(self) -> dict[str, float]:
+        """Последний известный суточный результат по площадкам (то, что уже получено)."""
+        return {v: p for v, (p, _) in self._venue_pnl.items()}
+
+    @property
     def daily_pnl(self) -> float | None:
-        return self._pnl
+        """Total Daily PnL = сумма по ВСЕМ площадкам; None, пока какая-то площадка ни разу не сообщила результат."""
+        if any(v not in self._venue_pnl for v in self._venues):
+            return None
+        return sum(p for p, _ in self._venue_pnl.values())
 
-    def update_daily_pnl(self, pnl_usdt: float, now_ms: int) -> bool:
-        """Результат счёта с 00:00 UTC (убыток отрицателен). True - лимит достигнут ИМЕННО сейчас (блокировка включена).
+    def stale_venues(self, now_ms: int) -> list[str]:
+        """Площадки без свежего результата (не сообщали или старше `pnl_max_age_s`)."""
+        return [v for v in self._venues if v not in self._venue_pnl or now_ms - self._venue_pnl[v][1] > self._pnl_max_age_ms]
 
-        Граница: убыток >= лимита блокирует (лимит - допустимая потеря, а не «ещё одна сделка сверху»).
-        """
+    def update_venue_pnl(self, venue: str, pnl_usdt: float, now_ms: int) -> bool:
+        """Результат одной площадки с 00:00 UTC (убыток отрицателен). True - суммарный лимит достигнут ИМЕННО сейчас (блокировка включена).
+
+        Решение о блокировке принимается по сумме последних известных результатов ВСЕХ площадок, как только все они сообщили хотя бы раз.
+        Граница: суммарный убыток >= лимита блокирует (лимит - допустимая потеря, а не «ещё одна сделка сверху»)."""
+        if venue not in self._venues:
+            raise ConfigError(f"Площадка {venue!r} не зарегистрирована в LiveRiskManager (venues={self._venues})")
         if pnl_usdt != pnl_usdt:  # NaN
-            raise DataError("Суточный PnL не число (NaN)")
-        self._pnl, self._pnl_at_ms = float(pnl_usdt), now_ms
-        if -pnl_usdt >= self.daily_loss_limit - _EPS and not self.blocked(now_ms):
-            self._trip(now_ms, float(pnl_usdt))
+            raise DataError(f"Суточный PnL площадки {venue} не число (NaN)")
+        self._venue_pnl[venue] = (float(pnl_usdt), now_ms)
+        total = self.daily_pnl
+        if total is not None and -total >= self.daily_loss_limit - _EPS and not self.blocked(now_ms):
+            self._trip(now_ms, total)
             return True
         return False
+
+    def update_daily_pnl(self, pnl_usdt: float, now_ms: int) -> bool:
+        """Совместимость с однобиржевым контуром: результат площадки `binance`."""
+        return self.update_venue_pnl("binance", pnl_usdt, now_ms)
 
     # ---------------------------------------------------------------------------------------- решение
 
     def is_approved(self, strategy: str) -> bool:
         return strategy in self.approved
 
-    def evaluate(self, signal: Signal, now_ms: int) -> LiveOrderPlan | LiveRejected:
-        """Одобряет сигнал (и резервирует монету до `release`) или отказывает. Порядок проверок - от дешёвых и общих к частным."""
+    def gate(self, signal: Signal, now_ms: int) -> LiveRejected | None:
+        """Общие для всех площадок ворота: стратегия одобрена, нет блокировки по суточному лимиту (ОДНА на все площадки), свежий PnL ВСЕХ
+        площадок, монета свободна. Резерв не ставит. None - можно считать размер (на своей площадке)."""
         if not self.is_approved(signal.strategy):
             return LiveRejected("strategy_not_approved")
         if self.blocked(now_ms):
-            return LiveRejected("trading_blocked", {"blocked_until_ms": self._blocked_until_ms})
-        if self._pnl is None or now_ms - self._pnl_at_ms > self._pnl_max_age_ms:
-            return LiveRejected("pnl_unavailable", {"pnl_age_ms": None if self._pnl is None else now_ms - self._pnl_at_ms})
+            return LiveRejected("trading_blocked", {"blocked_until_ms": self._blocked_until_ms, "pnl_by_venue": self.venue_pnl})
+        stale = self.stale_venues(now_ms)
+        if stale:
+            return LiveRejected("pnl_unavailable", {"stale_venues": stale, "pnl_age_ms": {
+                v: (None if v not in self._venue_pnl else now_ms - self._venue_pnl[v][1]) for v in stale}})
         if signal.symbol in self._busy:
             return LiveRejected("symbol_busy", {"held_by": self._busy[signal.symbol]})
+        return None
+
+    def reserve(self, symbol: str, signal_id: str) -> None:
+        """Резерв монеты для площадки со своим расчётом размера (MT5): до `release`."""
+        if symbol in self._busy:
+            raise DataError(f"{symbol}: уже удерживается {self._busy[symbol]}")
+        self._busy[symbol] = signal_id
+
+    def evaluate(self, signal: Signal, now_ms: int) -> LiveOrderPlan | LiveRejected:
+        """Одобряет сигнал (и резервирует монету до `release`) или отказывает. Порядок проверок - от дешёвых и общих к частным."""
+        rejected = self.gate(signal, now_ms)
+        if rejected is not None:
+            return rejected
         f = self._filters.get(signal.symbol)
         if f is None:
             raise ConfigError(f"{signal.symbol}: нет фильтров биржи, боевой ордер рассчитать нельзя")
