@@ -7,7 +7,9 @@
 блокировка монеты, свой план управления позицией и своя колонка strategy_id в БД. Для OBI_Breakout добавлен поток стакана
 `depth10@500ms`; ленту (aggTrade) он берёт из того же TickFeed, что и трекер.
 Что делает: свечи 15m (SmcKlineFeed) -> FeatureEngine -> Orchestrator -> VirtualTracker; тики (TickFeed: aggTrade и
-markPrice@1s) двигают виртуальные заявки и позиции. Монеты - config.SHADOW_SYMBOLS (с 2026-10-13: BTC, ETH).
+markPrice@1s) двигают виртуальные заявки и позиции. Монеты - config.SHADOW_SYMBOLS (с 2026-10-13: BTC, ETH, EURUSD, XAUUSD, XAGUSD).
+MT5-символы (EURUSD, XAUUSD, XAGUSD): Binance их не отдаёт, поэтому свечи M15, производные H4 и тики идут из MetaApi (orchestrator/mt5_feeds.py) и
+включаются, только если в окружении есть METAAPI_TOKEN и METAAPI_ACCOUNT_ID (без них - предупреждение в лог, процесс работает по крипте).
 HTF Bias (2026-10-11): вторым фидом идут свечи H4 (kline_4h + история REST); структура H4 (features/htf.py) присоединяется
 к контексту M15, и автомат SMC не начинает сетап против тренда H4 (шорт при Bullish, лонг при Bearish). Управление
 позицией - Scale Out (50% на +1R с безубытком, 40% на +3R, 10% runner с трейлингом; см. orchestrator/tracker.py).
@@ -147,6 +149,8 @@ async def shadow_main(opts: Options) -> None:
         check_dsn(config.DATABASE_URL)  # неверный формат - до сети
     ban_lock.ensure_not_banned()
     symbols = config.SHADOW_SYMBOLS
+    mt5_wanted = tuple(s for s in symbols if s in config.LIVE_MT5_SYMBOLS)
+    mt5_client = None
     with InstanceLock(INSTANCE_NAME):
         journal = JsonlEventLog(config.DATA_DIR / JOURNAL_NAME)
         timeout = aiohttp.ClientTimeout(total=config.HTTP_TOTAL_TIMEOUT_S, connect=config.HTTP_CONNECT_TIMEOUT_S)
@@ -161,6 +165,15 @@ async def shadow_main(opts: Options) -> None:
             events = RecordingEventLog(journal, recorder) if recorder is not None else journal
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 api = BinanceRest(session, config.REST_BASE_URL)
+                mt5_data = None
+                if mt5_wanted:  # импорт здесь: пакет exchange (боевой код) при чисто крипто-запуске не загружается
+                    from orchestrator.mt5_feeds import Mt5KlineFeed, Mt5TickFeed, MultiFeed, connect_mt5_data
+
+                    mt5_data = await connect_mt5_data(mt5_wanted)
+                mt5_client, mt5_mapper = mt5_data if mt5_data is not None else (None, None)
+                crypto = tuple(s for s in symbols if s not in mt5_wanted)
+                all_symbols = crypto if mt5_client is None else symbols  # без ключей MetaApi MT5-символы в этом запуске не участвуют
+                symbols = all_symbols
                 names = SHADOW_STRATEGIES
                 strategies = build_strategies(names)
                 tracker = VirtualTracker(events, equity=opts.equity, recorder=recorder, plans=plans_for(names))
@@ -169,40 +182,49 @@ async def shadow_main(opts: Options) -> None:
                 if config.TRADE_MODE == "live":  # ВЫКЛЮЧЕНО по умолчанию (TRADE_MODE=shadow): боевой код тогда даже не импортируется
                     from orchestrator.live_engine import LiveMirrorSink, build_live_engine
 
-                    live = await build_live_engine(session, events, symbols=symbols, strategy_names=names,
+                    live = await build_live_engine(session, events, symbols=crypto, strategy_names=names,
                                                    interval_ms=config.INTERVAL_MS[opts.interval],
                                                    flush=recorder.flush if recorder is not None else None)
                     sink = LiveMirrorSink(tracker, live)  # Shadow-трекер получает все сигналы как прежде; одобренные - ещё и боевой движок
                 orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder)
-                feed = SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=symbols, interval=opts.interval, history_bars=opts.history)
+                feed = SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=opts.interval, history_bars=opts.history)
                 htf_feed = htf = None
                 if D.HTF_FILTER_ENABLED:
                     htf = HtfBias(D.HTF_INTERVAL, config.INTERVAL_MS[D.HTF_INTERVAL], events)
-                    htf_feed = SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=symbols, interval=D.HTF_INTERVAL,
+                    htf_feed = SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=D.HTF_INTERVAL,
                                             history_bars=D.HTF_HISTORY_BARS, emit_latest_on_start=True)
                 micro = depth_feed = None
-                if any(n in NEEDS_MICRO for n in names):  # лента - из того же aggTrade, что и тики трекера; стакан - отдельный публичный поток
-                    micro = MicroStructure(symbols, config.INTERVAL_MS[opts.interval])
-                    depth_feed = DepthFeed(session, micro.aggregator, symbols=symbols)
+                if any(n in NEEDS_MICRO for n in names):  # лента - из того же aggTrade, что и тики трекера; стакан - отдельный публичный поток (только крипта)
+                    micro = MicroStructure(crypto, config.INTERVAL_MS[opts.interval])
+                    depth_feed = DepthFeed(session, micro.aggregator, symbols=crypto)
 
                 def on_tick(tick: Tick) -> None:
                     tracker.on_tick(tick)
                     if live is not None:
                         live.on_tick(tick)  # те же тики, что у Shadow: лучшая цена для трейлинга и mark price для безубытка
-                    if micro is not None:
+                    if micro is not None and tick.symbol in crypto:  # у MT5-котировок нет ленты сделок (объёма и стороны агрессора)
                         micro.on_tick(tick)
 
                 def on_gap(ts: int) -> None:
-                    for s in symbols:
+                    for s in crypto:
                         tracker.mark_gap(s, ts)
                     if micro is not None:
                         micro.aggregator.mark_gap("trade")
 
-                ticks = TickFeed(session, on_tick, on_gap, symbols=symbols)
+                ticks = TickFeed(session, on_tick, on_gap, symbols=crypto)
+                if mt5_client is not None:  # MT5-символы: свечи M15, производные H4 и тики - из MetaApi (Binance их не отдаёт)
+                    mt5_feed = Mt5KlineFeed(mt5_client, FeatureEngine(SmcParams()), broker_name=mt5_mapper.broker_name, symbols=mt5_wanted,
+                                            interval=opts.interval, history_bars=opts.history)
+                    if htf_feed is not None:
+                        htf_feed = MultiFeed([htf_feed, mt5_feed.htf_view(FeatureEngine(SmcParams()))])
+                    feed = MultiFeed([feed, mt5_feed])
+                    mt5_ticks = Mt5TickFeed(mt5_client, on_tick, lambda ts: [tracker.mark_gap(s, ts) for s in mt5_wanted], broker_name=mt5_mapper.broker_name,
+                                            symbols=mt5_wanted)
+                    ticks = MultiFeed([ticks, mt5_ticks])
                 runner = ShadowRun(feed, orch, tracker, ticks, heartbeat=config.DATA_DIR / HEARTBEAT_NAME, recorder=recorder,
                                  htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live)
                 log.info("Shadow Mode: %s %s, стратегии %s, HTF-фильтр %s, микроструктура %s, эквити %.0f, журнал %s, БД %s, TRADE_MODE=%s",
-                         symbols, opts.interval, list(names), D.HTF_INTERVAL if htf is not None else "выключен",
+                         all_symbols, opts.interval, list(names), D.HTF_INTERVAL if htf is not None else "выключен",
                          "стакан + лента" if micro is not None else "нет", opts.equity, journal.path, "включена" if recorder is not None else "нет", config.TRADE_MODE)
                 if htf_feed is not None:
                     htf_feed.start()
@@ -227,6 +249,8 @@ async def shadow_main(opts: Options) -> None:
                     if depth_feed is not None:
                         await depth_feed.aclose()
         finally:
+            if mt5_client is not None:
+                await mt5_client.close()
             journal.close()
             if recorder is not None:
                 await recorder.aclose()  # дописать очередь, закрыть пул (ошибка писателя не прячется)

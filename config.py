@@ -64,8 +64,9 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT")
 # 2026-10-11 (решение пользователя): боевой пул вместо тестового (BTC, ETH, DOGE, 1000PEPE). Все 8 контрактов - PERPETUAL/TRADING
 # по публичному exchangeInfo (проверено 2026-10-11). Незакрытые виртуальные сделки по прежним монетам при перезапуске помечаются
 # aborted/process_restart (persistence.pg.PgRecorder.start не смотрит на список монет).
-# 2026-10-13 (решение пользователя): переход на макро-крипту, только высоколиквидные контракты; альткоины убраны.
-SHADOW_SYMBOLS = ("BTCUSDT", "ETHUSDT")
+# 2026-10-13 (решение пользователя): переход на макро-крипту, только высоколиквидные контракты; альткоины убраны. Позже в тот же день добавлены Forex/металлы
+# (EURUSD, XAUUSD, XAGUSD): их данные - не с Binance, а из MetaApi (orchestrator/mt5_feeds.py; нужны METAAPI_TOKEN/METAAPI_ACCOUNT_ID, иначе пропускаются).
+SHADOW_SYMBOLS = ("BTCUSDT", "ETHUSDT", "EURUSD", "XAUUSD", "XAGUSD")
 # Этап 5: PostgreSQL для Shadow Mode. Пусто - сделки пишутся только в JSONL-журнал (локальная разработка); задано - в БД.
 # Формат postgresql://user:password@host:5432/db. Пароль в логи не попадает (persistence.db.redact_dsn).
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -162,6 +163,7 @@ LIVE_LIQ_SAFETY = 0.8  # стоп обязан лежать ближе, чем �
 LIVE_MAX_HOLD_BARS = 192  # тайм-аут позиции (как у VirtualTracker): закрытие по рынку
 LIVE_MAX_ENTRY_DEVIATION = 0.01  # MARKET-вход отклоняется, если mark price биржи ушла от цены сигнала больше чем на эту долю
 LIVE_STATE_NAME = "live_engine_state.json"  # состояние боевых сделок (переживает рестарт; сверяется с биржей при старте)
+LIVE_MT5_STATE_NAME = "live_mt5_state.json"  # состояние сопровождения MT5-позиций (Scale Out / безубыток / трейлинг); источник правды по объёму - брокер
 USE_TESTNET = _env_bool("USE_TESTNET")  # ордера боевого контура идут на testnet; данные Shadow (свечи/тики) по-прежнему mainnet
 TESTNET_REST_URL = "https://testnet.binancefuture.com"
 LIVE_REST_URL = TESTNET_REST_URL if USE_TESTNET else REST_BASE_URL  # базовый адрес клиента ордеров (exchange/binance_live.py)

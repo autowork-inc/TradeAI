@@ -490,6 +490,30 @@ class MetaApiLiveClient:
             raise MetaApiError(f"{symbol}: некорректная котировка bid={bid} ask={ask}")
         return Quote(symbol, bid, ask, raw.get("time"), _opt(raw.get("lossTickValue")), _opt(raw.get("profitTickValue")))
 
+    async def get_candles(self, symbol: str, timeframe: str, limit: int, *, start_time: datetime | None = None) -> list[tuple[int, float, float, float, float, float]]:
+        """Исторические свечи (REST рыночных данных MetaApi): [(open_time_ms UTC, open, high, low, close, tick_volume), ...] по возрастанию времени.
+
+        `start_time` - самое позднее время (свечи грузятся назад от него); без него - последние `limit` свечей (последняя может быть ещё
+        формирующейся: отбрасывает вызывающий). `limit` <= 1000. Объём - тиковый (у Forex реального объёма нет). ❓ формат `time` (UTC) сверен по
+        документации MetaApi, живым запросом не проверялся."""
+        if not 1 <= limit <= 1000:
+            raise ConfigError(f"get_candles: limit в [1, 1000], получено {limit}")
+        if self._account is None:
+            raise MetaApiError("MetaApiLiveClient не подключён: сначала await connect()")
+        raw = await self._call(f"get_historical_candles {symbol} {timeframe}", self._account.get_historical_candles(symbol, timeframe, start_time, limit))
+        out: list[tuple[int, float, float, float, float, float]] = []
+        for c in raw:
+            t = c.get("time")
+            if not isinstance(t, datetime):
+                raise MetaApiError(f"{symbol}: свеча без времени: {c!r}")
+            tv = c.get("tickVolume", c.get("volume"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)  # MetaApi отдаёт UTC; наивное время считаем UTC, а не местным
+            out.append((int(t.timestamp() * 1000), _num(c, "open", symbol), _num(c, "high", symbol), _num(c, "low", symbol), _num(c, "close", symbol),
+                        float(tv or 0.0)))
+        out.sort()
+        return out
+
     async def get_positions(self) -> list[MetaApiPosition]:
         """Все открытые позиции счёта."""
         raw = await self._call("get_positions", self._rpc().get_positions())

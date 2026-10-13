@@ -115,6 +115,11 @@ services:
       TRADING_LOG_DIR: /app/logs/shadow
       # Этап 5: сделки пишутся в PostgreSQL (внутренняя сеть compose, имя хоста = имя сервиса). Пароль - только из .env.shadow.
       DATABASE_URL: postgresql://tradeai:${POSTGRES_PASSWORD:-}@postgres:5432/tradeai
+      # Данные Forex/металлов (EURUSD, XAUUSD, XAGUSD) идут из MetaApi, а не с Binance. Ключи задаются ТОЛЬКО в .env.shadow на сервере (в образ/архив/git не попадают);
+      # пусто - MT5-символы пропускаются, процесс работает по крипте. Для Shadow достаточно токена только на чтение рыночных данных (торговые права не нужны).
+      METAAPI_TOKEN: ${METAAPI_TOKEN:-}
+      METAAPI_ACCOUNT_ID: ${METAAPI_ACCOUNT_ID:-}
+      MT5_SYMBOL_MAP: ${MT5_SYMBOL_MAP:-}
     volumes:
       - ./data/shadow:/app/data/shadow
       - ./logs/shadow:/app/logs/shadow

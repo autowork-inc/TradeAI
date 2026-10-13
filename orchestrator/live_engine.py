@@ -66,6 +66,9 @@ ERR_UNKNOWN_ORDER = (-2011, -2013)  # ордера нет / уже не акти
 UNKNOWN_OUTCOME = (NetworkError, HttpServerError)  # запрос мог дойти до биржи
 TRIGGERED = ("TRIGGERING", "TRIGGERED", "FINISHED")  # algo-ордер сработал (порождённый ордер исполняется/исполнен)
 STATE_VERSION = 1
+MT5_EVENT_KINDS = {"opened": "live_entry_filled", "protected": "live_protected", "partial_close": "live_partial_close", "be_armed": "live_be_armed",
+                   "trail_moved": "live_trail_moved", "closed": "live_closed", "cancelled": "live_trade_cancelled",
+                   "deferred": "live_mt5_deferred", "replayed": "live_mt5_replayed"}  # события сопровождения MT5-позиций -> журнал
 
 
 class LiveExecutionError(TradingInfraError):
@@ -234,6 +237,8 @@ class LiveExecutionEngine:
 
     def on_tick(self, tick: Tick) -> None:
         """Те же тики, что получает VirtualTracker: лучшая цена (трейлинг) - по сделкам, безубыток +1R - по mark price (D11)."""
+        if self.router is not None:
+            self.router.on_tick(tick)  # MT5-позиции: тот же поток тиков (безубыток по mark price, лучшая цена для трейлинга)
         t = self._trades.get(tick.symbol)
         if t is None or t.status != OPEN or t.best_q is None:
             return
@@ -246,6 +251,8 @@ class LiveExecutionEngine:
 
     def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: BarInfo | None = None) -> None:
         """Закрытие свечи: отмены лимитки (те же правила, что у VirtualTracker, R8), тайм-аут позиции, трейлинг runner'а."""
+        if self.router is not None:
+            self.router.on_bar_closed(symbol, bar)
         t = self._trades.get(symbol)
         if t is None:
             return
@@ -612,8 +619,7 @@ class LiveExecutionEngine:
         if self.router is not None:
             for ev in await self.router.poll_mt5():
                 mt = ev.trade
-                kind = {"opened": "live_entry_filled", "closed": "live_closed", "cancelled": "live_trade_cancelled"}[ev.kind]
-                self._emit(now, kind, mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", **ev.detail})
+                self._emit(now, MT5_EVENT_KINDS[ev.kind], mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", **ev.detail})
                 if ev.kind in ("closed", "cancelled"):
                     self.risk.release(mt.symbol, mt.signal_id)
         self._save()
@@ -796,8 +802,11 @@ class LiveExecutionEngine:
                 raise LiveExecutionError(str(exc)) from exc
             for mt in adopted:
                 self.risk.adopt_busy(mt.symbol, mt.signal_id)
-                self._emit(now, "live_adopted", mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", "status": mt.status, "side": mt.side, "lots": mt.lots,
-                                                                                   "position_id": mt.position_id, "order_id": mt.order_id})
+                self._emit(now, "live_adopted" if mt.adopted else "live_recovered", mt.symbol, mt.strategy, mt.signal_id,
+                           {"venue": "mt5", "status": mt.status, "side": mt.side, "lots": mt.lots, "position_id": mt.position_id, "order_id": mt.order_id,
+                            "managed": mt.exit is not None or not mt.adopted})
+            for mt in self.router.offline_closed:
+                self._emit(now, "live_closed_offline", mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", "reason": "no_position_no_order_at_broker"})
         self._save()
 
     async def _adopt_or_clean(self, symbol: str, now: int) -> None:
@@ -915,7 +924,8 @@ async def build_live_engine(
     client = BinanceLiveClient.from_env(session)
     await client.rest.sync_time()
     await client.load_filters(symbols)
-    router = await build_router(client, with_mt5=config.LIVE_ENABLE_MT5)  # MT5 - только по LIVE_ENABLE_MT5=true (ключи MetaApi обязательны)
+    router = await build_router(client, with_mt5=config.LIVE_ENABLE_MT5, plans=plans,  # MT5 - только по LIVE_ENABLE_MT5=true (ключи MetaApi обязательны)
+                                state_path=config.DATA_DIR / config.LIVE_MT5_STATE_NAME)
     risk = LiveRiskManager(
         {s: client.filters(s) for s in symbols}, approved_strategies=config.APPROVED_STRATEGIES, margin_usdt=config.LIVE_MARGIN_USDT,
         leverage=config.LIVE_LEVERAGE, daily_loss_limit_usdt=config.LIVE_DAILY_LOSS_LIMIT_USDT,

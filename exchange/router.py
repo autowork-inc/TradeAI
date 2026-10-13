@@ -22,28 +22,38 @@
     Прочие отказы брокера (недостаточно средств, неверные стопы, реквота...) - отказ `broker_rejected` с кодом MT5. Исключение - исход
     неизвестен (таймаут, обрыв, неизвестный код): ордер мог дойти до брокера, поэтому ошибка пробрасывается (R1), повторять вслепую нельзя.
   * Сопровождение MT5-позиций (`poll_mt5`): отслеживает отложенные ордера и позиции по `clientId`; позиция исчезла (сработал SL/TP брокера) -
-    событие `closed`, движок освобождает монету. ❓ Scale Out (частичные тейки), безубыток, трейлинг и тайм-аут для MT5 НЕ реализованы:
-    позиция живёт со стопом и тейком, поставленными при входе; состояние берётся у брокера (источник правды), после рестарта
-    `recover_mt5` подхватывает позиции и отложенные ордера, а позицию без стопа считает аварией (`Mt5UnprotectedPosition`).
+    событие `closed`, движок освобождает монету. Открытая позиция сопровождается ПЛАНОМ ВЫХОДА стратегии (`ScaleOutPlan`, та же математика,
+    что у Shadow): Scale Out через `close_position(volume)`, безубыток и трейлинг runner'а через `modify_position`, тайм-аут 192 свечи
+    (`exchange/mt5_exit.py`). Закрытый рынок (10018) при сопровождении - отложенная команда без Safe Mode. Состояние сопровождения
+    пишется в файл (`state_path`), источник правды по объёму - брокер; после рестарта `recover_mt5` возвращает управление позициями из файла,
+    чужую позицию подхватывает без управления (SL/TP брокера), позицию без стопа считает аварией (`Mt5UnprotectedPosition`).
   * Суточный результат площадок для сквозного лимита убытка: `realized_pnl(start_ms)` -> {"binance": ..., "mt5": ...} (USD/USDT 1:1;
     счёт MT5 в другой валюте при подключении отвергается).
 """
 
+import json
 import logging
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import config
 from exchange.binance_live import BinanceLiveClient, client_id
 from exchange.mt5_metaapi import MarketClosedError, MetaApiError, MetaApiLiveClient, MetaApiOrder, MetaApiTradeError
+from exchange import mt5_exit
+from exchange.mt5_exit import Mt5Exit
 from exchange.mt5_risk import Mt5OrderPlan, Mt5Rejected, Mt5RiskParams, size_position
 from exchange.symbol_mapper import Mt5SymbolSpec, SymbolMapper
-from orchestrator.types import Direction, Kind, Signal
-from utils.errors import ConfigError, TradingInfraError
+from features import defaults as D
+from orchestrator.live_risk import split_levels
+from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan
+from orchestrator.types import BarInfo, Direction, Kind, Signal, Tick
+from utils.errors import ConfigError, DataError, TradingInfraError
+from utils.storage import atomic_write_text
 
 log = logging.getLogger("router")
 
@@ -75,6 +85,7 @@ class Mt5Prepared:
     client_id: str
     price: float  # MARKET: справочная цена брокера (Ask для BUY / Bid для SELL); LIMIT: цена заявки
     expires_at: datetime | None
+    exit_plan: ScaleOutPlan = DEFAULT_PLAN  # план выхода стратегии (тот же, что у VirtualTracker)
 
 
 @dataclass
@@ -94,11 +105,34 @@ class Mt5Tracked:
     status: str  # pending (отложенный ордер) | open (позиция)
     plan: Mt5OrderPlan | None = None
     adopted: bool = False
+    exit_plan: ScaleOutPlan | None = None
+    exit: Mt5Exit | None = None  # состояние сопровождения (создаётся, когда позиция впервые замечена у брокера)
+    early_ticks: list[tuple[float, str]] = field(default_factory=list)  # тики между отправкой MARKET и первым опросом: проигрываются при создании состояния
+
+    def to_record(self) -> dict[str, Any]:
+        out = {k: v for k, v in self.__dict__.items() if k not in ("plan", "exit_plan", "exit", "kind", "early_ticks")}
+        out["kind"] = self.kind.value
+        out["plan"] = self.plan.__dict__.copy() if self.plan is not None else None
+        out["exit_plan"] = self.exit_plan.describe() if self.exit_plan is not None else None
+        out["exit"] = self.exit.to_record() if self.exit is not None else None
+        return out
+
+    @classmethod
+    def from_record(cls, rec: Mapping[str, Any]) -> "Mt5Tracked":
+        try:
+            data = {k: v for k, v in rec.items() if k not in ("plan", "exit_plan", "exit", "kind")}
+            ep = rec["exit_plan"]
+            exit_plan = None if ep is None else ScaleOutPlan(tuple((float(r), float(f)) for r, f in ep["levels"]), bool(ep["be_after_first"]),
+                                                             ep["trail_mode"], float(ep["trail_atr_mult"]), int(ep["trail_wick_bars"]))
+            return cls(kind=Kind(rec["kind"]), plan=None if rec["plan"] is None else Mt5OrderPlan(**rec["plan"]), exit_plan=exit_plan,
+                       exit=None if rec["exit"] is None else Mt5Exit.from_record(rec["exit"]), **data)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DataError(f"Запись MT5-сделки не читается ({exc!r}): {str(rec)[:300]}") from exc
 
 
 @dataclass(frozen=True)
 class Mt5Event:
-    kind: str  # opened | closed | cancelled
+    kind: str  # opened | closed | cancelled | partial_close | be_armed | trail_moved | deferred | replayed
     trade: Mt5Tracked
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -120,6 +154,10 @@ class ExecutionRouter:
         max_entry_deviation: float = config.LIVE_MAX_ENTRY_DEVIATION,
         limit_ttl_ms: int = 10 * 15 * 60_000,
         now_ms: Callable[[], int] | None = None,
+        plans: Mapping[str, ScaleOutPlan] | None = None,
+        max_hold_bars: int = config.LIVE_MAX_HOLD_BARS,
+        be_trigger_r: float = D.BE_TRIGGER_R,
+        state_path: Path | None = None,
     ):
         self._binance_symbols, self._mt5_symbols = tuple(binance_symbols), tuple(mt5_symbols)
         both = set(self._binance_symbols) & set(self._mt5_symbols)
@@ -137,6 +175,12 @@ class ExecutionRouter:
         self._now = now_ms or (lambda: int(time.time() * 1000))
         self._prefix = (binance or mt5).id_prefix  # type: ignore[union-attr]  # одинаков у обоих клиентов (config.CLIENT_ORDER_ID_PREFIX)
         self._tracked: dict[str, Mt5Tracked] = {}  # внутренний символ -> сделка (одна на символ: LiveRiskManager.busy)
+        self._plans = dict(plans or {})  # strategy_id -> план выхода (нет в словаре - DEFAULT_PLAN, как у VirtualTracker)
+        if max_hold_bars < 1 or be_trigger_r <= 0:
+            raise ConfigError("ExecutionRouter: max_hold_bars >= 1, be_trigger_r > 0")
+        self._max_hold, self._be_r = max_hold_bars, be_trigger_r
+        self._state_path, self._last_saved = state_path, ""
+        self.offline_closed: list[Mt5Tracked] = []  # записи из файла состояния, позиций которых у брокера больше нет (закрыты, пока бота не было)
 
     # ------------------------------------------------------------------------------------------ маршрут
 
@@ -208,13 +252,17 @@ class ExecutionRouter:
             if dev > self._max_dev:
                 return RouteRejected("price_deviation", {"broker_price": entry, "signal_entry": signal.entry, "deviation": dev, "max": self._max_dev})
         sl = _snap(signal.sl, spec)
-        tp = _snap(signal.tp, spec) if signal.tp is not None else None
+        exit_plan = self._plans.get(signal.strategy, DEFAULT_PLAN)
+        tp = mt5_exit.broker_tp(exit_plan, entry, sl, signal.direction.sgn, spec)  # у плана с runner'ом брокерского TP нет
         margin_1lot = await self.mt5.calculate_margin(broker, side, 1.0, entry)
         sized = size_position(spec, side=side, entry=entry, sl=sl, tp=tp, equity=info.equity, free_margin=info.free_margin,
                               tick_value=quote.loss_tick_value, margin_per_lot=margin_1lot, params=self._params)
         if isinstance(sized, Mt5Rejected):
             return RouteRejected(sized.reason, sized.detail)
-        return Mt5Prepared(signal, sized, signal.kind, client_id(self._prefix, "E", signal.signal_id), entry, expires)
+        if split_levels(exit_plan, sized.lots, mt5_exit.lot_filters(spec)) is None:  # Scale Out не делится на сетке лота: другой математикой не торгуем
+            return RouteRejected("plan_not_representable", {"lots": sized.lots, "volume_step": spec.volume_step, "min_volume": spec.min_volume,
+                                                            "levels": [list(x) for x in exit_plan.levels], "runner_frac": exit_plan.runner_frac})
+        return Mt5Prepared(signal, sized, signal.kind, client_id(self._prefix, "E", signal.signal_id), entry, expires, exit_plan)
 
     async def send_mt5(self, prepared: Mt5Prepared) -> Mt5Tracked | RouteRejected:
         """Отправить подготовленный MT5-вход (стоп/тейк - в том же запросе). Рынок закрыт и отказы брокера - значения; неизвестный исход - исключение."""
@@ -241,14 +289,31 @@ class ExecutionRouter:
     def _track(self, p: Mt5Prepared, order: MetaApiOrder) -> Mt5Tracked:
         market = p.kind is not Kind.LIMIT
         t = Mt5Tracked(p.signal.signal_id, p.signal.strategy, p.signal.symbol, p.plan.broker_symbol, p.plan.side, p.kind, p.client_id, p.plan.lots,
-                       order.order_id, order.position_id if market else None, "open" if market else "pending", p.plan)
+                       order.order_id, order.position_id if market else None, "open" if market else "pending", p.plan, exit_plan=p.exit_plan)
         self._tracked[t.symbol] = t
+        self._save()  # сделка на диске сразу после отправки: после падения управление вернётся (recover_mt5)
         return t
 
     # -------------------------------------------------------------------------------------- MT5 сопровождение
 
+    def on_tick(self, tick: Tick) -> None:
+        """Те же тики, что получает VirtualTracker (лучшая цена, безубыток по mark price): только для открытых MT5-позиций с планом."""
+        t = self._tracked.get(tick.symbol)
+        if t is None or t.status != "open":
+            return
+        if t.exit is not None:
+            mt5_exit.on_tick(t.exit, tick, self._be_r)
+        elif not t.adopted and len(t.early_ticks) < 20_000:
+            t.early_ticks.append((tick.price, tick.kind))  # позиция ещё не замечена опросом: лучшая цена и mark не теряются
+
+    def on_bar_closed(self, symbol: str, bar: BarInfo | None) -> None:
+        """Закрытие свечи: тайм-аут и трейлинг runner'а (исполняется следующим `poll_mt5`)."""
+        t = self._tracked.get(symbol)
+        if t is not None and t.status == "open" and t.exit is not None and self.mapper is not None:
+            mt5_exit.on_bar_closed(t.exit, bar, self.mapper.spec(symbol), self._max_hold)
+
     async def poll_mt5(self) -> list[Mt5Event]:
-        """Сверка живых MT5-сделок с брокером: отложенный ордер исполнен/снят, позиция закрыта (SL/TP брокера). Один запрос на всё."""
+        """Сверка живых MT5-сделок с брокером и сопровождение планом выхода. Один запрос позиций и один - ордеров на всё."""
         if self.mt5 is None or not self._tracked:
             return []
         positions = await self.mt5.get_positions()
@@ -258,22 +323,55 @@ class ExecutionRouter:
         pending_ids = {str(o.get("id")) for o in orders}
         events: list[Mt5Event] = []
         for symbol, t in list(self._tracked.items()):
+            pos = None
             if t.status == "pending":
                 if t.order_id is not None and t.order_id in pending_ids:
                     continue
                 pos = by_cid.get(t.client_id)
-                if pos is not None:
-                    t.status, t.position_id = "open", pos.position_id
-                    events.append(Mt5Event("opened", t, {"position_id": pos.position_id, "open_price": pos.open_price, "lots": pos.lots}))
-                else:
+                if pos is None:
                     del self._tracked[symbol]
                     events.append(Mt5Event("cancelled", t, {"reason": "expired_or_cancelled"}))
-            elif t.position_id in by_id or (t.client_id in by_cid and t.position_id is None):
-                continue
+                    continue
+                t.status, t.position_id = "open", pos.position_id
+                events.append(Mt5Event("opened", t, {"position_id": pos.position_id, "open_price": pos.open_price, "lots": pos.lots}))
             else:
-                del self._tracked[symbol]
-                events.append(Mt5Event("closed", t, {"reason": "sl_or_tp_at_broker", "position_id": t.position_id}))
+                pos = by_id.get(t.position_id) if t.position_id is not None else by_cid.get(t.client_id)
+                if pos is None:
+                    del self._tracked[symbol]
+                    reason = mt5_exit.vanished_reason(t.exit) if t.exit is not None else "sl_or_tp_at_broker"
+                    events.append(Mt5Event("closed", t, {"reason": reason, "position_id": t.position_id, "source": "broker"}))
+                    continue
+                t.position_id = pos.position_id
+            events += await self._manage(t, pos)
+        self._save()
         return events
+
+    async def _manage(self, t: Mt5Tracked, pos: Any) -> list[Mt5Event]:
+        """План выхода открытой позиции: создать состояние при первом обнаружении, затем шаг сопровождения."""
+        if t.adopted or t.exit_plan is None or t.plan is None or self.mapper is None:
+            return []  # чужая/подхваченная позиция: живёт на SL/TP брокера, бот её не двигает
+        spec = self.mapper.spec(t.symbol)
+        out: list[Mt5Event] = []
+        if t.exit is None:
+            t.exit = mt5_exit.build_exit(t.exit_plan, pos, t.plan.sl, spec)
+            ex = t.exit
+            for price, kind in t.early_ticks:  # тики с момента отправки ордера (до первого опроса) - как если бы состояние было с самого начала
+                mt5_exit.on_tick(ex, Tick(t.symbol, price, 0, kind), self._be_r)
+            t.early_ticks.clear()
+            out.append(Mt5Event("protected", t, {"fill_price": ex.entry, "risk": ex.risk, "lots": ex.initial_lots, "sl": ex.sl0,
+                                                 "levels": [list(v) for v in ex.levels], "runner_lots": ex.runner_lots, "broker_tp": ex.tp_price,
+                                                 "exit_plan": t.exit_plan.describe(), "forced": ex.forced_reason}))
+        ex = t.exit
+        if ex.tp_price is not None and (pos.take_profit is None or abs(pos.take_profit - ex.tp_price) > spec.tick_size / 2):
+            try:  # брокерский TP = последний уровень от ФАКТИЧЕСКОЙ цены входа (MARKET: цена на отправке была справочной)
+                await self.mt5.modify_position(pos.position_id, tp=ex.tp_price)
+            except MarketClosedError:
+                log.warning("%s: TP не выровнен - рынок закрыт, повтор в следующий опрос", t.symbol)
+        for ev in await mt5_exit.step(ex, self.mt5, pos, spec):
+            out.append(Mt5Event(ev.kind, t, ev.detail))
+            if ev.kind == "closed":
+                self._tracked.pop(t.symbol, None)
+        return out
 
     async def cancel_pending_mt5(self) -> list[Mt5Tracked]:
         """Снять неисполненные MT5-лимитки (суточный лимит убытка достигнут: новых входов нет). Открытые позиции не трогаем."""
@@ -285,13 +383,44 @@ class ExecutionRouter:
                 await self.mt5.cancel_order(t.order_id)
                 del self._tracked[symbol]
                 cancelled.append(t)
+        self._save()
         return cancelled
 
+    # ---------------------------------------------------------------------------- состояние на диске и восстановление
+
+    def _save(self) -> None:
+        if self._state_path is None:
+            return
+        text = json.dumps({"version": 1, "trades": [t.to_record() for t in self._tracked.values() if not t.adopted]}, ensure_ascii=False, indent=1) + "\n"
+        if text != self._last_saved:
+            atomic_write_text(self._state_path, text)
+            self._last_saved = text
+
+    def _load(self) -> list[Mt5Tracked]:
+        if self._state_path is None:
+            return []
+        try:
+            raw = self._state_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        try:
+            data = json.loads(raw)
+            if data["version"] != 1:
+                raise ValueError(f"версия {data['version']!r}")
+            self._last_saved = raw
+            return [Mt5Tracked.from_record(r) for r in data["trades"]]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise DataError(f"Файл состояния MT5 {self._state_path} повреждён ({exc}); начало: {raw[:200]!r}") from exc
+
     async def recover_mt5(self) -> list[Mt5Tracked]:
-        """Старт: подхватить позиции и наши отложенные ордера на MT5-символах. Позиция без стопа - `Mt5UnprotectedPosition`."""
+        """Старт: вернуть управление нашими сделками из файла состояния (по clientId / ticket), остальное на MT5-символах подхватить
+        без управления. Позиция без стопа - `Mt5UnprotectedPosition`. Записи без позиции и ордера - в `offline_closed`."""
         if self.mt5 is None or self.mapper is None:
             return []
         internal_of = {self.mapper.broker_name(s): s for s in self.mapper.internals if s in self._mt5_symbols}
+        records = self._load()
+        by_cid = {r.client_id: r for r in records if r.client_id}
+        used: set[str] = set()
         found: list[Mt5Tracked] = []
         for p in await self.mt5.get_positions():
             symbol = internal_of.get(p.symbol)
@@ -301,6 +430,13 @@ class ExecutionRouter:
                 raise Mt5UnprotectedPosition(f"{p.symbol}: на счёте MT5 позиция {p.position_id} ({p.side} {p.lots}) без стопа - Safe Mode, разберите вручную")
             if symbol in self._tracked:
                 raise MetaApiError(f"{symbol}: на счёте MT5 две позиции по символу, а контур допускает одну")
+            rec = by_cid.get(p.client_id or "")
+            if rec is not None and rec.symbol == symbol:
+                rec.status, rec.position_id = "open", p.position_id
+                used.add(rec.client_id)
+                self._tracked[symbol] = rec
+                found.append(rec)
+                continue
             t = Mt5Tracked(f"adopted_{p.position_id}", "adopted", symbol, p.symbol, p.side, Kind.MARKET, p.client_id or "", p.lots, None, p.position_id,
                            "open", adopted=True)
             self._tracked[symbol] = t
@@ -312,16 +448,25 @@ class ExecutionRouter:
                 continue
             if symbol in self._tracked:
                 raise MetaApiError(f"{symbol}: на счёте MT5 позиция и наш отложенный ордер одновременно")
+            rec = by_cid.get(cid)
+            if rec is not None and rec.symbol == symbol:
+                rec.status, rec.order_id = "pending", str(o.get("id"))
+                used.add(cid)
+                self._tracked[symbol] = rec
+                found.append(rec)
+                continue
             side = "BUY" if "BUY" in str(o.get("type", "")) else "SELL"
             t = Mt5Tracked(f"adopted_{o.get('id')}", "adopted", symbol, str(o["symbol"]), side, Kind.LIMIT, cid, float(o.get("volume") or 0.0),
                            str(o.get("id")), None, "pending", adopted=True)
             self._tracked[symbol] = t
             found.append(t)
+        self.offline_closed = [r for r in records if r.client_id not in used]  # позиции и ордера нет: закрыты/сняты, пока бота не было
+        self._save()
         return found
 
 
-async def build_router(binance: BinanceLiveClient | None, *, with_mt5: bool,
-                       risk_params: Mt5RiskParams | None = None) -> ExecutionRouter:
+async def build_router(binance: BinanceLiveClient | None, *, with_mt5: bool, risk_params: Mt5RiskParams | None = None,
+                       plans: Mapping[str, ScaleOutPlan] | None = None, state_path: Path | None = None) -> ExecutionRouter:
     """Собирает маршрутизатор боевого контура. MT5 подключается только при `with_mt5` (ключи MetaApi из окружения, иначе `ConfigError`):
     подключение к аккаунту, загрузка имён и спецификаций `LIVE_MT5_SYMBOLS` (`allow_disabled=True`: закрытый рынок при старте не роняет процесс),
     проверка валюты счёта."""
@@ -331,6 +476,6 @@ async def build_router(binance: BinanceLiveClient | None, *, with_mt5: bool,
     await mt5.connect()
     mapper = SymbolMapper(mt5, allow_disabled=True)
     await mapper.load(config.LIVE_MT5_SYMBOLS)
-    router = ExecutionRouter(binance=binance, mt5=mt5, mapper=mapper, risk_params=risk_params)
+    router = ExecutionRouter(binance=binance, mt5=mt5, mapper=mapper, risk_params=risk_params, plans=plans, state_path=state_path)
     await router.check_mt5_account()
     return router

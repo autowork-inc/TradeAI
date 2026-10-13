@@ -13,7 +13,8 @@ from exchange.mt5_metaapi import MarketClosedError, MetaApiTradeError
 from exchange.router import ExecutionRouter, Mt5UnprotectedPosition, RouteRejected, Venue, build_router
 from orchestrator.types import Direction, Kind
 from tests.exchange.fake_mt5 import FULL, FakeMt5Rpc, make_client, make_mapper, trade_error
-from tests.orchestrator.live_helpers import T0, signal
+from orchestrator.registry import SCALP_1R_PLAN
+from tests.orchestrator.live_helpers import STRATEGY, T0, signal
 from utils.errors import ConfigError
 
 NOW = T0
@@ -88,7 +89,7 @@ def test_market_long_converts_symbol_sizes_lots_and_sends_stop_in_the_same_reque
     assert not isinstance(t, RouteRejected)
     # SL 20 пипсов = 0.0020, потеря на лот 200 USD, риск 1% от 100 000 = 1000 -> 5.00 лота
     (name, symbol, volume, sl, tp, options) = rpc.trades[-1]
-    assert (name, symbol, volume, sl, tp) == ("market_buy", "EURUSD", 5.0, 1.0981, 1.1061)
+    assert (name, symbol, volume, sl, tp) == ("market_buy", "EURUSD", 5.0, 1.0981, None)  # план с runner'ом: брокерского TP нет
     assert options["clientId"] == t.client_id and options["fillingModes"] == ["ORDER_FILLING_FOK"]
     assert t.plan.risk_amount == pytest.approx(1000.0) and t.status == "open" and t.position_id and router.tracked_mt5["EURUSD"] is t
 
@@ -122,9 +123,12 @@ def test_prepare_does_not_send_anything_and_send_is_a_separate_step():
 
 def test_tiny_account_trades_the_minimum_lot_but_below_it_is_rejected():
     rpc = FakeMt5Rpc(equity=200.0, free_margin=200.0)  # риск 2 USD, на лот 200 USD -> ровно 0.01 лота
-    router, client, _ = make_router(rpc)
+    router, client, _ = make_router(rpc, plans={STRATEGY: SCALP_1R_PLAN})  # 100% на +1R: 0.01 лота делится
     t = run(router.open_mt5(eur_long(), NOW))
     assert not isinstance(t, RouteRejected) and t.plan.lots == 0.01 and t.plan.risk_amount <= t.plan.risk_target + 1e-9
+    router_def, *_ = make_router(FakeMt5Rpc(equity=200.0, free_margin=200.0))  # план 50/40/10 на 0.01 лота не делится: другой математикой не торгуем
+    rej_def = run(router_def.open_mt5(eur_long(), NOW))
+    assert isinstance(rej_def, RouteRejected) and rej_def.reason == "plan_not_representable"
     rpc2 = FakeMt5Rpc(equity=100.0, free_margin=100.0)  # риск 1 USD -> 0.005 лота: меньше минимума, вверх не округляем
     router2, *_ = make_router(rpc2)
     rej = run(router2.open_mt5(eur_long(), NOW))
@@ -230,15 +234,16 @@ def test_other_broker_refusals_are_rejections_and_unknown_outcome_is_raised():
 def test_poll_detects_broker_side_close_and_limit_fill():
     router, client, rpc = make_router()
     t = run(router.open_mt5(eur_long(), NOW))
-    assert run(router.poll_mt5()) == []  # позиция на месте
+    assert [e.kind for e in run(router.poll_mt5())] == ["protected"]  # позиция на месте, сопровождение началось
+    assert run(router.poll_mt5()) == []
     rpc.broker_closes(t.position_id, profit=-1000.0)
     (ev,) = run(router.poll_mt5())
     assert ev.kind == "closed" and ev.trade is t and router.tracked_mt5 == {}
     lim = run(router.open_mt5(eur_long(kind=Kind.LIMIT, n=2), NOW))
     assert run(router.poll_mt5()) == [] and lim.status == "pending"
     rpc.fill_pending(lim.order_id)
-    (ev,) = run(router.poll_mt5())
-    assert ev.kind == "opened" and lim.status == "open" and lim.position_id
+    (ev, prot) = run(router.poll_mt5())
+    assert ev.kind == "opened" and prot.kind == "protected" and lim.status == "open" and lim.position_id
     lim2 = run(router.open_mt5(eur_long(kind=Kind.LIMIT, n=3, symbol="XAUUSD", entry=1999.0, sl=1989.0, tp=2029.0), NOW))
     rpc.orders.clear()  # брокер снял ордер (срок вышел)
     kinds = [e.kind for e in run(router.poll_mt5())]
