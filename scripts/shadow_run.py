@@ -7,7 +7,7 @@
 блокировка монеты, свой план управления позицией и своя колонка strategy_id в БД. Для OBI_Breakout добавлен поток стакана
 `depth10@500ms`; ленту (aggTrade) он берёт из того же TickFeed, что и трекер.
 Что делает: свечи 15m (SmcKlineFeed) -> FeatureEngine -> Orchestrator -> VirtualTracker; тики (TickFeed: aggTrade и
-markPrice@1s) двигают виртуальные заявки и позиции. Монеты - config.SHADOW_SYMBOLS (с 2026-10-11: SOL, XRP, LTC, ZEC, ADA, AVAX, DOT, LINK).
+markPrice@1s) двигают виртуальные заявки и позиции. Монеты - config.SHADOW_SYMBOLS (с 2026-10-13: BTC, ETH).
 HTF Bias (2026-10-11): вторым фидом идут свечи H4 (kline_4h + история REST); структура H4 (features/htf.py) присоединяется
 к контексту M15, и автомат SMC не начинает сетап против тренда H4 (шорт при Bullish, лонг при Bearish). Управление
 позицией - Scale Out (50% на +1R с безубытком, 40% на +3R, 10% runner с трейлингом; см. orchestrator/tracker.py).

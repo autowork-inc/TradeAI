@@ -90,7 +90,7 @@ services:
   #   docker compose --env-file .env.shadow up -d --build postgres shadow-run     # то же вручную (live-run не затрагивается)
   #   docker compose --env-file .env.shadow logs -f shadow-run                    # сводка раз в час, события сделок
   #   docker compose --env-file .env.shadow stop shadow-run                       # остановка; журнал - ./data/shadow/shadow_events.jsonl, сделки - в БД
-  # Монеты - config.SHADOW_SYMBOLS (SOL, XRP, LTC, ZEC, ADA, AVAX, DOT, LINK); нужен доступ к fstream.binance.com (публичные данные, ключей нет:
+  # Монеты - config.SHADOW_SYMBOLS (BTC, ETH); нужен доступ к fstream.binance.com (публичные данные, ключей нет:
   # свечи и тики - /market/stream, стакан depth10@500ms для OBI_Breakout - /public/stream).
   # Изоляция от боевого контура:
   #   * профиль `shadow`: обычный `docker compose up -d` его не стартует, а запуск shadow не трогает live-run;

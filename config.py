@@ -64,7 +64,8 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT")
 # 2026-10-11 (решение пользователя): боевой пул вместо тестового (BTC, ETH, DOGE, 1000PEPE). Все 8 контрактов - PERPETUAL/TRADING
 # по публичному exchangeInfo (проверено 2026-10-11). Незакрытые виртуальные сделки по прежним монетам при перезапуске помечаются
 # aborted/process_restart (persistence.pg.PgRecorder.start не смотрит на список монет).
-SHADOW_SYMBOLS = ("SOLUSDT", "XRPUSDT", "LTCUSDT", "ZECUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT")
+# 2026-10-13 (решение пользователя): переход на макро-крипту, только высоколиквидные контракты; альткоины убраны.
+SHADOW_SYMBOLS = ("BTCUSDT", "ETHUSDT")
 # Этап 5: PostgreSQL для Shadow Mode. Пусто - сделки пишутся только в JSONL-журнал (локальная разработка); задано - в БД.
 # Формат postgresql://user:password@host:5432/db. Пароль в логи не попадает (persistence.db.redact_dsn).
 DATABASE_URL = os.environ.get("DATABASE_URL", "")

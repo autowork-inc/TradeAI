@@ -2,3 +2,4 @@ polars>=1.44,<2
 aiohttp>=3.14,<4
 python-dotenv==1.2.4
 asyncpg>=0.30,<1
+metaapi-cloud-sdk>=29.1,<30

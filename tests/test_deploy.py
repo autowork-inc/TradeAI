@@ -208,7 +208,7 @@ def test_dockerfile_and_requirements_cover_persistence():
 def test_shadow_symbols_are_the_combat_pool_without_touching_the_ml_bot_symbols():
     assert config.SYMBOLS == ("BTCUSDT", "ETHUSDT")  # сборщики стакана и live_run читают SYMBOLS: пул ML-контура не меняется
     # 2026-10-11: боевой пул вместо тестового; BTC/ETH остаются только у ML-контура (SYMBOLS)
-    assert config.SHADOW_SYMBOLS == ("SOLUSDT", "XRPUSDT", "LTCUSDT", "ZECUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT")
+    assert config.SHADOW_SYMBOLS == ("BTCUSDT", "ETHUSDT")
     config.validate()
 
 
