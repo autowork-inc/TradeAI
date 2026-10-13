@@ -1,0 +1,19 @@
+# Образ API мониторинга (Этап 6). Контекст сборки - КОРЕНЬ проекта (см. docker-compose.yml: build.dockerfile = api/Dockerfile).
+# Образ намеренно лёгкий и отдельный от торгового: в нём нет кода стратегий, ключей биржи и config.py - API только читает БД.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+COPY api/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY api ./api
+
+# не root: даже при уязвимости в веб-слое у процесса нет прав на запись в файловую систему образа
+RUN useradd --system --uid 10001 --no-create-home app
+USER app
+
+EXPOSE 8000
+CMD ["python", "-m", "api.main"]

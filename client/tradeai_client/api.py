@@ -1,0 +1,166 @@
+"""Клиент API мониторинга: REST (aiohttp) и WebSocket живого состояния с переподключением.
+
+Ключ ходит только в заголовке X-API-Key (не в адресе). Ошибки сервера превращаются в `ApiError` с понятным видом (`kind`), чтобы
+интерфейс показывал причину («неверный ключ», «сервер недоступен»), а не трассировку.
+"""
+
+import asyncio
+import json
+import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
+from urllib.parse import quote
+
+import aiohttp
+
+from tradeai_client.settings import ClientSettings
+
+log = logging.getLogger("tradeai_client.api")
+HEADER = "X-API-Key"
+RECONNECT_DELAYS = (1, 2, 4, 8, 15)  # секунды; после последней задержка остаётся 15 с
+
+
+class ApiError(Exception):
+    """kind: auth (401) | throttled (429) | not_found (404) | server (5xx/503) | network | protocol | bad_request (422)."""
+
+    def __init__(self, kind: str, message: str, status: int | None = None):
+        super().__init__(message)
+        self.kind, self.status = kind, status
+
+
+_HINTS = {
+    "auth": "Неверный API-ключ. Его показывает на сервере: ./deploy/shadow.sh apikey",
+    "throttled": "Слишком много неверных попыток: сервер временно блокирует вход. Подождите минуту.",
+    "network": "Сервер недоступен. Проверьте адрес и порт (по умолчанию http://193.233.75.254:8001), доступ к порту в файрволе сервера и что контейнер api запущен (если задан адрес 127.0.0.1 - что запущен SSH-туннель).",
+    "server": "Сервер API получил ошибку базы данных (shadow-run/postgres недоступны?). Смотрите ./deploy/shadow.sh logs api",
+}
+
+
+def _detail(body: Any) -> str:
+    return str(body.get("detail")) if isinstance(body, dict) and "detail" in body else ""
+
+
+class ApiClient:
+    def __init__(self, settings: ClientSettings, session: aiohttp.ClientSession | None = None, timeout_s: float = 15.0):
+        self._s = settings.validate()
+        self._owns = session is None
+        self._session = session
+        self._timeout = aiohttp.ClientTimeout(total=timeout_s)
+
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        if self._session is None:
+            self._session = aiohttp.ClientSession(timeout=self._timeout)  # ключ добавляется к каждому запросу отдельно (_get)
+        return self._session
+
+    async def close(self) -> None:
+        if self._owns and self._session is not None:
+            await self._session.close()
+
+    async def _get(self, path: str, params: list[tuple[str, str]] | None = None) -> Any:
+        url = self._s.normalized_url + path
+        try:
+            async with self.session.get(url, params=params, headers={HEADER: self._s.api_key}) as resp:
+                try:
+                    body = await resp.json(content_type=None)
+                except (json.JSONDecodeError, aiohttp.ContentTypeError) as exc:
+                    raise ApiError("protocol", f"Сервер вернул не JSON (HTTP {resp.status}): адрес указывает на API?", resp.status) from exc
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+            raise ApiError("network", _HINTS["network"]) from exc
+        if resp.status == 200:
+            return body
+        detail = _detail(body)
+        if resp.status == 401:
+            raise ApiError("auth", _HINTS["auth"], 401)
+        if resp.status == 429:
+            raise ApiError("throttled", _HINTS["throttled"], 429)
+        if resp.status == 404:
+            raise ApiError("not_found", f"Не найдено: {detail or path}", 404)
+        if resp.status == 422:
+            raise ApiError("bad_request", f"Сервер отклонил параметры запроса: {detail}", 422)
+        raise ApiError("server", f"{_HINTS['server']} (HTTP {resp.status}: {detail})", resp.status)
+
+    # ------------------------------------------------------------------------------------------ методы
+
+    async def info(self) -> dict[str, Any]:
+        return await self._get("/api/info")
+
+    async def stats(self, *, coins: list[str] | None = None, strategies: list[str] | None = None, sides: list[str] | None = None,
+                    since: str | None = None, mode: str = "shadow") -> dict[str, Any]:
+        params = [("mode", mode)]
+        params += [("coin", c) for c in coins or []] + [("strategy", s) for s in strategies or []] + [("side", s) for s in sides or []]
+        if since:
+            params.append(("since", since))
+        return await self._get("/api/stats", params)
+
+    async def trades(self, *, limit: int = 50, offset: int = 0, statuses: list[str] | None = None, coins: list[str] | None = None,
+                     strategies: list[str] | None = None, sides: list[str] | None = None, mode: str = "shadow") -> dict[str, Any]:
+        params = [("limit", str(limit)), ("offset", str(offset)), ("mode", mode)]
+        params += [("status", s) for s in statuses or []] + [("coin", c) for c in coins or []]
+        params += [("strategy", s) for s in strategies or []] + [("side", s) for s in sides or []]
+        return await self._get("/api/trades", params)
+
+    async def snapshot(self, trade_id: str) -> dict[str, Any]:
+        return await self._get(f"/api/trades/{quote(trade_id, safe=':')}/snapshot")
+
+
+class LiveStateStream:
+    """WebSocket /ws/live_state: сообщения -> `on_message(dict)`, состояние соединения -> `on_status(kind, text)`.
+
+    Обрыв - переподключение с нарастающей паузой. Неверный ключ (отказ рукопожатия 401/403/429) - остановка без бесконечных попыток:
+    иначе клиент сам исчерпал бы лимит неверных попыток на сервере. `run()` завершается при `stop()` или отказе по ключу.
+    """
+
+    def __init__(self, settings: ClientSettings, on_message: Callable[[dict], Awaitable[None] | None],
+                 on_status: Callable[[str, str], Awaitable[None] | None], session: aiohttp.ClientSession | None = None):
+        self._s = settings.validate()
+        self._on_message, self._on_status = on_message, on_status
+        self._session, self._owns = session, session is None
+        self._stop = asyncio.Event()
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+
+    async def _emit(self, fn: Callable, *args: Any) -> None:
+        res = fn(*args)
+        if asyncio.iscoroutine(res):
+            await res
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._ws is not None and not self._ws.closed:
+            await self._ws.close()
+
+    async def run(self) -> None:
+        session = self._session or aiohttp.ClientSession()
+        failures = 0
+        try:
+            while not self._stop.is_set():
+                try:
+                    await self._emit(self._on_status, "connecting", "Подключение…")
+                    async with session.ws_connect(self._s.ws_url, headers={HEADER: self._s.api_key}, heartbeat=20.0, max_msg_size=2_000_000) as ws:
+                        self._ws, failures = ws, 0
+                        await self._emit(self._on_status, "connected", "Подключено")
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                await self._emit(self._on_message, json.loads(msg.data))
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
+                                break
+                except aiohttp.WSServerHandshakeError as exc:
+                    if exc.status in (401, 403, 429):
+                        kind = "throttled" if exc.status == 429 else "auth"
+                        await self._emit(self._on_status, kind, _HINTS[kind])
+                        return
+                    await self._emit(self._on_status, "error", f"Сервер отклонил соединение (HTTP {exc.status})")
+                except (aiohttp.ClientConnectionError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
+                    log.warning("WebSocket оборван: %s", type(exc).__name__)
+                if self._stop.is_set():
+                    return
+                delay = RECONNECT_DELAYS[min(failures, len(RECONNECT_DELAYS) - 1)]
+                failures += 1
+                await self._emit(self._on_status, "reconnecting", f"Связь потеряна, повтор через {delay} с")
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if self._owns:
+                await session.close()

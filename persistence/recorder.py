@@ -1,0 +1,104 @@
+"""Интерфейс записи сделок (Этап 5) без привязки к БД: трекер и Оркестратор знают только `TradeRecorder`.
+
+Строки - обычные словари с «сырыми» Python-значениями (время - мс с эпохи UTC, числа - float, JSON-поля - dict/list); конвертацию
+в типы БД (TIMESTAMPTZ, NUMERIC, JSONB) делает `persistence.pg.PgRecorder`. Поэтому трекер тестируется без БД
+(`MemoryRecorder`), а при пустом DATABASE_URL работает `NullRecorder` (остаётся только JSONL-журнал).
+
+Методы синхронные и быстрые (кладут запись в очередь): их зовут из обработчика тиков WebSocket, ждать сеть там нельзя.
+Порядок записей сохраняется (FIFO): строка сделки раньше её закрытий и снапшота - иначе внешний ключ не сойдётся.
+"""
+
+from typing import Any, Protocol
+
+from orchestrator.journal import EventLog
+from orchestrator.types import Event
+
+Row = dict[str, Any]
+
+
+class TradeRecorder(Protocol):
+    def trade(self, row: Row) -> None: ...
+    def close_leg(self, row: Row) -> None: ...
+    def snapshot(self, row: Row) -> None: ...
+    def state_event(self, row: Row) -> None: ...
+
+
+class NullRecorder:
+    def trade(self, row: Row) -> None:
+        pass
+
+    def close_leg(self, row: Row) -> None:
+        pass
+
+    def snapshot(self, row: Row) -> None:
+        pass
+
+    def state_event(self, row: Row) -> None:
+        pass
+
+
+class MemoryRecorder:
+    """Для тестов и как эталон формата: хранит последние состояния сделок и все остальные записи."""
+
+    def __init__(self) -> None:
+        self.trades: dict[str, Row] = {}
+        self.trade_history: list[Row] = []
+        self.closes: list[Row] = []
+        self.snapshots: list[Row] = []
+        self.state_events: list[Row] = []
+
+    def trade(self, row: Row) -> None:
+        self.trades[row["id"]] = dict(row)
+        self.trade_history.append(dict(row))
+
+    def close_leg(self, row: Row) -> None:
+        self.closes.append(dict(row))
+
+    def snapshot(self, row: Row) -> None:
+        self.snapshots.append(dict(row))
+
+    def state_event(self, row: Row) -> None:
+        self.state_events.append(dict(row))
+
+
+# ----------------------------------------------------------------------------- журнал событий -> state_events
+
+_TRANSITIONS = {  # kind события -> (из состояния, в состояние)
+    "signal_accepted": ("signal", "accepted"),
+    "trade_registered": ("accepted", "pending"),
+    "limit_filled": ("pending", "open"),
+    "market_filled": ("pending", "open"),
+    "partial_close": ("open", "open"),
+    "be_armed": ("open", "open"),
+    "trail_moved": ("open", "open"),
+    "trade_closed": ("open", "closed"),
+    "trade_cancelled": ("pending", "cancelled"),
+}
+SYSTEM_SOURCES = frozenset({"htf"})  # источники событий, которые не стратегии: у них strategy_id = NULL
+_HEAVY_KEYS = ("geometry", "record")  # геометрия лежит в снапшоте, запись сделки - в trades: в state_events они только раздували бы таблицу
+
+
+def state_event_row(event: Event) -> Row:
+    """Event Оркестратора/трекера -> строка state_events. Переход берётся из таблицы выше; setup_state несёт свой."""
+    detail = {k: v for k, v in event.detail.items() if k not in _HEAVY_KEYS}
+    if event.kind == "setup_state":
+        frm, to = f"{detail.get('side')}:S{detail['from']}", f"{detail.get('side')}:S{detail['to']}"
+    else:
+        frm, to = _TRANSITIONS.get(event.kind, (None, None))
+    reason = detail.get("reason")
+    return {
+        "ts": event.ts_ms, "coin": event.symbol, "strategy": event.strategy,
+        "strategy_id": None if event.strategy in SYSTEM_SOURCES else event.strategy, "signal_id": event.signal_id, "from_state": frm,
+        "to_state": to, "kind": event.kind, "reason": None if reason is None else str(reason), "detail": detail,
+    }
+
+
+class RecordingEventLog:
+    """EventLog, который пишет событие во внутренний журнал (JSONL/память) и в state_events через рекордер."""
+
+    def __init__(self, inner: EventLog, recorder: TradeRecorder):
+        self._inner, self._recorder = inner, recorder
+
+    def emit(self, event: Event) -> None:
+        self._inner.emit(event)
+        self._recorder.state_event(state_event_row(event))

@@ -1,0 +1,183 @@
+services:
+  # Стакан (сбор истории): профиль `collectors`, `docker compose --profile collectors up -d depth-stream`.
+  # Работает постоянно. Выходит каждые 24 ч (плановый разрыв Binance) и при любом сбое;
+  # `restart: always` поднимает заново. При HTTP 429/418 процесс сам выдерживает Retry-After
+  # ДО выхода с кодом 2, поэтому мгновенный перезапуск бан не продлевает.
+  depth-stream:
+    build: .
+    command: ["python", "-m", "collectors.depth_stream"]
+    restart: always
+    profiles: ["collectors"]
+    stop_grace_period: 10s
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+  # Свечи: разовая докачка (запускать вручную или по расписанию):
+  #   docker compose run --rm klines-downloader
+  # Автоперезапуск отключён: после 429/418 повторять нужно осознанно.
+  klines-downloader:
+    build: .
+    command: ["python", "-m", "collectors.klines_downloader"]
+    restart: "no"
+    profiles: ["jobs"]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+  # Боевой контур (Этап 8, testnet): ЕДИНСТВЕННЫЙ сервис без профиля, поэтому `docker compose up -d` стартует его.
+  #   docker compose up -d
+  #   docker compose run --rm live-run python -m scripts.live_run --dry-run --model-path out/ridge_model.json
+  # restart: "no" намеренно: код 4 (Safe Mode) и код 2 (бан) требуют решения оператора, автоперезапуск
+  # только крутил бы цикл «старт - отказ». Защёлка .safe_mode и стейт живут в ./data на хосте.
+  live-run:
+    build: .
+    command: ["python", "-m", "scripts.live_run", "--model-path", "out/ridge_model.json"]
+    restart: "no"
+    stop_grace_period: 15s
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./out:/app/out
+
+  # Фандинг: разовая докачка закрытых ставок (новая запись появляется раз в 8 ч):
+  #   docker compose run --rm funding-downloader
+  # Автоперезапуск отключён по той же причине, что и у свечей. Замок экземпляра свой
+  # (.instance_lock.funding_downloader), поэтому задача не мешает свечам и стакану.
+  funding-downloader:
+    build: .
+    command: ["python", "-m", "collectors.funding_downloader"]
+    restart: "no"
+    profiles: ["jobs"]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+  # PostgreSQL для Shadow Mode (Этап 5): сделки, частичные закрытия, снапшоты, журнал состояний (схема - persistence/schema.py,
+  # применяется самим shadow-run при старте, миграции версионированы). Только в профиле `shadow`: обычный `docker compose up -d`
+  # (live-run) его не трогает.
+  #   * данные - в именованном томе `pgdata` (переживает пересоздание контейнера; `docker compose down` его НЕ удаляет, `down -v` - удалит);
+  #   * порт НАРУЖУ не публикуется: к базе ходит только shadow-run по внутренней сети compose; доступ человека - `deploy/shadow.sh psql`;
+  #   * пароль - POSTGRES_PASSWORD из .env.shadow (создаёт deploy/shadow.sh; в образ и в git он не попадает). Пустой пароль =
+  #     контейнер не стартует (Postgres откажется инициализировать базу), это намеренно;
+  #   * резервная копия: `deploy/shadow.sh backup` (pg_dump в ./backups).
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["shadow"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      POSTGRES_DB: tradeai
+      POSTGRES_USER: tradeai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    shm_size: 128mb
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g  # было 512m / 1 CPU: запись пяти стратегий и аналитические запросы клиента
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradeai -d tradeai"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Shadow Mode (Этап 3, D5): пять параллельных стратегий (SMC_Pro_Trend, SMC_Counter_Trend, OBI_Breakout, ICT_Killzones, VWAP_Reversion) на РЕАЛЬНОМ рынке, ордера не отправляются.
+  #   deploy/shadow.sh up                                     # на сервере: пароль БД, сборка, старт postgres + shadow-run
+  #   docker compose --env-file .env.shadow up -d --build postgres shadow-run     # то же вручную (live-run не затрагивается)
+  #   docker compose --env-file .env.shadow logs -f shadow-run                    # сводка раз в час, события сделок
+  #   docker compose --env-file .env.shadow stop shadow-run                       # остановка; журнал - ./data/shadow/shadow_events.jsonl, сделки - в БД
+  # Монеты - config.SHADOW_SYMBOLS (SOL, XRP, LTC, ZEC, ADA, AVAX, DOT, LINK); нужен доступ к fstream.binance.com (публичные данные, ключей нет:
+  # свечи и тики - /market/stream, стакан depth10@500ms для OBI_Breakout - /public/stream).
+  # Изоляция от боевого контура:
+  #   * профиль `shadow`: обычный `docker compose up -d` его не стартует, а запуск shadow не трогает live-run;
+  #   * env_file НАМЕРЕННО нет: контейнер не получает ключей API (и .env с профилем testnet) - торговать не может физически;
+  #   * BINANCE_PROFILE=mainnet: публичные данные реального рынка (REST /klines, /time и WS /market/stream);
+  #   * свой каталог данных (TRADING_DATA_DIR): собственные .instance_lock, .ban_lock, журнал - замки live-run не пересекаются;
+  #   * падение любой стратегии роняет только этот контейнер (R1: Fail-Fast); перезапуск on-failure, не более 20 подряд быстрых
+  #     падений (код 3 - ошибка конфигурации, код 2 - бан биржи: бесконечный цикл «старт-отказ» не нужен);
+  #   * файловая система только для чтения, без привилегий; лимитов памяти и CPU нет (сервер 6 ядер / 8 ГБ).
+  shadow-run:
+    build: .
+    command: ["python", "-m", "scripts.shadow_run"]
+    profiles: ["shadow"]
+    restart: on-failure:20
+    stop_grace_period: 15s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BINANCE_PROFILE: mainnet
+      TRADING_DATA_DIR: /app/data/shadow
+      TRADING_LOG_DIR: /app/logs/shadow
+      # Этап 5: сделки пишутся в PostgreSQL (внутренняя сеть compose, имя хоста = имя сервиса). Пароль - только из .env.shadow.
+      DATABASE_URL: postgresql://tradeai:${POSTGRES_PASSWORD:-}@postgres:5432/tradeai
+    volumes:
+      - ./data/shadow:/app/data/shadow
+      - ./logs/shadow:/app/logs/shadow
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Лимитов памяти и CPU НЕТ (2026-10-11, решение пользователя: сервер 6 ядер / 8 ГБ NVMe, пять стратегий и поток стакана).
+    healthcheck:
+      # «пульс»: основной цикл дописывает метку времени каждую секунду; свежее 120 с - процесс жив и получает данные
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(0 if time.time() - os.path.getmtime('/app/data/shadow/.shadow_heartbeat') < 120 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # API мониторинга (Этап 6): читает PostgreSQL и отдаёт данные клиенту Flet (папка client/ на ПК, на сервер не попадает).
+  #   REST: /api/stats, /api/trades, /api/trades/{id}/snapshot;  WebSocket: /ws/live_state;  /api/health - без ключа (healthcheck).
+  # Безопасность (api/security.py):
+  #   * все данные - только с заголовком X-API-Key (значение API_KEY из .env.shadow, его создаёт deploy/shadow.sh; пустой ключ =
+  #     контейнер не стартует, код 3);
+  #   * порт по умолчанию публикуется на ВСЕХ интерфейсах сервера: 0.0.0.0:8001 -> 8000 в контейнере (на сервере порт 8000 занят
+  #     другой программой, поэтому наружу 8001). Клиент ходит напрямую http://<IP сервера>:8001, SSH-туннель не нужен. ВАЖНО: это
+  #     обычный HTTP, ключ X-API-Key идёт по сети открытым текстом - защита только ключом и троттлингом перебора. Вернуть доступ
+  #     только с самого сервера (SSH-туннель): API_BIND=127.0.0.1 в .env.shadow; сменить порт: API_PORT=... там же;
+  #   * БД - только чтение (default_transaction_read_only), ключей биржи в контейнере нет, файловая система только для чтения,
+  #     каталог ./data/shadow смонтирован :ro (из него читается «пульс» shadow-run), пользователь не root.
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    profiles: ["shadow"]
+    restart: on-failure:20
+    stop_grace_period: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://tradeai:${POSTGRES_PASSWORD:-}@postgres:5432/tradeai
+      API_KEY: ${API_KEY:-}
+      SHADOW_DATA_DIR: /app/data/shadow
+    ports:
+      - "${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000"
+    volumes:
+      - ./data/shadow:/app/data/shadow:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pgdata:

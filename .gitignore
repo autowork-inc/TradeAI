@@ -1,0 +1,52 @@
+# --- Секреты (никогда не коммитить) ---
+.env
+.env.*
+!.env.example
+!.env.shadow.example
+*.pem
+*.key
+*.ppk
+id_rsa*
+id_ed25519*
+settings.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- Виртуальные окружения ---
+.venv/
+venv/
+env/
+**/.venv/
+
+# --- Базы данных, данные, логи, артефакты ---
+data/
+logs/
+out/
+backups/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.jsonl
+pgdata/
+
+# --- Сборки и архивы ---
+*.tar.gz
+*.tar.gz.sha256
+*.zip
+client/build/
+client/dist/
+dist/
+build/
+
+# --- Служебные файлы IDE/ОС ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,223 @@
+{
+ "type": "state",
+ "server_time": "2026-10-10T15:37:00.595Z",
+ "shadow": {
+  "heartbeat_age_s": 32.75954747200012,
+  "alive": true
+ },
+ "coins": [
+  {
+   "coin": "BTCUSDT",
+   "setups": [
+    {
+     "strategy": "smc",
+     "side": "short",
+     "state": 2,
+     "label": "свип + FVG сформирован",
+     "reject": null,
+     "reject_label": null,
+     "since": "2026-10-10T15:34:57.677Z"
+    },
+    {
+     "strategy": "smc",
+     "side": "long",
+     "state": 0,
+     "label": "нет сетапа",
+     "reject": null,
+     "reject_label": null,
+     "since": null
+    }
+   ],
+   "positions": [
+    {
+     "id": "smc:BTCUSDT:15m:1791639000000:long",
+     "strategy_name": "smc",
+     "strategy_id": "smc",
+     "coin": "BTCUSDT",
+     "side": "long",
+     "kind": "limit",
+     "mode": "shadow",
+     "status": "pending_limit",
+     "qty": 0.856264,
+     "remaining_frac": 1.0,
+     "signal_time": "2026-10-10T13:45:01.200Z",
+     "entry_time": null,
+     "exit_time": null,
+     "planned_entry": 96143.9112317747,
+     "entry_price": null,
+     "exit_price": null,
+     "sl": 96027.12486727978,
+     "tp": 96494.27032525948,
+     "stop_price": 96027.12486727978,
+     "risk": 116.78636449492478,
+     "risk_amount": 100.0,
+     "pnl": null,
+     "fees": null,
+     "r_multiple": null,
+     "gross_r": null,
+     "mfe_r": null,
+     "mae_r": null,
+     "exit_reason": null,
+     "be_armed": false,
+     "gap_affected": false
+    }
+   ]
+  },
+  {
+   "coin": "ETHUSDT",
+   "setups": [
+    {
+     "strategy": "smc",
+     "side": "short",
+     "state": 0,
+     "label": "нет сетапа",
+     "reject": null,
+     "reject_label": null,
+     "since": null
+    },
+    {
+     "strategy": "smc",
+     "side": "long",
+     "state": 1,
+     "label": "свип ликвидности",
+     "reject": null,
+     "reject_label": null,
+     "since": "2026-10-10T15:34:58.677Z"
+    }
+   ],
+   "positions": []
+  },
+  {
+   "coin": "DOGEUSDT",
+   "setups": [
+    {
+     "strategy": "smc",
+     "side": "short",
+     "state": 3,
+     "label": "CHoCH отклонён",
+     "reject": "exposure",
+     "reject_label": "плечо выше потолка",
+     "since": "2026-10-10T15:34:59.677Z"
+    },
+    {
+     "strategy": "smc",
+     "side": "long",
+     "state": 0,
+     "label": "нет сетапа",
+     "reject": null,
+     "reject_label": null,
+     "since": null
+    }
+   ],
+   "positions": [
+    {
+     "id": "smc:DOGEUSDT:15m:1791628200000:short",
+     "strategy_name": "smc",
+     "strategy_id": "smc",
+     "coin": "DOGEUSDT",
+     "side": "short",
+     "kind": "limit",
+     "mode": "shadow",
+     "status": "open",
+     "qty": 120142.327136,
+     "remaining_frac": 0.5,
+     "signal_time": "2026-10-10T10:45:01.200Z",
+     "entry_time": "2026-10-10T11:15:40.000Z",
+     "exit_time": null,
+     "planned_entry": 0.18430102942379092,
+     "entry_price": 0.18430102942379092,
+     "exit_price": null,
+     "sl": 0.18513337554512943,
+     "tp": 0.1818039910597754,
+     "stop_price": 0.18430102942379092,
+     "risk": 0.0008323461213385064,
+     "risk_amount": 100.0,
+     "pnl": null,
+     "fees": 1.2,
+     "r_multiple": 0.49,
+     "gross_r": null,
+     "mfe_r": 3.2,
+     "mae_r": -0.6,
+     "exit_reason": null,
+     "be_armed": true,
+     "gap_affected": false
+    }
+   ]
+  },
+  {
+   "coin": "1000PEPEUSDT",
+   "setups": [
+    {
+     "strategy": "smc",
+     "side": "short",
+     "state": 0,
+     "label": "нет сетапа",
+     "reject": null,
+     "reject_label": null,
+     "since": null
+    },
+    {
+     "strategy": "smc",
+     "side": "long",
+     "state": 0,
+     "label": "нет сетапа",
+     "reject": null,
+     "reject_label": null,
+     "since": null
+    }
+   ],
+   "positions": []
+  }
+ ],
+ "events": [
+  {
+   "ts": "2026-10-10T15:34:59.677Z",
+   "coin": "DOGEUSDT",
+   "strategy": "smc",
+   "signal_id": null,
+   "kind": "setup_state",
+   "from_state": "short:S2",
+   "to_state": "short:S3",
+   "reason": null,
+   "detail": {
+    "to": 3,
+    "from": 2,
+    "side": "short",
+    "reject": "exposure"
+   },
+   "strategy_id": "smc"
+  },
+  {
+   "ts": "2026-10-10T15:34:58.677Z",
+   "coin": "ETHUSDT",
+   "strategy": "smc",
+   "signal_id": null,
+   "kind": "setup_state",
+   "from_state": "long:S0",
+   "to_state": "long:S1",
+   "reason": null,
+   "detail": {
+    "to": 1,
+    "from": 0,
+    "side": "long"
+   },
+   "strategy_id": "smc"
+  },
+  {
+   "ts": "2026-10-10T15:34:57.677Z",
+   "coin": "BTCUSDT",
+   "strategy": "smc",
+   "signal_id": null,
+   "kind": "setup_state",
+   "from_state": "short:S1",
+   "to_state": "short:S2",
+   "reason": null,
+   "detail": {
+    "to": 2,
+    "from": 1,
+    "side": "short"
+   },
+   "strategy_id": "smc"
+  }
+ ]
+}

@@ -1,0 +1,166 @@
+"""PgRecorder: асинхронная запись сделок в PostgreSQL через очередь (FIFO) и одну задачу-писатель.
+
+Почему очередь. Трекер вызывается из обработчика тиков WebSocket (десятки сообщений в секунду): ждать сеть БД там нельзя. Методы
+рекордера кладут строку в очередь и возвращаются; писатель выполняет записи строго по порядку, каждую в своей транзакции.
+
+Fail-Fast (R1). Ошибка записи (БД упала, строка не подходит под схему, NaN в JSON) завершает задачу-писателя исключением; основной
+цикл зовёт `check()` каждую секунду и падает вместе с ней, Docker перезапускает процесс. Переполнение очереди (БД «зависла») - тоже
+ошибка, а не молчаливая потеря. Что НЕ защищено: записи, лежавшие в очереди в момент падения процесса (доли секунды при нормальной
+работе); JSONL-журнал остаётся вторым источником. Для боевого LIVE (R7) перед отправкой ордера нужен `await flush()`.
+
+Состояние Shadow в памяти при перезапуске не восстанавливается (О17), поэтому `start()` помечает «висящие» сделки прошлого
+запуска (заявка/позиция) как `aborted`/`process_restart` - в БД не остаётся вечно открытых виртуальных позиций.
+"""
+
+import asyncio
+import json
+import logging
+import math
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any
+
+from persistence import schema
+from persistence.db import Database
+from persistence.recorder import Row
+from utils.errors import DataError, TradingInfraError
+
+log = logging.getLogger("persistence.pg")
+
+_TABLES = {
+    "trade": (schema.UPSERT_TRADE, schema.TRADE_COLUMNS),
+    "close": (schema.INSERT_CLOSE, schema.CLOSE_COLUMNS),
+    "snapshot": (schema.INSERT_SNAPSHOT, schema.SNAPSHOT_COLUMNS),
+    "state": (schema.INSERT_STATE_EVENT, schema.STATE_EVENT_COLUMNS),
+}
+
+
+def convert(kind: str, value: Any, name: str = "?") -> Any:
+    """Значение строки -> тип asyncpg. None остаётся None (NULL). Нечисловое/нефинитное в числе, NaN в JSON - DataError."""
+    if value is None:
+        return None
+    if kind == "ts":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise DataError(f"{name}: время должно быть числом (мс), получено {value!r}")
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    if kind == "num":
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)) or not math.isfinite(value):
+            raise DataError(f"{name}: число ожидается конечным, получено {value!r}")
+        return value if isinstance(value, Decimal) else Decimal(repr(value))
+    if kind == "bool":
+        if not isinstance(value, bool):
+            raise DataError(f"{name}: ожидается bool, получено {value!r}")
+        return value
+    if kind == "json":
+        try:
+            return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise DataError(f"{name}: значение не записывается в JSON ({exc})") from exc
+    if kind == "text":
+        if not isinstance(value, str):
+            raise DataError(f"{name}: ожидается строка, получено {value!r}")
+        return value
+    raise DataError(f"Неизвестный тип колонки {kind!r}")
+
+
+def to_args(row: Row, columns: dict[str, str]) -> list[Any]:
+    extra = set(row) - set(columns)
+    if extra:
+        raise DataError(f"Лишние поля в строке БД: {sorted(extra)}")
+    return [convert(kind, row.get(name), name) for name, kind in columns.items()]
+
+
+class PgRecorder:
+    def __init__(self, db: Database, *, mode: str = "shadow", max_queue: int = 20_000):
+        self._db, self._mode = db, mode
+        self._queue: asyncio.Queue[tuple[str, Row]] = asyncio.Queue(maxsize=max_queue)
+        self._task: asyncio.Task | None = None
+        self.written = 0
+
+    async def start(self) -> list[str]:
+        """Миграции, пометка висящих сделок прошлого запуска, запуск писателя. -> id помеченных сделок."""
+        await self._db.migrate()
+        orphans = await self._db.fetch(schema.ABORT_ORPHANS, self._mode)
+        for r in orphans:
+            log.warning("Сделка %s (%s) прошлого запуска помечена aborted: состояние Shadow в памяти не восстанавливается", r["id"], f"{r['coin']}_{r['strategy_id']}")
+        self._task = asyncio.create_task(self._writer(), name="pg_recorder")
+        return [r["id"] for r in orphans]
+
+    # ------------------------------------------------------------------------------ интерфейс TradeRecorder
+
+    def trade(self, row: Row) -> None:
+        self._put("trade", row)
+
+    def close_leg(self, row: Row) -> None:
+        self._put("close", row)
+
+    def snapshot(self, row: Row) -> None:
+        self._put("snapshot", row)
+
+    def state_event(self, row: Row) -> None:
+        self._put("state", row)
+
+    def _put(self, kind: str, row: Row) -> None:
+        if self._task is None:
+            raise TradingInfraError("PgRecorder не запущен (вызовите start())")
+        self.check()
+        try:
+            self._queue.put_nowait((kind, row))
+        except asyncio.QueueFull as exc:
+            raise TradingInfraError(f"Очередь записи в БД переполнена ({self._queue.maxsize}): БД не успевает или зависла") from exc
+
+    # ---------------------------------------------------------------------------------------- управление
+
+    def check(self) -> None:
+        """Поднимает исключение упавшего писателя (вызывать из основного цикла)."""
+        if self._task is not None and self._task.done():
+            if self._task.cancelled():
+                raise TradingInfraError("Задача записи в БД отменена")
+            exc = self._task.exception()
+            if exc is not None:
+                raise exc
+            raise TradingInfraError("Задача записи в БД завершилась без ошибки: так быть не должно")
+
+    @property
+    def pending(self) -> int:
+        return self._queue.qsize()
+
+    async def flush(self, timeout: float = 30.0) -> None:
+        """Дождаться, пока всё поставленное в очередь записано (или писатель упал)."""
+        assert self._task is not None
+        joiner = asyncio.create_task(self._queue.join())
+        try:
+            done, _ = await asyncio.wait({joiner, self._task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            joiner.cancel()
+        self.check()
+        if not done:
+            raise TradingInfraError(f"Очередь записи в БД не опустела за {timeout} с (осталось {self.pending})")
+
+    async def aclose(self, timeout: float = 10.0) -> None:
+        """Штатное завершение: дописать очередь, остановить писателя, закрыть пул. Ошибки писателя поднимаются."""
+        try:
+            if self._task is not None and not self._task.done():
+                await self.flush(timeout)
+            elif self._task is not None:
+                self.check()  # писатель уже умер: поднимаем его ошибку, а не прячем её за штатным закрытием
+        finally:
+            if self._task is not None:
+                self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
+            await self._db.close()
+
+    # ------------------------------------------------------------------------------------------- писатель
+
+    async def _writer(self) -> None:
+        while True:
+            kind, row = await self._queue.get()
+            try:
+                sql, columns = _TABLES[kind]
+                args = to_args(row, columns)
+                async with self._db.pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute(sql, *args)
+                self.written += 1
+            finally:
+                self._queue.task_done()

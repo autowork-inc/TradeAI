@@ -1,0 +1,6 @@
+# Для разработки, тестов и сборки .exe (см. README.md)
+-r requirements.txt
+flet-cli==1.0.4        # команда `flet pack`
+pyinstaller>=6,<7
+pytest>=8
+flet-web==1.0.4        # необязательно: `flet run --web` - просмотр интерфейса в браузере при разработке

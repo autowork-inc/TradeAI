@@ -1,0 +1,80 @@
+"""Вкладка Dashboard: карточки монет с состоянием автомата сетапа SMC (S0..S4), открытые заявки/позиции и лента событий. Живые данные - WebSocket."""
+
+import flet as ft
+
+from tradeai_client import fmt
+from tradeai_client.ui import widgets as w
+
+SIDE_ARROW = {"short": "▼", "long": "▲"}
+
+
+class DashboardView:
+    def __init__(self) -> None:
+        self._cards = ft.Row(wrap=True, spacing=14, run_spacing=14, vertical_alignment=ft.CrossAxisAlignment.START)
+        self._events = ft.Column(spacing=2, tight=True)
+        self._head = ft.Row(spacing=12)
+        self._error = ft.Container(visible=False)
+        self.control = ft.Column(
+            [self._head, self._error, self._cards, ft.Container(height=6), w.title("События", 15), w.card(self._events, padding=10)],
+            expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
+        self.show_placeholder("Ожидание данных от сервера…")
+
+    # ------------------------------------------------------------------------------------------ состояние
+
+    def show_placeholder(self, text: str) -> None:
+        self._cards.controls = [w.label(text, size=14)]
+
+    def on_message(self, msg: dict) -> None:
+        kind = msg.get("type")
+        if kind == "state":
+            self._error.visible = False
+            self._render(msg)
+        elif kind == "error":
+            text = {"database_unavailable": "Сервер не может прочитать базу данных (postgres/shadow-run недоступны?).",
+                    "data_integrity": "В базе найдены нечитаемые данные: смотрите лог API (deploy/shadow.sh logs api)."}.get(msg.get("detail"), str(msg.get("detail")))
+            self._error.content, self._error.visible = w.banner(text, w.RED, ft.Icons.ERROR), True
+        # ping - просто подтверждение, что связь жива
+
+    def _render(self, s: dict) -> None:
+        shadow = s["shadow"]
+        alive, age = shadow["alive"], shadow["heartbeat_age_s"]
+        pulse = ("Shadow: нет данных о пульсе" if alive is None else
+                 f"Shadow жив · пульс {fmt.fmt_age(age)}" if alive else f"Shadow НЕ отвечает · пульс {fmt.fmt_age(age)}")
+        pulse_color = w.MUTED if alive is None else (w.GREEN if alive else w.RED)
+        self._head.controls = [w.dot(pulse_color), ft.Text(pulse, color=pulse_color, size=13, weight=ft.FontWeight.W_600),
+                               ft.Text(f"обновлено {fmt.fmt_local(s['server_time'])}", color=w.MUTED, size=12)]
+        self._cards.controls = [self._coin_card(c) for c in s["coins"]]
+        self._events.controls = [self._event_row(e) for e in s["events"]] or [w.label("Событий пока нет")]
+
+    # ------------------------------------------------------------------------------------------ карточки
+
+    def _coin_card(self, c: dict) -> ft.Control:
+        active = max((x["state"] for x in c["setups"]), default=0)
+        rows = [ft.Row([ft.Text(fmt.coin_short(c["coin"]), size=20, weight=ft.FontWeight.W_700, color=w.TEXT),
+                        ft.Text(c["coin"], size=11, color=w.MUTED)], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END)]
+        for s in c["setups"]:
+            color = fmt.STATE_COLORS[s["state"]]
+            rows.append(ft.Row([w.dot(color), ft.Text(f"{SIDE_ARROW[s['side']]} {fmt.SIDE_RU[s['side']]}", size=12, color=w.MUTED, width=64),
+                                ft.Column([ft.Text(fmt.setup_text(s), size=13, color=w.TEXT if s["state"] else w.MUTED, weight=ft.FontWeight.W_600 if s["state"] else None),
+                                           ft.Text(f"с {fmt.fmt_local(s['since'])}" if s["since"] else "", size=11, color=w.MUTED, visible=bool(s["since"]))],
+                                          spacing=0, expand=True)], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+        for p in c["positions"]:
+            rows.append(ft.Divider(height=8, color=w.BORDER))
+            rows.append(self._position(p))
+        return w.card(ft.Column(rows, spacing=8), width=370, border_color=fmt.STATE_COLORS[active] if active else w.BORDER)
+
+    @staticmethod
+    def _position(p: dict) -> ft.Control:
+        head = [w.pill(fmt.STATUS_RU.get(p["status"], p["status"]), w.ACCENT, filled=True), w.pill(fmt.STRATEGY_RU.get(p["strategy_name"], p["strategy_name"]), w.MUTED),
+                w.pill(fmt.SIDE_RU[p["side"]], w.GREEN if p["side"] == "long" else w.RED)]
+        if p["be_armed"]:
+            head.append(w.pill("БУ", w.AMBER))
+        lines = [f"Вход: {fmt.fmt_price(p['entry_price'] if p['entry_price'] is not None else p['planned_entry'])}   SL: {fmt.fmt_price(p['sl'])}   TP: {fmt.fmt_price(p['tp'])}"]
+        if p["status"] == "open":
+            lines.append(f"Остаток: {(p['remaining_frac'] or 0) * 100:.0f}%   Реализовано: {fmt.fmt_r(p['r_multiple'])}")
+        return ft.Column([ft.Row(head, spacing=6, wrap=True), *[ft.Text(x, size=12, color=w.MUTED) for x in lines]], spacing=4)
+
+    @staticmethod
+    def _event_row(e: dict) -> ft.Control:
+        return ft.Row([ft.Text(fmt.fmt_local(e["ts"]), size=12, color=w.MUTED, width=82), ft.Text(fmt.coin_short(e["coin"]), size=12, weight=ft.FontWeight.W_600, width=70),
+                       ft.Text(fmt.event_text(e), size=12, color=w.TEXT, expand=True, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)], spacing=8)

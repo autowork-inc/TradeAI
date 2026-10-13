@@ -1,0 +1,100 @@
+"""Форматирование и подписи для интерфейса (без Flet: тестируется отдельно)."""
+
+from datetime import datetime, timezone
+
+DASH = "—"
+STATUS_RU = {"closed": "Закрыта", "open": "Открыта", "pending_limit": "Ждёт лимитку", "pending_market": "Ждёт рынок",
+             "cancelled": "Отменена", "aborted": "Прервана"}
+EXIT_RU = {"sl": "Стоп", "be": "Безубыток", "trail": "Трейлинг", "tp": "Тейк", "timeout": "Таймаут", "process_restart": "Перезапуск",
+           "scale_1r": "+1R (50%)", "scale_2r": "+2R", "scale_3r": "+3R (40%)", "ttl": "Срок заявки", "invalidated": "Сетап отменён", "tp_before_fill": "Цена ушла до входа"}
+SIDE_RU = {"long": "Лонг", "short": "Шорт"}
+# strategy_id -> подпись. Пять стратегий мульти-стратегийного Shadow (с 2026-10-11) и прежние имена («smc», «breakout») - сделки до этой даты.
+STRATEGY_RU = {"SMC_Pro_Trend": "SMC Pro Trend", "SMC_Counter_Trend": "SMC Counter Trend", "OBI_Breakout": "OBI Breakout",
+               "ICT_Killzones": "ICT Killzones", "VWAP_Reversion": "VWAP Reversion", "smc": "SMC Swing (до 11.10)", "breakout": "Breakout (до 11.10)"}
+STRATEGY_OPTIONS = [("all", "Все")] + [(k, v) for k, v in STRATEGY_RU.items()]  # для фильтров History / Statistics
+# монеты Shadow с 2026-10-11 и прежний пул (BTC, ETH, DOGE, 1000PEPE): сделки по нему остаются в БД
+COINS = ("SOLUSDT", "XRPUSDT", "LTCUSDT", "ZECUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "BTCUSDT", "ETHUSDT", "DOGEUSDT", "1000PEPEUSDT")
+STATE_COLORS = {0: "#5b6372", 1: "#d9a441", 2: "#4c9be8", 3: "#c0622f", 4: "#2bb673"}  # S0..S4
+
+GREEN, RED, MUTED, TEXT = "#2bb673", "#e5534b", "#8b93a3", "#e6e9ef"
+
+
+def fmt_r(v: float | None, digits: int = 2) -> str:
+    return DASH if v is None else f"{v:+.{digits}f} R".replace("-", "−")
+
+
+def fmt_pct(v: float | None, digits: int = 1) -> str:
+    return DASH if v is None else f"{v * 100:.{digits}f}%"
+
+
+def fmt_pf(item: dict) -> str:
+    """Profit Factor: без убыточных сделок он не определён - показываем ∞ (если есть прибыльные) или тире."""
+    pf = item.get("profit_factor")
+    if pf is not None:
+        return f"{pf:.2f}"
+    return "∞" if item.get("profit_factor_infinite") else DASH
+
+
+def fmt_price(v: float | None) -> str:
+    if v is None:
+        return DASH
+    s = f"{v:.4f}" if abs(v) >= 1 else f"{v:.8f}"
+    return s.rstrip("0").rstrip(".") or "0"
+
+
+def parse_iso(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def to_ms(s: str | None) -> int | None:
+    dt = parse_iso(s)
+    return None if dt is None else int(dt.timestamp() * 1000)
+
+
+def fmt_local(s: str | None) -> str:
+    """ISO UTC -> локальное время ПК: 10.10 15:45."""
+    dt = parse_iso(s)
+    return DASH if dt is None else dt.astimezone().strftime("%d.%m %H:%M")
+
+
+def fmt_age(seconds: float | None) -> str:
+    if seconds is None:
+        return DASH
+    if seconds < 90:
+        return f"{seconds:.0f} с назад"
+    return f"{seconds / 60:.0f} мин назад" if seconds < 5400 else f"{seconds / 3600:.1f} ч назад"
+
+
+def r_color(v: float | None) -> str:
+    return MUTED if v is None or v == 0 else (GREEN if v > 0 else RED)
+
+
+def coin_short(coin: str) -> str:
+    """1000PEPEUSDT -> 1000PEPE; BTCUSDT -> BTC."""
+    return coin[:-4] if coin.endswith("USDT") else coin
+
+
+def setup_text(setup: dict) -> str:
+    """Строка состояния автомата: «S2 · свип + FVG сформирован» (+ причина отказа для S3)."""
+    base = f"S{setup['state']} · {setup['label']}"
+    return f"{base} ({setup['reject_label']})" if setup.get("reject_label") else base
+
+
+EVENT_RU = {
+    "setup_state": "Автомат сетапа", "signal_accepted": "Сигнал принят", "skipped_due_to_lock": "Пропущен: монета занята",
+    "skipped_stale": "Пропущен: свеча устарела", "skipped_risk": "Отказ по риску", "trade_registered": "Заявка зарегистрирована",
+    "limit_filled": "Лимитка исполнена", "market_filled": "Рыночный вход", "partial_close": "Частичное закрытие", "be_armed": "Стоп в безубыток",
+    "trail_moved": "Трейлинг подтянут", "trade_closed": "Сделка закрыта", "trade_cancelled": "Заявка отменена", "data_gap": "Разрыв данных",
+}
+
+
+def event_text(e: dict) -> str:
+    """Одна строка ленты событий: «Автомат сетапа: short:S1 → short:S2», «Заявка отменена (ttl)»."""
+    base = EVENT_RU.get(e["kind"], e["kind"])
+    if e["kind"] == "setup_state" and e.get("from_state") and e.get("to_state"):
+        extra = e.get("detail", {}).get("reject")
+        return f"{base}: {e['from_state']} → {e['to_state']}" + (f" ({extra})" if extra else "")
+    reason = e.get("reason") or e.get("detail", {}).get("reason")
+    return f"{base} ({reason})" if reason else base

@@ -1,0 +1,30 @@
+{
+ "server_time": "2026-10-10T15:37:08.429Z",
+ "mode": "shadow",
+ "schema_version": 1,
+ "coins": [
+  "BTCUSDT",
+  "ETHUSDT",
+  "DOGEUSDT",
+  "1000PEPEUSDT"
+ ],
+ "counts": {
+  "closed": 9,
+  "closed_gap_affected": 0,
+  "open": 1,
+  "pending": 1,
+  "cancelled": 1,
+  "aborted": 0
+ },
+ "shadow": {
+  "heartbeat_age_s": 40.59355115890503,
+  "alive": true
+ },
+ "strategies": [
+  "ICT_Killzones",
+  "OBI_Breakout",
+  "SMC_Counter_Trend",
+  "SMC_Pro_Trend",
+  "VWAP_Reversion"
+ ]
+}

@@ -1,0 +1,358 @@
+{
+ "overall": {
+  "trades": 9,
+  "wins": 5,
+  "losses": 4,
+  "flat": 0,
+  "win_rate": 0.5555555555555556,
+  "net_r": 1.7299999999999998,
+  "avg_r": 0.19222222222222218,
+  "avg_r_stderr": 0.46634446549072195,
+  "gross_profit_r": 5.92,
+  "gross_loss_r": 4.19,
+  "profit_factor": 1.412887828162291,
+  "profit_factor_infinite": false,
+  "best_r": 2.55,
+  "worst_r": -1.06,
+  "max_drawdown_r": 1.6599999999999997
+ },
+ "by_coin": [
+  {
+   "coin": "DOGEUSDT",
+   "trades": 2,
+   "wins": 1,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.5,
+   "net_r": 1.4999999999999998,
+   "avg_r": 0.7499999999999999,
+   "avg_r_stderr": 1.7999999999999998,
+   "gross_profit_r": 2.55,
+   "gross_loss_r": 1.05,
+   "profit_factor": 2.4285714285714284,
+   "profit_factor_infinite": false,
+   "best_r": 2.55,
+   "worst_r": -1.05,
+   "rank": 1
+  },
+  {
+   "coin": "BTCUSDT",
+   "trades": 3,
+   "wins": 2,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.6666666666666666,
+   "net_r": 1.4100000000000001,
+   "avg_r": 0.47000000000000003,
+   "avg_r_stderr": 0.9214662229295223,
+   "gross_profit_r": 2.45,
+   "gross_loss_r": 1.04,
+   "profit_factor": 2.355769230769231,
+   "profit_factor_infinite": false,
+   "best_r": 2.14,
+   "worst_r": -1.04,
+   "rank": 2
+  },
+  {
+   "coin": "ETHUSDT",
+   "trades": 2,
+   "wins": 1,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.5,
+   "net_r": -0.5700000000000001,
+   "avg_r": -0.28500000000000003,
+   "avg_r_stderr": 0.755,
+   "gross_profit_r": 0.47,
+   "gross_loss_r": 1.04,
+   "profit_factor": 0.45192307692307687,
+   "profit_factor_infinite": false,
+   "best_r": 0.47,
+   "worst_r": -1.04,
+   "rank": 3
+  },
+  {
+   "coin": "1000PEPEUSDT",
+   "trades": 2,
+   "wins": 1,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.5,
+   "net_r": -0.6100000000000001,
+   "avg_r": -0.30500000000000005,
+   "avg_r_stderr": 0.755,
+   "gross_profit_r": 0.44999999999999996,
+   "gross_loss_r": 1.06,
+   "profit_factor": 0.4245283018867924,
+   "profit_factor_infinite": false,
+   "best_r": 0.44999999999999996,
+   "worst_r": -1.06,
+   "rank": 4
+  }
+ ],
+ "by_strategy": [
+  {
+   "strategy": "breakout",
+   "trades": 2,
+   "wins": 1,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.5,
+   "net_r": 1.4899999999999998,
+   "avg_r": 0.7449999999999999,
+   "avg_r_stderr": 1.805,
+   "gross_profit_r": 2.55,
+   "gross_loss_r": 1.06,
+   "profit_factor": 2.4056603773584904,
+   "profit_factor_infinite": false,
+   "best_r": 2.55,
+   "worst_r": -1.06
+  },
+  {
+   "strategy": "smc",
+   "trades": 7,
+   "wins": 4,
+   "losses": 3,
+   "flat": 0,
+   "win_rate": 0.5714285714285714,
+   "net_r": 0.23999999999999994,
+   "avg_r": 0.034285714285714274,
+   "avg_r_stderr": 0.4460560350388254,
+   "gross_profit_r": 3.37,
+   "gross_loss_r": 3.13,
+   "profit_factor": 1.0766773162939298,
+   "profit_factor_infinite": false,
+   "best_r": 2.14,
+   "worst_r": -1.05
+  }
+ ],
+ "by_side": [
+  {
+   "side": "short",
+   "trades": 5,
+   "wins": 4,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.8,
+   "net_r": 2.32,
+   "avg_r": 0.46399999999999997,
+   "avg_r_stderr": 0.506217344625804,
+   "gross_profit_r": 3.37,
+   "gross_loss_r": 1.05,
+   "profit_factor": 3.2095238095238097,
+   "profit_factor_infinite": false,
+   "best_r": 2.14,
+   "worst_r": -1.05
+  },
+  {
+   "side": "long",
+   "trades": 4,
+   "wins": 1,
+   "losses": 3,
+   "flat": 0,
+   "win_rate": 0.25,
+   "net_r": -0.5900000000000003,
+   "avg_r": -0.14750000000000008,
+   "avg_r_stderr": 0.8991790237025475,
+   "gross_profit_r": 2.55,
+   "gross_loss_r": 3.14,
+   "profit_factor": 0.8121019108280254,
+   "profit_factor_infinite": false,
+   "best_r": 2.55,
+   "worst_r": -1.06
+  }
+ ],
+ "by_coin_strategy": [
+  {
+   "coin": "1000PEPEUSDT",
+   "strategy": "breakout",
+   "trades": 1,
+   "wins": 0,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.0,
+   "net_r": -1.06,
+   "avg_r": -1.06,
+   "avg_r_stderr": null,
+   "gross_profit_r": 0,
+   "gross_loss_r": 1.06,
+   "profit_factor": 0.0,
+   "profit_factor_infinite": false,
+   "best_r": -1.06,
+   "worst_r": -1.06
+  },
+  {
+   "coin": "1000PEPEUSDT",
+   "strategy": "smc",
+   "trades": 1,
+   "wins": 1,
+   "losses": 0,
+   "flat": 0,
+   "win_rate": 1.0,
+   "net_r": 0.44999999999999996,
+   "avg_r": 0.44999999999999996,
+   "avg_r_stderr": null,
+   "gross_profit_r": 0.44999999999999996,
+   "gross_loss_r": 0,
+   "profit_factor": null,
+   "profit_factor_infinite": true,
+   "best_r": 0.44999999999999996,
+   "worst_r": 0.44999999999999996
+  },
+  {
+   "coin": "BTCUSDT",
+   "strategy": "smc",
+   "trades": 3,
+   "wins": 2,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.6666666666666666,
+   "net_r": 1.4100000000000001,
+   "avg_r": 0.47000000000000003,
+   "avg_r_stderr": 0.9214662229295223,
+   "gross_profit_r": 2.45,
+   "gross_loss_r": 1.04,
+   "profit_factor": 2.355769230769231,
+   "profit_factor_infinite": false,
+   "best_r": 2.14,
+   "worst_r": -1.04
+  },
+  {
+   "coin": "DOGEUSDT",
+   "strategy": "breakout",
+   "trades": 1,
+   "wins": 1,
+   "losses": 0,
+   "flat": 0,
+   "win_rate": 1.0,
+   "net_r": 2.55,
+   "avg_r": 2.55,
+   "avg_r_stderr": null,
+   "gross_profit_r": 2.55,
+   "gross_loss_r": 0,
+   "profit_factor": null,
+   "profit_factor_infinite": true,
+   "best_r": 2.55,
+   "worst_r": 2.55
+  },
+  {
+   "coin": "DOGEUSDT",
+   "strategy": "smc",
+   "trades": 1,
+   "wins": 0,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.0,
+   "net_r": -1.05,
+   "avg_r": -1.05,
+   "avg_r_stderr": null,
+   "gross_profit_r": 0,
+   "gross_loss_r": 1.05,
+   "profit_factor": 0.0,
+   "profit_factor_infinite": false,
+   "best_r": -1.05,
+   "worst_r": -1.05
+  },
+  {
+   "coin": "ETHUSDT",
+   "strategy": "smc",
+   "trades": 2,
+   "wins": 1,
+   "losses": 1,
+   "flat": 0,
+   "win_rate": 0.5,
+   "net_r": -0.5700000000000001,
+   "avg_r": -0.28500000000000003,
+   "avg_r_stderr": 0.755,
+   "gross_profit_r": 0.47,
+   "gross_loss_r": 1.04,
+   "profit_factor": 0.45192307692307687,
+   "profit_factor_infinite": false,
+   "best_r": 0.47,
+   "worst_r": -1.04
+  }
+ ],
+ "by_exit_reason": [
+  {
+   "reason": "sl",
+   "trades": 4,
+   "net_r": -4.19
+  },
+  {
+   "reason": "trail",
+   "trades": 2,
+   "net_r": 4.6899999999999995
+  },
+  {
+   "reason": "be",
+   "trades": 2,
+   "net_r": 0.9199999999999999
+  },
+  {
+   "reason": "timeout",
+   "trades": 1,
+   "net_r": 0.31
+  }
+ ],
+ "equity_curve": [
+  {
+   "ts": "2026-10-09T07:45:40.000Z",
+   "cum_r": 2.14
+  },
+  {
+   "ts": "2026-10-09T09:45:40.000Z",
+   "cum_r": 1.1
+  },
+  {
+   "ts": "2026-10-09T13:15:40.000Z",
+   "cum_r": 1.57
+  },
+  {
+   "ts": "2026-10-09T15:45:40.000Z",
+   "cum_r": 0.53
+  },
+  {
+   "ts": "2026-10-09T19:45:40.000Z",
+   "cum_r": 3.08
+  },
+  {
+   "ts": "2026-10-09T21:45:40.000Z",
+   "cum_r": 2.0300000000000002
+  },
+  {
+   "ts": "2026-10-10T01:15:40.000Z",
+   "cum_r": 2.4800000000000004
+  },
+  {
+   "ts": "2026-10-10T03:45:40.000Z",
+   "cum_r": 1.4200000000000004
+  },
+  {
+   "ts": "2026-10-10T06:45:40.000Z",
+   "cum_r": 1.7300000000000004
+  }
+ ],
+ "best_coin": "DOGEUSDT",
+ "worst_coin": "1000PEPEUSDT",
+ "counts": {
+  "closed": 9,
+  "closed_gap_affected": 0,
+  "open": 1,
+  "pending": 1,
+  "cancelled": 1,
+  "aborted": 0
+ },
+ "significance": {
+  "min_trades": 200,
+  "enough": false,
+  "note": "Закрыто 9 сделок (нужно порядка 200+): знак Net R пока статистически не отличим от нуля, выводов о прибыльности делать нельзя."
+ },
+ "filters": {
+  "mode": "shadow",
+  "coin": null,
+  "strategy": null,
+  "side": null,
+  "since": null
+ },
+ "server_time": "2026-10-10T15:37:08.448Z"
+}
