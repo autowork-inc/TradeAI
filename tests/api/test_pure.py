@@ -284,3 +284,22 @@ def test_price_scale_matches_the_client():
     spec.loader.exec_module(client_fmt)
     for v in (97123.456, 2539.6203, 150.0, 31.457, 1.08234567, 0.45, 0.0123, 0.0000043, -12.5):
         assert fmt_price(v) == client_fmt.fmt_price(v), v
+
+
+def test_heartbeat_takes_the_freshest_of_shadow_and_live_dirs(tmp_path):
+    import os
+    import time
+
+    from api.livestate import freshest_heartbeat_age_s
+    from api.settings import load_settings
+
+    shadow, live = tmp_path / "shadow", tmp_path / "live"
+    shadow.mkdir(), live.mkdir()
+    assert freshest_heartbeat_age_s([shadow, live, None]) is None  # пульса нет нигде
+    for d, age in ((shadow, 900), (live, 5)):
+        f = d / ".shadow_heartbeat"
+        f.write_text("x")
+        os.utime(f, (time.time() - age, time.time() - age))
+    assert 3 < freshest_heartbeat_age_s([shadow, live]) < 20 and freshest_heartbeat_age_s([shadow, None]) > 800
+    s = load_settings({"DATABASE_URL": DSN, "API_KEY": KEY, "SHADOW_DATA_DIR": str(shadow), "LIVE_DATA_DIR": str(live)})
+    assert s.live_data_dir == live and load_settings({"DATABASE_URL": DSN, "API_KEY": KEY}).live_data_dir is None

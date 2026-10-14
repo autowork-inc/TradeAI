@@ -9,6 +9,7 @@
 #   ./deploy/shadow.sh stats     # сводка из БД: сделки по стратегии/монете/причине выхода, сумма R
 #   ./deploy/shadow.sh backup    # pg_dump в ./backups/tradeai-<время>.sql.gz
 #   ./deploy/shadow.sh psql      # консоль SQL
+#   ./deploy/shadow.sh up-live   # БОЕВОЙ режим (shadow-live вместо shadow-run): реальные ордера на Binance, см. docker-compose.yml и .env.shadow.example
 #   ./deploy/shadow.sh down      # остановить (данные БД и журнал СОХРАНЯЮТСЯ)
 #
 # Что скрипт НЕ делает: не трогает live-run и ключи биржи (в архиве Shadow их нет и быть не должно), не публикует порт БД наружу,
@@ -82,7 +83,13 @@ case "$cmd" in
         check_docker
         [ -f docker-compose.yml ] && [ -f Dockerfile ] || { echo "ОШИБКА: запускайте из каталога проекта (нет docker-compose.yml / Dockerfile)." >&2; exit 1; }
         ensure_env
-        mkdir -p data/shadow logs/shadow backups
+        mkdir -p data/shadow logs/shadow data/live logs/live backups
+        # shadow-run и shadow-live не должны работать вместе (общая БД): режим Shadow сначала гасит боевой контур
+        # (открытые позиции остаются на бирже под защитой стоп-ордеров, но без сопровождения - безубыток/трейлинг не двигаются)
+        if $DC --profile live ps --status running --services 2>/dev/null | grep -qx shadow-live; then
+            echo "ВНИМАНИЕ: останавливаю боевой shadow-live (открытые позиции останутся на бирже под защитой стопов, без сопровождения)." >&2
+            $DC --profile live stop shadow-live
+        fi
         echo "== Сборка и запуск: $SERVICES"
         $DC up -d --build $SERVICES
         echo "== Жду готовности (до 3 минут)"
@@ -100,6 +107,37 @@ case "$cmd" in
         echo
         echo "Готово. Дальше: ./deploy/shadow.sh status | logs | stats | backup | apikey"
         ;;
+    up-live)
+        check_docker
+        [ -f docker-compose.yml ] && [ -f Dockerfile ] || { echo "ОШИБКА: запускайте из каталога проекта (нет docker-compose.yml / Dockerfile)." >&2; exit 1; }
+        ensure_env
+        grep -q '^BINANCE_API_KEY=.\{10,\}' "$ENV_FILE" && grep -q '^BINANCE_API_SECRET=.\{10,\}' "$ENV_FILE"             || { echo "ОШИБКА: в $ENV_FILE нет BINANCE_API_KEY / BINANCE_API_SECRET." >&2; exit 1; }
+        if grep -q '^USE_TESTNET=true' "$ENV_FILE"; then
+            echo "Режим: TESTNET (USE_TESTNET=true): ордера на testnet.binancefuture.com."
+        else
+            grep -q '^LIVE_ALLOW_MAINNET=true' "$ENV_FILE"                 || { echo "ОШИБКА: боевой режим на mainnet = реальные деньги. Добавьте в $ENV_FILE строку LIVE_ALLOW_MAINNET=true (или USE_TESTNET=true для testnet)." >&2; exit 1; }
+            echo "Режим: MAINNET, РЕАЛЬНЫЕ ДЕНЬГИ. Маржа/плечо/лимиты - из $ENV_FILE (по умолчанию 10 x 10, убыток за сутки 50 USDT, не более 4 позиций)."
+            if [ "${2:-}" != "--yes" ]; then
+                printf 'Введите REAL чтобы продолжить: '; read -r answer
+                [ "$answer" = "REAL" ] || { echo "Отменено." >&2; exit 1; }
+            fi
+        fi
+        mkdir -p data/shadow logs/shadow data/live logs/live backups
+        echo "== Останавливаю shadow-run (shadow-live заменяет его: общая БД, двух процессов быть не должно)"
+        $DC stop shadow-run 2>/dev/null || true
+        echo "== Сборка и запуск: postgres api shadow-live"
+        $DC --profile live up -d --build postgres api shadow-live
+        i=0
+        while [ "$i" -lt 36 ]; do
+            state="$($DC --profile live ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null || true)"
+            echo "$state" | grep -q '^shadow-live running' && break
+            echo "$state" | grep -q '^shadow-live exited' && { echo "ОШИБКА: shadow-live остановился:" >&2; $DC --profile live logs --tail 40 shadow-live >&2; exit 1; }
+            i=$((i + 1)); sleep 5
+        done
+        $DC --profile live ps
+        $DC --profile live logs --tail 25 shadow-live
+        echo "Готово. Лог: ./deploy/shadow.sh logs shadow-live. Вернуться в Shadow: ./deploy/shadow.sh up"
+        ;;
     status)
         check_docker; ensure_env
         $DC ps
@@ -114,10 +152,10 @@ case "$cmd" in
         check_docker; ensure_env
         svc="${2:-shadow-run}"
         case "$svc" in
-            shadow-run|api|postgres) ;;
-            *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | api | postgres)" >&2; exit 2 ;;
+            shadow-run|shadow-live|api|postgres) ;;
+            *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | shadow-live | api | postgres)" >&2; exit 2 ;;
         esac
-        $DC logs -f --tail 50 "$svc"
+        $DC --profile live logs -f --tail 50 "$svc"
         ;;
     apikey)
         check_docker; ensure_env
@@ -157,11 +195,11 @@ case "$cmd" in
         ;;
     down)
         check_docker; ensure_env
-        $DC stop api shadow-run postgres
+        $DC --profile live stop api shadow-run shadow-live postgres
         echo "Остановлено. Данные БД (том pgdata) и журнал ./data/shadow сохранены. Запуск: ./deploy/shadow.sh up"
         ;;
     *)
-        echo "Использование: $0 {up|status|logs [сервис]|stats|backup|psql|apikey|down}" >&2
+        echo "Использование: $0 {up|up-live|status|logs [сервис]|stats|backup|psql|apikey|down}" >&2
         exit 2
         ;;
 esac

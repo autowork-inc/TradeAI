@@ -22,6 +22,7 @@ class Settings:
     database_url: str
     api_key: str
     shadow_data_dir: Path  # откуда читается «пульс» shadow-run (.shadow_heartbeat); каталог монтируется только для чтения
+    live_data_dir: Path | None = None  # каталог боевого контура shadow-live (его «пульс» тоже читается; работает либо shadow-run, либо shadow-live)
     coins: tuple[str, ...] = DEFAULT_COINS
     poll_interval_s: float = 2.0  # как часто хаб опрашивает БД для WebSocket
     keepalive_s: float = 10.0  # полное состояние уходит клиентам не реже, чем раз в столько секунд (в т.ч. «пульс» shadow-run)
@@ -55,6 +56,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         raise ApiConfigError(f"Числовая настройка API задана неверно: {exc}") from exc
     return Settings(
         database_url=e.get("DATABASE_URL", ""), api_key=e.get("API_KEY", ""),
-        shadow_data_dir=Path(e.get("SHADOW_DATA_DIR", "/app/data/shadow")), coins=coins, poll_interval_s=poll, port=port,
+        shadow_data_dir=Path(e.get("SHADOW_DATA_DIR", "/app/data/shadow")),
+        live_data_dir=Path(e["LIVE_DATA_DIR"]) if e.get("LIVE_DATA_DIR") else None, coins=coins, poll_interval_s=poll, port=port,
         host=e.get("API_HOST", "0.0.0.0"),  # в контейнере - все интерфейсы (наружу порт публикует compose); локально задайте 127.0.0.1
     )

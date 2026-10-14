@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, WebSo
 from fastapi.responses import JSONResponse
 from pydantic import StringConstraints
 
-from api.livestate import SETUP_STRATEGIES, LiveStateHub, heartbeat_age_s
+from api.livestate import SETUP_STRATEGIES, LiveStateHub, freshest_heartbeat_age_s
 from api.reason import build_reason
 from api.security import FailureThrottle, check_key
 from api.serialize import DataIntegrityError, close_out, event_out, iso, trade_out
@@ -156,7 +156,7 @@ def create_app(settings: Settings) -> FastAPI:
             version = await conn.fetchval("SELECT max(version) FROM schema_migrations")
             rows = await conn.fetch(COUNTS_SQL, mode)
             seen = [r["strategy_id"] for r in await conn.fetch(STRATEGIES_SQL, mode)]
-        hb = heartbeat_age_s(settings.shadow_data_dir)
+        hb = freshest_heartbeat_age_s([settings.shadow_data_dir, settings.live_data_dir])
         return {"server_time": iso(datetime.now(timezone.utc)), "mode": mode, "schema_version": version, "coins": list(settings.coins),
                 "strategies": sorted({*DEFAULT_STRATEGIES, *seen}),  # настроенные + все, по которым есть сделки (в т.ч. прежние smc / breakout)
                 "counts": counts_from_rows(rows),

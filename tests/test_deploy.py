@@ -130,7 +130,7 @@ def service_block(text: str, name: str) -> str:
 def test_postgres_service_is_private_persistent_and_healthchecked():
     text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     pg = service_block(text, "postgres")
-    assert "image: postgres:16" in pg and 'profiles: ["shadow"]' in pg
+    assert "image: postgres:16" in pg and 'profiles: ["shadow", "live"]' in pg
     assert "ports:" not in pg and "network_mode" not in pg  # порт БД наружу не публикуется
     assert "pgdata:/var/lib/postgresql/data" in pg and "pg_isready" in pg and "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD" in pg
     assert "\nvolumes:\n  pgdata:" in text
@@ -168,7 +168,7 @@ def test_server_script_has_valid_syntax_and_no_windows_line_endings():
 def test_api_service_is_read_only_published_on_8001_and_keyed():
     text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     api = service_block(text, "api")
-    assert "dockerfile: api/Dockerfile" in api and 'profiles: ["shadow"]' in api and "condition: service_healthy" in api
+    assert "dockerfile: api/Dockerfile" in api and 'profiles: ["shadow", "live"]' in api and "condition: service_healthy" in api
     # прямой доступ по IP сервера (решение пользователя 2026-10-11); наружу 8001, т.к. 8000 на сервере занят; внутри контейнера 8000
     assert '"${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000"' in api
     assert "API_KEY: ${API_KEY" in api and "DATABASE_URL: postgresql://tradeai:${POSTGRES_PASSWORD" in api
@@ -219,3 +219,29 @@ def test_validate_rejects_duplicate_or_lowercase_shadow_symbols(monkeypatch):
     monkeypatch.setattr(config, "SHADOW_SYMBOLS", ("btcusdt",))
     with pytest.raises(ConfigError, match="SHADOW_SYMBOLS"):
         config.validate()
+
+
+def test_shadow_live_is_isolated_fixed_size_and_does_not_touch_shadow_run():
+    text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    live, shadow = service_block(text, "shadow-live"), service_block(text, "shadow-run")
+    assert 'profiles: ["live"]' in live and "TRADE_MODE: live" in live and "env_file" not in live and "read_only: true" in live
+    # свои каталоги состояния, логов и пульса - не пересекаются с shadow-run
+    assert "TRADING_DATA_DIR: /app/data/live" in live and "TRADING_LOG_DIR: /app/logs/live" in live
+    assert "./data/live:/app/data/live" in live and "./logs/live:/app/logs/live" in live and "/app/data/live/.shadow_heartbeat" in live
+    assert "data/shadow" not in live and "logs/shadow" not in live
+    # фиксированный размер и лимиты
+    for needle in ("LIVE_MARGIN_USDT: ${LIVE_MARGIN_USDT:-10}", "LIVE_LEVERAGE: ${LIVE_LEVERAGE:-10}",
+                   "LIVE_DAILY_LOSS_LIMIT_USDT: ${LIVE_DAILY_LOSS_LIMIT_USDT:-50}", "LIVE_MAX_OPEN_POSITIONS: ${LIVE_MAX_OPEN_POSITIONS:-4}",
+                   "LIVE_ALLOW_MAINNET: ${LIVE_ALLOW_MAINNET:-false}"):
+        assert needle in live, needle
+    # shadow-run остался прежним: ни ключей биржи, ни live
+    assert "BINANCE_API" not in shadow and "TRADE_MODE" not in shadow and "/app/data/shadow/.shadow_heartbeat" in shadow
+    api = service_block(text, "api")
+    assert 'profiles: ["shadow", "live"]' in api and "./data/live:/app/data/live:ro" in api and "LIVE_DATA_DIR: /app/data/live" in api
+    assert "BINANCE_API" not in api
+
+
+def test_shadow_script_has_up_live_with_guards():
+    sh = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8")
+    assert "up-live)" in sh and "LIVE_ALLOW_MAINNET=true" in sh and "stop shadow-run" in sh and "BINANCE_API_SECRET" in sh
+    assert "env_file" not in sh

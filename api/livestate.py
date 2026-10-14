@@ -64,6 +64,12 @@ def heartbeat_age_s(data_dir: Path, now: float | None = None) -> float | None:
     return max(0.0, (time.time() if now is None else now) - path.stat().st_mtime)
 
 
+def freshest_heartbeat_age_s(dirs: "list[Path | None]", now: float | None = None) -> float | None:
+    """Самый свежий «пульс» среди каталогов процесса (shadow-run и shadow-live пишут в РАЗНЫЕ каталоги; работает один из них)."""
+    ages = [a for a in (heartbeat_age_s(d, now) for d in dirs if d is not None) if a is not None]
+    return min(ages) if ages else None
+
+
 def parse_setup_row(row: Any) -> dict[str, Any]:
     m = _STATE_RE.match(row["to_state"] or "")
     if m is None or m.group(1) != row["side"]:
@@ -143,7 +149,7 @@ class LiveStateHub:
                 setups = await conn.fetch(SETUP_SQL, self._s.state_window_days)
                 positions = await conn.fetch(POSITIONS_SQL, "shadow")
                 events = await conn.fetch(EVENTS_SQL, EVENTS_LIMIT)
-        hb = heartbeat_age_s(self._s.shadow_data_dir)
+        hb = freshest_heartbeat_age_s([self._s.shadow_data_dir, self._s.live_data_dir])
         return build_state(self._s.coins, setups, positions, events, hb, datetime.now(timezone.utc))
 
     async def refresh(self) -> None:
