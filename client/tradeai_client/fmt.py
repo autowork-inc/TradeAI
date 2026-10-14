@@ -12,8 +12,9 @@ SIDE_RU = {"long": "Лонг", "short": "Шорт"}
 STRATEGY_RU = {"SMC_Pro_Trend": "SMC Pro Trend", "SMC_Counter_Trend": "SMC Counter Trend", "OBI_Breakout": "OBI Breakout",
                "ICT_Killzones": "ICT Killzones", "VWAP_Reversion": "VWAP Reversion", "smc": "SMC Swing (до 11.10)", "breakout": "Breakout (до 11.10)"}
 STRATEGY_OPTIONS = [("all", "Все")] + [(k, v) for k, v in STRATEGY_RU.items()]  # для фильтров History / Statistics
-# монеты Shadow с 2026-10-11 и прежний пул (BTC, ETH, DOGE, 1000PEPE): сделки по нему остаются в БД
-COINS = ("SOLUSDT", "XRPUSDT", "LTCUSDT", "ZECUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "BTCUSDT", "ETHUSDT", "DOGEUSDT", "1000PEPEUSDT")
+# монеты фильтров: текущий пул Shadow (config.SHADOW_SYMBOLS, с 2026-10-14) и прежние пулы - сделки по ним остаются в БД
+COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "EURUSD", "XAUUSD", "XAGUSD",
+         "LTCUSDT", "ZECUSDT", "DOTUSDT", "DOGEUSDT", "1000PEPEUSDT")
 STATE_COLORS = {0: "#5b6372", 1: "#d9a441", 2: "#4c9be8", 3: "#c0622f", 4: "#2bb673"}  # S0..S4
 
 GREEN, RED, MUTED, TEXT = "#2bb673", "#e5534b", "#8b93a3", "#e6e9ef"
@@ -35,11 +36,14 @@ def fmt_pf(item: dict) -> str:
     return "∞" if item.get("profit_factor_infinite") else DASH
 
 
+def price_digits(price: float) -> int:
+    """Знаков после запятой по величине цены: ≥100 (BTC, ETH, SOL, золото) - 2; ≥10 (AVAX, LINK, серебро) - 3; ≥1 - 5 (EURUSD, XRP, ADA); мельче - ещё больше."""
+    a = abs(price)
+    return 2 if a >= 100 else 3 if a >= 10 else 5 if a >= 0.1 else 6 if a >= 0.01 else 8
+
+
 def fmt_price(v: float | None) -> str:
-    if v is None:
-        return DASH
-    s = f"{v:.4f}" if abs(v) >= 1 else f"{v:.8f}"
-    return s.rstrip("0").rstrip(".") or "0"
+    return DASH if v is None else f"{v:.{price_digits(v)}f}"
 
 
 def parse_iso(s: str | None) -> datetime | None:

@@ -144,3 +144,22 @@ def test_broken_snapshot_is_rejected_loudly(fx, mutate, msg):
     mutate(snap)
     with pytest.raises(ChartDataError, match=msg):
         spec_for(snap)
+
+
+def test_panel_is_structured_and_colored_by_result(fx):
+    snap = fx("snapshot_smc_short.json")
+    sp = spec_for(snap)
+    panel = sp["panel"]
+    assert panel["result"]["tone"] == "good" and panel["result"]["pnl"] == "+214.00 USDT" and len(panel["result"]["closes"]) == 3
+    assert panel["reason"]["steps"] and ["Таймфрейм", "15m"] in panel["reason"]["facts"]
+    assert panel["review"] is not None and 1 <= panel["review"]["score"] <= 10
+    assert sp["digits"] == 2  # BTC: цены без десятитысячных
+    assert all(h["width"] >= 2 for h in sp["hlines"])
+    assert next(h for h in sp["hlines"] if h["text"].startswith("SL"))["width"] == 3
+    loss = copy.deepcopy(snap)
+    loss["trade"].update(pnl=-100.0, r_multiple=-1.0)
+    assert spec_for(loss)["panel"]["result"]["tone"] == "bad"
+
+
+def test_review_absent_for_open_trade(fx):
+    assert spec_for(fx("snapshot_open.json"))["panel"]["review"] is None

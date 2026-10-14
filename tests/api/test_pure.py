@@ -198,7 +198,7 @@ def test_breakout_reason_and_unknown_strategy_fallback():
 
 
 def test_price_formatting_handles_pepe_and_btc():
-    assert fmt_price(97123.456789) == "97123.4568" and fmt_price(0.0000043) == "0.0000043" and fmt_price(1.5) == "1.5" and fmt_price(None) == "—"
+    assert fmt_price(97123.456789) == "97123.46" and fmt_price(0.0000043) == "0.00000430" and fmt_price(1.5) == "1.50000" and fmt_price(None) == "—"
 
 
 # ================================================================================== живое состояние
@@ -273,3 +273,14 @@ def test_api_strategy_list_matches_the_registry_and_reasons_exist_for_every_stra
                              meta, [])
             assert r["title"].endswith("· SOLUSDT") or "SOLUSDT" in r["title"]
             assert "не описана" not in r["summary"] and r["summary"] and r["facts"], name  # у каждой из пяти - своя причина входа, а не общий текст
+
+
+def test_price_scale_matches_the_client():
+    """Образ API не содержит клиента: шкала знаков продублирована в api/reason.py и client/tradeai_client/fmt.py - здесь они сверяются."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("client_fmt", Path(__file__).parents[2] / "client" / "tradeai_client" / "fmt.py")
+    client_fmt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(client_fmt)
+    for v in (97123.456, 2539.6203, 150.0, 31.457, 1.08234567, 0.45, 0.0123, 0.0000043, -12.5):
+        assert fmt_price(v) == client_fmt.fmt_price(v), v

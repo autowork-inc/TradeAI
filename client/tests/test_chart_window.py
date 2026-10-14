@@ -59,3 +59,11 @@ def test_marker_times_are_on_the_helper_grid(fx):
     grid = {t for t, _ in spec["helper"]}
     assert all(m["t"] in grid for m in spec["trade_markers"]) and all(m["t"] in {b["t"] for b in spec["bars"]} for m in spec["setup_markers"])
     assert isinstance(pd.Timestamp(spec["bars"][0]["t"], unit="ms"), pd.Timestamp)
+
+
+def test_side_panel_is_plain_html_without_python_callbacks(fx):
+    """Клик по тексту панели не должен вызывать событий в Python: таблицы lightweight-charts (Lib.Table) убраны, подписи идут через textContent."""
+    _, spec = make_spec(fx)
+    html = static_html(spec)
+    assert "Lib.Table" not in html and "tradeai-panel" in html and "Разбор сделки" in html and "textContent" in html
+    assert "+214.00 USDT" in html

@@ -105,7 +105,8 @@ def test_formatting():
     assert fmt.fmt_pct(0.5556) == "55.6%" and fmt.fmt_pct(None) == fmt.DASH
     assert fmt.fmt_pf({"profit_factor": 1.4129}) == "1.41" and fmt.fmt_pf({"profit_factor": None, "profit_factor_infinite": True}) == "∞"
     assert fmt.fmt_pf({"profit_factor": None, "profit_factor_infinite": False}) == fmt.DASH
-    assert fmt.fmt_price(97123.456789) == "97123.4568" and fmt.fmt_price(0.0000043) == "0.0000043" and fmt.fmt_price(2.5) == "2.5"
+    assert fmt.fmt_price(97123.456789) == "97123.46" and fmt.fmt_price(2539.6203) == "2539.62" and fmt.fmt_price(0.0000043) == "0.00000430"
+    assert fmt.fmt_price(1.08234567) == "1.08235" and fmt.fmt_price(31.45678) == "31.457" and fmt.fmt_price(2.5) == "2.50000" and fmt.fmt_price(None) == fmt.DASH
     assert fmt.coin_short("1000PEPEUSDT") == "1000PEPE" and fmt.coin_short("BTCUSDT") == "BTC"
     assert fmt.to_ms("2026-10-10T12:00:00.000Z") == 1_791_633_600_000 and fmt.to_ms(None) is None
     assert fmt.fmt_age(5) == "5 с назад" and fmt.fmt_age(600) == "10 мин назад" and fmt.fmt_age(7200) == "2.0 ч назад" and fmt.fmt_age(None) == fmt.DASH

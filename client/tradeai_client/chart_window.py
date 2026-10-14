@@ -18,17 +18,13 @@ from typing import Any
 BG, TEXT, GRID = "#0e1117", "#c9d1d9", "rgba(255,255,255,0.05)"
 UP, DOWN = "#26a69a", "#ef5350"
 INVISIBLE = "rgba(0,0,0,0)"
-INNER_WIDTH = 0.69  # доля окна под сам график; остальное - боковая панель с текстом (так задумано в lightweight-charts: inner_width + таблицы справа)
-PANEL_WIDTH = 0.30
+INNER_WIDTH = 0.64  # доля окна под сам график; остальное - боковая HTML-панель (карточки «Результат», «Разбор сделки», «Причина входа»)
+PANEL_WIDTH_PCT = 36
 
 
 def _ts(ms: int):
     import pandas as pd
     return pd.Timestamp(int(ms), unit="ms")  # наивное время = UTC; ns-разрешение: lightweight-charts делит на 10**9 (pandas 3 даёт us и ломает ось)
-
-
-def _precision(price: float) -> int:
-    return 2 if price >= 100 else 4 if price >= 1 else 7
 
 
 def _frame(rows: list[dict[str, Any]], columns: dict[str, str]):
@@ -48,7 +44,7 @@ def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
     chart.candle_style(up_color=UP, down_color=DOWN, border_up_color=UP, border_down_color=DOWN, wick_up_color=UP, wick_down_color=DOWN)
     chart.volume_config(up_color="rgba(38,166,154,0.35)", down_color="rgba(239,83,80,0.35)")
     chart.legend(visible=True, ohlc=True, percent=False, lines=False, font_size=12)
-    chart.precision(_precision(bars[-1]["c"]))
+    chart.precision(spec["digits"])
     chart.set(_frame(bars, {"open": "o", "high": "h", "low": "l", "close": "c", "volume": "v"}))
 
     # невидимый ряд на всей сетке: продлевает ось времени за последнюю свечу и держит маркеры/линии вне диапазона свечей
@@ -59,7 +55,7 @@ def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
     for box in spec["boxes"]:
         chart.box(_ts(box["t1"]), box["p1"], _ts(box["t2"]), box["p2"], color=box["color"], fill_color=box["fill"], width=1)
     for h in spec["hlines"]:
-        chart.horizontal_line(h["price"], color=h["color"], width=h["width"], style=h["style"], text=h["text"])
+        chart.horizontal_line(h["price"], color=h["color"], width=h["width"], style=h["style"], text=h["text"], axis_label_visible=True)
     for i, seg in enumerate(spec["segments"]):
         line = chart.create_line(name=f"seg{i}", color=seg["color"], style="dashed", width=1, price_line=False, price_label=False)
         line.set(pd.DataFrame({"time": pd.DatetimeIndex([_ts(seg["t1"]), _ts(max(seg["t2"], seg["t1"] + spec["interval_ms"]))]).astype("datetime64[ns]"),
@@ -79,18 +75,55 @@ def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
     _panels(chart, spec)
 
 
+_PANEL_CSS = """
+#tradeai-panel{position:fixed;top:0;right:0;bottom:0;width:%(w)d%%;box-sizing:border-box;padding:12px;overflow-y:auto;background:#0b0e14;
+  border-left:1px solid #2a303c;font:14px/1.45 'Segoe UI',system-ui,sans-serif;color:#e6e9ef;user-select:text;z-index:50}
+#tradeai-panel .card{background:#151a23;border:1px solid #232a37;border-radius:10px;padding:10px 12px;margin-bottom:10px}
+#tradeai-panel .card h3{margin:0 0 6px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#8b93a3}
+#tradeai-panel .good{background:rgba(43,182,115,.14);border-color:#2bb673}
+#tradeai-panel .bad{background:rgba(229,83,75,.14);border-color:#e5534b}
+#tradeai-panel .big{font-size:26px;font-weight:700}
+#tradeai-panel .t-good{color:#2bb673}#tradeai-panel .t-bad{color:#e5534b}#tradeai-panel .t-neutral{color:#c9d1d9}
+#tradeai-panel .row{display:flex;justify-content:space-between;gap:8px;padding:2px 0}
+#tradeai-panel .row span:first-child{color:#8b93a3}
+#tradeai-panel .step{padding:3px 0}
+#tradeai-panel .pt{padding:3px 0 3px 10px;border-left:3px solid #5b6372;margin:4px 0}
+#tradeai-panel .pt.good{border-left-color:#2bb673;background:none}#tradeai-panel .pt.bad{border-left-color:#e5534b;background:none}
+#tradeai-panel .score{font-size:30px;font-weight:700;color:#ffb300}
+#tradeai-panel .warn{color:#ffb300;font-size:13px}
+"""
+
+_PANEL_JS = """
+(function(d){
+  var old=document.getElementById('tradeai-panel'); if(old){old.remove();}
+  var st=document.createElement('style'); st.textContent=%(css)s; document.head.appendChild(st);
+  var root=document.createElement('div'); root.id='tradeai-panel'; document.body.appendChild(root);
+  function el(tag,cls,text,parent){var e=document.createElement(tag); if(cls)e.className=cls; if(text!=null)e.textContent=text; (parent||root).appendChild(e); return e;}
+  function row(parent,k,v,cls){var r=el('div','row',null,parent); el('span',null,k,r); el('span',cls||null,v,r);}
+  var res=d.result, c=el('div','card '+(res.tone==='neutral'?'':res.tone)); el('h3',null,'Результат',c);
+  el('div','big t-'+res.tone,res.r+(res.pnl?'   '+res.pnl:''),c);
+  row(c,'Статус',res.status); if(res.exit_reason) row(c,'Причина выхода',res.exit_reason);
+  res.closes.forEach(function(x){row(c,x.n+'. '+x.label+'  '+x.time+'  @ '+x.price,x.r,'t-'+x.tone);});
+  if(res.warning) el('div','warn',res.warning,c);
+  if(d.review){var v=el('div','card',null); el('h3',null,'Разбор сделки',v); el('div','score',d.review.headline,v);
+    d.review.points.forEach(function(p){el('div','pt '+p.tone,p.text,v);});}
+  var r=el('div','card'); el('h3',null,'Причина входа',r); el('div',null,d.reason.title,r).style.fontWeight='600';
+  d.reason.steps.forEach(function(s){el('div','step',s,r);});
+  if(d.reason.facts.length){var f=el('div','card'); el('h3',null,'Параметры сигнала',f); d.reason.facts.forEach(function(kv){row(f,kv[0],kv[1]);});}
+  d.notes.forEach(function(n){el('div','warn',n);});
+})(%(data)s);
+"""
+
+
 def _panels(chart: Any, spec: dict[str, Any]) -> None:
-    """Боковая панель справа от графика: «Причина входа» и «Результат» (одна строка таблицы - одна строка текста, длинное - с прокруткой)."""
-    reason, result = spec["reason_lines"], spec["result_lines"]
-    reason_h = min(0.64, 0.05 + 0.0245 * len(reason))
-    result_h = min(0.98 - reason_h, 0.05 + 0.0245 * len(result))
-    for title, lines, height in (("Причина входа", reason, reason_h), ("Результат", result, result_h)):
-        if not lines:
-            continue
-        table = chart.create_table(width=PANEL_WIDTH, height=height, headings=(title,), widths=(1.0,), alignments=("left",), position="right",
-                                   draggable=False, background_color="rgba(14,17,23,0.95)", border_color="rgb(60,66,78)")
-        for line in lines:
-            table.new_row(line)
+    """Боковая панель справа: HTML-карточки, собранные в JS через textContent (подписи из БД не интерпретируются как разметка).
+    Раньше это были таблицы lightweight-charts: у них в библиотеке обработчик клика по строке вызывал `func=None` -> TypeError в цикле событий
+    окна -> процесс окна падал, окно закрывалось. Теперь панель без обратных вызовов в Python: клик по тексту безопасен, текст выделяется."""
+    import json
+    css = json.dumps(_PANEL_CSS % {"w": PANEL_WIDTH_PCT})
+    # json.dumps не экранирует U+2028/2029 и '</': ASCII-режим снимает вопрос
+    data = json.dumps(spec["panel"], ensure_ascii=True)
+    chart.run_script(_PANEL_JS % {"css": css, "data": data})
 
 
 def run_chart_window(spec: dict[str, Any]) -> None:

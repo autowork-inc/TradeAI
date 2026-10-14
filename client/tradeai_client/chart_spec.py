@@ -12,7 +12,7 @@ import textwrap
 from datetime import datetime, timezone
 from typing import Any
 
-from tradeai_client import fmt
+from tradeai_client import fmt, retro
 
 UP, DOWN, AMBER, BLUE, VIOLET, GREY = "#26a69a", "#ef5350", "#ffb300", "#4aa3ff", "#b388ff", "#9aa3b2"
 MAX_GRID_BARS = 900
@@ -149,13 +149,13 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
     sl, tp = trade.get("sl"), trade.get("tp")
     planned, entry = trade.get("planned_entry"), trade.get("entry_price")
     if sl is not None:
-        hlines.append({"price": sl, "color": DOWN, "style": "dashed", "text": f"SL {fmt.fmt_price(sl)}", "width": 2})
+        hlines.append({"price": sl, "color": DOWN, "style": "dashed", "text": f"SL {fmt.fmt_price(sl)}", "width": 3})
     if tp is not None:
-        hlines.append({"price": tp, "color": UP, "style": "dashed", "text": f"TP {fmt.fmt_price(tp)}", "width": 2})
+        hlines.append({"price": tp, "color": UP, "style": "dashed", "text": f"TP {fmt.fmt_price(tp)}", "width": 3})
     if entry is not None:
-        hlines.append({"price": entry, "color": BLUE, "style": "solid", "text": f"Вход {fmt.fmt_price(entry)}", "width": 1})
+        hlines.append({"price": entry, "color": BLUE, "style": "solid", "text": f"Вход {fmt.fmt_price(entry)}", "width": 3})
     if planned is not None and (entry is None or abs(planned - entry) > 1e-12 * max(1.0, abs(entry))):
-        hlines.append({"price": planned, "color": BLUE, "style": "dotted", "text": f"План входа {fmt.fmt_price(planned)}", "width": 1})
+        hlines.append({"price": planned, "color": BLUE, "style": "dotted", "text": f"План входа {fmt.fmt_price(planned)}", "width": 2})
     base, risk = (entry if entry is not None else planned), None
     if base is not None and sl is not None:
         risk = abs(base - sl)
@@ -165,7 +165,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
             price = base + k * risk if long else base - k * risk
             if tp is not None and abs(price - tp) <= 1e-9 * max(1.0, abs(tp)):
                 continue  # совпадает с TP - не дублируем
-            hlines.append({"price": price, "color": UP, "style": "dotted", "text": f"+{k:g}R ({frac * 100:.0f}%)", "width": 1})
+            hlines.append({"price": price, "color": UP, "style": "dotted", "text": f"+{k:g}R ({frac * 100:.0f}%)", "width": 2})
 
     # вспомогательный невидимый ряд: продлевает ось времени за последнюю свечу (маркеры/зоны/линии не должны пропадать)
     by_bar: dict[int, float] = {}
@@ -196,11 +196,34 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         notes.append("Свечи после сигнала не загружены: показаны только свечи снапшота.")
     result += notes
 
+    # структурная панель (HTML в окне графика): карточки «Результат», «Разбор сделки», «Причина входа»
+    exit_t = snap_t(exit_ms) if exit_ms is not None else None
+    after = [b for b in bars if b["post"] and exit_t is not None and b["t"] > exit_t]
+    review = retro.review_trade(trade, closes, after if any(b["post"] for b in bars) else None)
+    r_total, pnl = trade.get("r_multiple"), trade.get("pnl")
+    pnl_text = None if pnl is None else f"{pnl:+.2f} USDT".replace("-", "−")
+    tone = "neutral" if trade["status"] != "closed" or not (r_total or pnl) else ("good" if (pnl if pnl is not None else r_total) > 0 else "bad")
+    panel = {
+        "result": {"tone": tone, "status": fmt.STATUS_RU.get(trade["status"], trade["status"]), "r": fmt.fmt_r(r_total), "pnl": pnl_text,
+                   "exit_reason": fmt.EXIT_RU.get(trade.get("exit_reason"), trade.get("exit_reason")) if trade.get("exit_reason") else None,
+                   "closes": [{"n": i, "label": clean_text(fmt.EXIT_RU.get(c["reason"], c["reason"])), "time": _utc(ts) + " UTC", "price": fmt.fmt_price(c["price"]),
+                               "r": fmt.fmt_r(c.get("net_r")), "tone": "neutral" if not c.get("net_r") else ("good" if c["net_r"] > 0 else "bad")}
+                              for i, (ts, c) in enumerate(close_events, start=1)],
+                   "warning": "Сделка помечена gap_affected (обрыв потока тиков): в статистику не входит" if trade.get("gap_affected") else None},
+        "review": None if review is None else {"headline": review["headline"], "score": review["score"],
+                                               "points": [{"tone": p["tone"], "text": clean_text(p["text"])} for p in review["points"]]},
+        "reason": {"title": clean_text(reason.get("title", "")),
+                   "steps": [clean_text(x) for x in str(reason.get("summary", "")).splitlines() if x.strip()],
+                   "facts": [[clean_text(f["label"]), clean_text(f["value"])] for f in reason.get("facts", [])]},
+        "notes": [clean_text(n) for n in notes],
+    }
+
     return {
         "title": clean_text(f"{trade['coin']} {meta.get('interval', '')} · {fmt.SIDE_RU.get(trade['side'], trade['side'])} · {fmt.STATUS_RU.get(trade['status'], trade['status'])}"),
         "trade_id": trade["id"], "interval_ms": iv, "snapshot_last_t": snapshot_last,
         "bars": bars, "helper": helper, "trade_markers": trade_markers, "setup_markers": setup_markers,
         "boxes": boxes, "segments": segments, "hlines": hlines, "vlines": vlines,
         "visible": [max(first_t, (snap_t(signal_ms) if signal_ms else snapshot_last) - 45 * iv), grid_end + 2 * iv],
+        "panel": panel, "digits": fmt.price_digits(ref_price),
         "reason_lines": reason_lines, "result_lines": [x for r in result for x in _wrap(r)],
     }

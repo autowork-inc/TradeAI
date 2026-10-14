@@ -24,7 +24,7 @@
 
 | Рынок | Инструменты в Shadow | Источник данных | Боевое исполнение (выключено) |
 |---|---|---|---|
-| Крипта | `BTCUSDT`, `ETHUSDT` | Binance Futures (mainnet, публичные WebSocket/REST) | Binance Futures (`exchange/binance_live.py`) |
+| Крипта | `BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `BNBUSDT`, `XRPUSDT`, `ADAUSDT`, `AVAXUSDT`, `LINKUSDT` | Binance Futures (mainnet, публичные WebSocket/REST) | Binance Futures (`exchange/binance_live.py`) |
 | Forex / металлы | `EURUSD`, `XAUUSD`, `XAGUSD` | MetaApi (облачный шлюз к MT5) | MetaApi → MT5 (`exchange/mt5_*.py`, `router.py`) |
 
 Исторически (до пивота) в проекте есть ML-контур на стакане Binance (сборщики, конвейер признаков, бэктестер, боевой мост `execution/`, модель Ridge) — он описан в разд. 3.10 и в `README.md`; **в эксплуатации сейчас активен только сборщик стакана `depth-stream`**.
@@ -62,7 +62,7 @@
                                                            ai_civ-* — ЧУЖИЕ контейнеры на этом сервере (порт 8000 занят ими): не трогать
 ```
 
-Состояние сервера на 2026-10-14 (проверено `docker ps`, SQL): `shadow-run`, `api`, `postgres` — healthy; `depth-stream` работает; контейнера `live-run` нет. В БД схема v2; сделок: 1 `closed`, 1 `open`, 1 `cancelled`; 51 событие `state_events`. Shadow-run работает **только по BTC/ETH** (в `.env.shadow` нет `METAAPI_*`).
+Состояние сервера на 2026-10-14 (проверено `docker ps`, SQL): `shadow-run`, `api`, `postgres` — healthy; `depth-stream` работает; контейнера `live-run` нет. В БД схема v2; сделок: 1 `closed`, 1 `open`, 1 `cancelled`; 51 событие `state_events`. Shadow-run работает **только по крипте** (в `.env.shadow` нет `METAAPI_*`); пул расширен до 8 крипто-символов 2026-10-14 (после этой даты состояние сервера не сверялось ❓).
 
 ### 3.1. Признаки (`features/`)
 
@@ -78,7 +78,7 @@
 |---|---|---|---|
 | `SMC_Pro_Trend` | Свип пула ликвидности → медвежий/бычий FVG → CHoCH (автомат S0…S4); H4-фильтр: шорт не при Bullish, лонг не при Bearish (Neutral разрешён). SL за хай свипа + 0.2·ATR, TP 3R. Свип без сетапа против H4 не начинается | LIMIT на 50% FVG | Scale Out 50% на +1R (+BE) / 40% на +3R / runner 10% |
 | `SMC_Counter_Trend` | Свип пула глубиной ≥ 1.5·ATR, закрытие обратно, объём > 1.5·SMA20, разворотная свеча, **строго против H4** (Neutral — запрет) | MARKET | 100% на +1R |
-| `OBI_Breakout` | BOS (закрытие за свингом + тело > 1·ATR) + подтверждение: OBI топ-10 ≥ ±0.25 за последние 120 с свечи **или** дельта ленты ≥ ±0.30 при объёме ≥ 1.5·SMA20 | MARKET | Scale Out по умолчанию |
+| `OBI_Breakout` | BOS (закрытие за свингом + тело > 1·ATR) + подтверждение: OBI топ-10 ≥ ±0.25 за последние 120 с свечи **или** дельта ленты ≥ ±0.30 при объёме ≥ 1.5·SMA20 | MARKET | Scale Out по умолчанию. Только Binance-крипта (`config.STRATEGY_SYMBOLS` = `SHADOW_SYMBOLS` без MT5-символов; на EURUSD/XAUUSD/XAGUSD запрещена) |
 | `ICT_Killzones` | Ложный пробой диапазона Азии (00:00–07:00 UTC) в killzone Лондона (07–10) или Нью-Йорка (12–15), без перехода на летнее время | MARKET | Scale Out по умолчанию |
 | `VWAP_Reversion` | Касание ±3σ дневного Anchored VWAP (с 00:00 UTC, ≥ 16 свечей суток) за 3 свечи + разворотный паттерн (поглощение / pin-bar) | MARKET | 50% на +1R (+BE), 50% на +2R, без runner'а |
 
@@ -90,7 +90,7 @@
 - `CoinOwnershipLock` (D4): у **каждой SHADOW-стратегии своя** блокировка монеты; все LIVE-стратегии делят одну.
 - `VirtualTracker`: ключ позиции `<монета>_<strategy_id>`, вторая активная позиция по ключу — `TrackerError`; эквити виртуальный 10 000 USDT, риск 1%, потолок плеча 5.0 (иначе `skipped_risk`/`exposure`, объём молча не урезается). Правила: LIMIT исполняется при строгом проходе цены сделки (maker 0.02%), MARKET — по первому тику после сигнала (taker 0.05%); стоп/уровни исполняются по цене тика; на одном тике сначала стоп, потом уровни; безубыток — mark price +1R **или** первый уровень (только к прибыли); runner: стоп = лучшая цена ∓ 3·ATR последней закрытой свечи, только подтягивается, действует со следующего тика; тайм-аут 192 свечи; отмены лимитки: закрытие за хаем свипа (`invalidated`), 10 свечей (`ttl`), цена дошла до TP (`tp_before_fill`); обрыв потока тиков → `gap_affected` (в статистику не входят).
 - Фиды Binance: `SmcKlineFeed` (WS `kline_15m` / `kline_4h` на `/market/stream` + REST-история 300 свечей после подписки, replay после обрыва), `TickFeed` (`aggTrade` + `markPrice@1s`), `DepthFeed` (`depth10@500ms`, `/public/stream`) → `MicroStructure` (колонки `ms_obi`, `ms_delta` только на последней строке; неполные данные → null, fail-closed). Переподключение — `ReconnectingStream`, `LIVE_WS_MAX_RECONNECTS` подряд → падение.
-- `scripts/shadow_run.py`: сборка из `config.SHADOW_SYMBOLS`; MT5-символы включаются только при наличии `METAAPI_TOKEN` и `METAAPI_ACCOUNT_ID` в окружении (иначе предупреждение в лог и работа по крипте); цикл раз в секунду, пульс `.shadow_heartbeat` (healthcheck: свежее 120 с), сводка в лог раз в час. Состояние позиций — в памяти: при рестарте висящие сделки помечаются `aborted/process_restart` и в статистику не входят (О17, О26).
+- `scripts/shadow_run.py`: сборка из `config.SHADOW_SYMBOLS` (11 символов: 8 крипто + EURUSD/XAUUSD/XAGUSD); MT5-символы включаются только при наличии `METAAPI_TOKEN` и `METAAPI_ACCOUNT_ID` в окружении (иначе предупреждение в лог и работа по крипте); цикл раз в секунду, пульс `.shadow_heartbeat` (healthcheck: свежее 120 с), сводка в лог раз в час. Состояние позиций — в памяти: при рестарте висящие сделки помечаются `aborted/process_restart` и в статистику не входят (О17, О26).
 - Коды выхода процессов: 0 штатно; 1 сбой; 2 бан биржи (`.ban_lock`); 3 конфигурация / 4xx; 4 Safe Mode.
 
 ### 3.4. Данные Forex и металлов для Shadow (`orchestrator/mt5_feeds.py`)
@@ -112,7 +112,7 @@ Binance не отдаёт `EURUSD/XAUUSD/XAGUSD`, поэтому для них �
 
 **API (`api/`, контейнер `api`, образ без кода стратегий и ключей бирж):** `GET /api/health` (без ключа), `/api/info`, `/api/stats`, `/api/trades`, `/api/trades/{id}/snapshot` (сделка, закрытия, свечи, геометрия, текст причины входа из `api/reason.py`), `WS /ws/live_state` (состояние автомата из `state_events` + открытые сделки + пульс; опрос БД раз в 2 с). Защита: заголовок `X-API-Key` (≥ 32 символа, пусто — контейнер не стартует), сравнение `hmac.compare_digest`, 10 неверных ключей за 60 с → 429; `/docs` и `openapi.json` отключены; сессии БД read-only; контейнер read-only, не root, 256 МБ / 0.5 CPU. Порт `0.0.0.0:8001 → 8000` (HTTP **без TLS**: ключ идёт открытым текстом). Автомат S0…S4 показывается только для `SMC_Pro_Trend`.
 
-**Клиент (`client/`, Flet; на сервер не отправляется):** вкладки Dashboard (карточки монет, шорт/лонг, лента событий), Statistics (KPI, рейтинг монет, кривая капитала, разбивки), History (таблица с фильтрами; двойной клик или кнопка → окно графика `lightweight-charts` в отдельном процессе: свечи, маркеры входа/закрытий, SL/TP, зона FVG, текст причины; свечи после сигнала достраиваются из публичного REST Binance). `client/dist/TradeAI-Monitor.exe` (≈ 90 МиБ, собран `flet pack` 2026-10-11, **ключ API зашит в сборку — не передавать посторонним**). Настройки: `settings.json` рядом с `.exe` → иначе дефолты сборки (`build_defaults.py`: `http://193.233.75.254:8001`) → переменные `TRADEAI_API_URL/KEY`. Сборка: `client/build_exe.ps1 -ServerUrl … -ApiKey …` (подмена ключа только на время сборки). **Известное отставание:** списки монет в фильтрах `.exe` (`client/tradeai_client/fmt.py::COINS`) не содержат `EURUSD/XAUUSD/XAGUSD` — сделки по ним в таблицах видны, но фильтра по ним нет; нужна пересборка. ❓ Не проверено на практике: двойной клик на реальном ПК, Windows 10 без WebView2.
+**Клиент (`client/`, Flet; на сервер не отправляется):** вкладки Dashboard (карточки монет, шорт/лонг, лента событий), Statistics (KPI, рейтинг монет, кривая капитала, разбивки), History (таблица с фильтрами; двойной клик или кнопка → окно графика `lightweight-charts` в отдельном процессе: свечи, маркеры входа/закрытий, SL/TP, зона FVG, текст причины; справа HTML-панель из карточек «Результат» (зелёный/красный по итогу), «Разбор сделки» (оценка x/10 и выводы, `client/tradeai_client/retro.py` — эвристика без ML), «Причина входа»; цены округляются по величине (`fmt.price_digits`: ≥100 — 2 знака, ≥10 — 3, иначе 5+); линии SL/TP/входа толщиной 3; свечи после сигнала достраиваются из публичного REST Binance). `client/dist/TradeAI-Monitor.exe` (≈ 90 МиБ, собран `flet pack` 2026-10-11, **ключ API зашит в сборку — не передавать посторонним**). Настройки: `settings.json` рядом с `.exe` → иначе дефолты сборки (`build_defaults.py`: `http://193.233.75.254:8001`) → переменные `TRADEAI_API_URL/KEY`. Сборка: `client/build_exe.ps1 -ServerUrl … -ApiKey …` (подмена ключа только на время сборки). **Нужна пересборка `.exe`** (делает пользователь): список монет фильтров (`fmt.py::COINS`) обновлён 2026-10-14 под новый пул, панель графика переписана. Причина прежнего краша окна при клике по тексту справа (❓ гипотеза по коду библиотеки, в живом окне не воспроизводилась): таблицы `lightweight-charts` всегда регистрируют обработчик клика по строке, а он вызывал `func=None` → `TypeError` в цикле событий окна → процесс окна падал; таблицы убраны. ❓ Не проверено на практике: двойной клик на реальном ПК, Windows 10 без WebView2.
 
 ### 3.7. MCP-сервер для ИИ-аналитика (`mcp_server/`, работает на ПК)
 
@@ -166,7 +166,7 @@ stdio-сервер `tradeai-risk-analyst` (пакет `mcp>=1.9,<2`) для Curs
 
 ### 3.13. Тесты
 
-`pytest` в корне: **1713** тестов (на 2026-10-13 — 1679 прошли, 34 пропущены: PostgreSQL-тесты без `TEST_DATABASE_URL` на БД `*_test`): `tests/api` 45, `backtester` 248, `exchange` 176, `execution` 374, `features` 31, `orchestrator` 284, `persistence` 19, `pipeline` 260, `strategies` 110 + корневые 166. Клиент: 54 (`client/.venv`, `client/tests`), MCP: 28 (`mcp_server/.venv`). Запуск: `.venv\Scripts\python.exe -m pytest tests` (≈7 минут).
+`pytest` в корне: **1724** теста (на 2026-10-14 — 1690 прошли, 34 пропущены: PostgreSQL-тесты без `TEST_DATABASE_URL` на БД `*_test`): `tests/api` 45, `backtester` 248, `exchange` 176, `execution` 374, `features` 31, `orchestrator` 284, `persistence` 19, `pipeline` 260, `strategies` 110 + корневые 166. Клиент: 64 (`client/.venv`, `client/tests`), MCP: 28 (`mcp_server/.venv`). Запуск: `.venv\Scripts\python.exe -m pytest tests` (≈7 минут).
 
 ---
 
@@ -273,7 +273,7 @@ stdio-сервер `tradeai-risk-analyst` (пакет `mcp>=1.9,<2`) для Curs
 | 11–13 | MT5: маппер, лоты, торговые методы, `ExecutionRouter`, `market_closed`, сквозной лимит | ✅ код и тесты; ордера не отправлялись; выключен |
 | 14 | Сопровождение MT5 по плану Shadow + данные Forex/металлов, пул из 5 символов | ✅ код, тесты, деплой 2026-10-13; ⏳ ключи MetaApi на сервере |
 
-**Текущее состояние (2026-10-14):** Shadow собирает статистику по BTC/ETH; MT5-символы ждут ключей на сервере. **Ближайшие шаги:** (1) вписать ключи MetaApi; (2) копить сделки (сотни) и смотреть `shadow.sh stats` / клиент / MCP; (3) пересобрать `.exe` с новыми монетами; (4) разобрать `main` с `origin`; (5) до любых боевых шагов — testnet-прогон `test_live_order.py` и пробная сделка MT5 на демо.
+**Текущее состояние (2026-10-14):** Shadow собирает статистику по 8 криптосимволам (пул расширен, деплой — см. разд. 9); MT5-символы ждут ключей на сервере. **Ближайшие шаги:** (1) вписать ключи MetaApi; (2) копить сделки (сотни) и смотреть `shadow.sh stats` / клиент / MCP; (3) пересобрать `.exe` с новыми монетами; (4) разобрать `main` с `origin`; (5) до любых боевых шагов — testnet-прогон `test_live_order.py` и пробная сделка MT5 на демо.
 
 ---
 
@@ -295,6 +295,7 @@ stdio-сервер `tradeai-risk-analyst` (пакет `mcp>=1.9,<2`) для Curs
 
 | Дата | Что сделано |
 |---|---|
+| 2026-10-14 | Пул `SHADOW_SYMBOLS` расширен до 8 крипто (+SOL, BNB, XRP, ADA, AVAX, LINK) + 3 MT5; `STRATEGY_SYMBOLS["OBI_Breakout"]` = крипта пула (MT5 по-прежнему запрещены; боевые `LIVE_BINANCE_SYMBOLS` не расширены: альты в live получили бы `unsupported_symbol`); `utils/logger.py`: `engineio.client`, `socketio.client`, `metaapi_cloud_sdk` → WARNING; `api/settings.DEFAULT_COINS` = пул. Клиент: HTML-панель графика вместо таблиц (устранён краш при клике), умное округление цен (`price_digits`, дубль шкалы в `api/reason.py` сверяется тестом), толстые линии SL/TP/входа, «Разбор сделки» (`retro.py`), `COINS` фильтров обновлён |
 | 2026-10-14 | `OBI_Breakout` жёстко запрещён на MT5-символах (`config.STRATEGY_SYMBOLS`, `registry.strategy_allowed`, фильтр в `Orchestrator`); `auto_deploy.py`: `--metaapi-token` / `--metaapi-account` (или `METAAPI_TOKEN` / `METAAPI_ACCOUNT_ID`) → `.env.shadow` через SFTP-файл, секреты не в командах и логах; дубль `LIVE_STATE_NAME` убран, имя файла состояния ML-бота — `config.ML_STATE_NAME` (`live_state.json`). Тесты: 1688 прошли, 34 пропущены |
 | 2026-10-14 | `CLAUDE.md` переписан: сверен с кодом, тестами (1713), сервером (`docker ps`, SQL) и клиентом; убраны устаревшие и неверные утверждения (см. ниже), добавлены карта процессов, ML-контур, деплой, дубль `LIVE_STATE_NAME`, расхождение с `origin`. Код не менялся |
 | 2026-10-13 | Сопровождение MT5 по плану Shadow (`mt5_exit.py`), фиды Forex/металлов (`mt5_feeds.py`), пул из 5 символов, деплой (коммиты `6c2e325`, `eef4ac5`); `ExecutionRouter`, `market_closed`, сквозной лимит; символы/лоты/торговые методы MT5; клиент MetaApi; Git, пул BTC/ETH, сброс БД |

@@ -13,8 +13,8 @@ SIDE_RU = {"long": "лонг", "short": "шорт"}
 def fmt_price(v: float | None) -> str:
     if v is None:
         return "—"
-    s = f"{v:.4f}" if abs(v) >= 1 else f"{v:.8f}"
-    return s.rstrip("0").rstrip(".") or "0"
+    a = abs(v)  # та же шкала, что в client/tradeai_client/fmt.py::price_digits (образ API клиента не содержит; сверяется тестом)
+    return f"{v:.{2 if a >= 100 else 3 if a >= 10 else 5 if a >= 0.1 else 6 if a >= 0.01 else 8}f}"
 
 
 def fmt_ms(ms: Any) -> str:
