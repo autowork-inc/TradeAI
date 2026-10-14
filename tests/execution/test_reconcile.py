@@ -366,5 +366,5 @@ def test_local_state_roundtrip_and_corruption(tmp_path):
 
 def test_default_paths_follow_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "d")
-    assert StateStore().path == tmp_path / "d" / config.LIVE_STATE_NAME
+    assert StateStore().path == tmp_path / "d" / config.ML_STATE_NAME
     assert SafeMode(None, RecordingAlerter()).path == tmp_path / "d" / config.SAFE_MODE_LOCK_NAME

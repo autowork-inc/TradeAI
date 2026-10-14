@@ -187,3 +187,10 @@ def test_events_from_orchestrator_and_tracker_share_one_journal_in_order():
     feed(orch, 1)
     tracker.on_tick(tick(100.5, 10))
     assert [e.kind for e in log.events] == ["trade_registered", "signal_accepted", "limit_filled"]
+
+
+def test_symbol_filter_skips_forbidden_strategy_symbol_pairs():
+    obi, smc = Scripted("obi", {1: [mk(bar=1, symbol="EURUSD", strategy="obi")]}), Scripted("smc", {1: [mk(bar=1, symbol="EURUSD")]})
+    orch, tracker, _ = build([obi, smc], symbol_filter=lambda name, symbol: not (name == "obi" and symbol == "EURUSD"))
+    events = feed(orch, 1, symbol="EURUSD")
+    assert kinds(events) == ["signal_accepted"] and [t.signal.strategy for t in tracker.trades] == ["smc"]

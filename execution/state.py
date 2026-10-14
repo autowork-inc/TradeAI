@@ -238,7 +238,7 @@ class StateStore:
 
     @property
     def path(self) -> Path:
-        return self._path if self._path is not None else config.DATA_DIR / config.LIVE_STATE_NAME
+        return self._path if self._path is not None else config.DATA_DIR / config.ML_STATE_NAME
 
     def load(self) -> LocalState:
         try:

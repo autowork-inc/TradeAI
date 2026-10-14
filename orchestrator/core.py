@@ -15,7 +15,7 @@ SHADOW-стратегии своя (3.2: «у каждой стратегии с
 
 import logging
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from orchestrator.journal import EventLog
 from orchestrator.lock import CoinOwnershipLock, Owner
@@ -44,6 +44,7 @@ class Orchestrator:
     def __init__(
         self, strategies: Sequence[Strategy], routes: Mapping[str, Route], log_: EventLog, *,
         max_signal_age_ms: int = DEFAULT_MAX_SIGNAL_AGE_MS, recorder: TradeRecorder | None = None, snapshot_bars: int = 100,
+        symbol_filter: Callable[[str, str], bool] | None = None,
     ):
         names = [s.name for s in strategies]
         if len(set(names)) != len(names):
@@ -57,6 +58,7 @@ class Orchestrator:
         self._max_age = max_signal_age_ms
         self._rec: TradeRecorder = recorder or NullRecorder()
         self._snapshot_bars = snapshot_bars
+        self._symbol_filter = symbol_filter  # (стратегия, символ) -> можно ли; None - всё разрешено
         self._setup_states: dict[tuple[str, str, str], int] = {}  # (стратегия, монета, сторона) -> последнее состояние автомата
         self._locks: dict[str, CoinOwnershipLock] = {}
         self._held: dict[str, tuple[CoinOwnershipLock, str, Owner]] = {}  # signal_id -> (блокировка, монета, владелец)
@@ -87,6 +89,8 @@ class Orchestrator:
         age = ctx.received_ms - ctx.bar_close_ms
         events: list[Event] = []
         for strategy in self._strategies:
+            if self._symbol_filter is not None and not self._symbol_filter(strategy.name, ctx.symbol):
+                continue  # стратегия на этом символе запрещена (напр. OBI_Breakout без L2-стакана): даже не считается
             analyze = getattr(strategy, "analyze", None)  # стратегия с автоматом состояний отдаёт и сигналы, и состояния за один расчёт
             signals, states = analyze(ctx) if analyze is not None else (strategy.detect(ctx), {})
             self._log_setup_states(strategy.name, ctx, states)

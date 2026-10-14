@@ -17,6 +17,7 @@ strategy_id - то, что пишется в колонку `strategy_id` все
 
 from collections.abc import Mapping, Sequence
 
+import config
 from features import defaults as D
 from orchestrator.multi_strategies import (
     ICT_KILLZONES,
@@ -36,6 +37,15 @@ from utils.errors import ConfigError
 SHADOW_STRATEGIES = (SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION)
 NEEDS_HTF = (SMC_PRO_TREND, SMC_COUNTER_TREND)  # читают колонку htf_bias (H4)
 NEEDS_MICRO = (OBI_BREAKOUT,)  # читают колонки ms_obi / ms_delta (стакан + лента)
+
+
+
+def strategy_allowed(name: str, symbol: str) -> bool:
+    """Можно ли стратегии работать на символе (config.STRATEGY_SYMBOLS): OBI_Breakout - только Binance Futures (там есть стакан и лента),
+    остальные четыре - на любых символах."""
+    allowed = config.STRATEGY_SYMBOLS.get(name)
+    return allowed is None or symbol in allowed
+
 
 SCALP_1R_PLAN = ScaleOutPlan(((1.0, 1.0),), be_after_first=False, trail_mode=None)
 VWAP_PLAN = ScaleOutPlan(((1.0, 0.5), (2.0, 0.5)), be_after_first=True, trail_mode=None)

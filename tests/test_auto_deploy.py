@@ -34,3 +34,32 @@ def test_remote_dir_validation():
     with pytest.raises(SystemExit):
         ad.get_params(["--host", "h", "--key", "k", "--remote-dir", "../x"])
     assert ad.get_params(["--host", "h", "--key", "k"]).remote_dir == "trading"
+
+
+def test_metaapi_args_validated_and_optional(monkeypatch):
+    monkeypatch.delenv("METAAPI_TOKEN", raising=False)
+    monkeypatch.delenv("METAAPI_ACCOUNT_ID", raising=False)
+    assert ad.get_params(["--host", "h", "--key", "k"]).metaapi == {}
+    a = ad.get_params(["--host", "h", "--key", "k", "--metaapi-token", "tok.en_123", "--metaapi-account", "abcd1234-ef56"])
+    assert a.metaapi == {"METAAPI_TOKEN": "tok.en_123", "METAAPI_ACCOUNT_ID": "abcd1234-ef56"}
+
+
+@pytest.mark.parametrize("args", [
+    ["--metaapi-token", "tok.en_123"],  # без id счёта
+    ["--metaapi-account", "abcd1234-ef56"],  # без токена
+    ["--metaapi-token", "to ken", "--metaapi-account", "abcd1234-ef56"],
+    ["--metaapi-token", "to'ken", "--metaapi-account", "abcd1234-ef56"],
+    ["--metaapi-token", "token", "--metaapi-account", "bad id;rm"]])
+def test_metaapi_args_rejected(monkeypatch, args):
+    monkeypatch.delenv("METAAPI_TOKEN", raising=False)
+    monkeypatch.delenv("METAAPI_ACCOUNT_ID", raising=False)
+    with pytest.raises(SystemExit):
+        ad.get_params(["--host", "h", "--key", "k", *args])
+
+
+def test_metaapi_secret_not_in_command_or_error(capsys):
+    cmd = ad.merge_env_command("~/trading")
+    assert "METAAPI_TOKEN" in cmd and "chmod 600" in cmd and "rm -f" in cmd
+    with pytest.raises(SystemExit):
+        ad.validate_metaapi("sekret value", "abcd1234-ef56")
+    assert "sekret" not in capsys.readouterr().err

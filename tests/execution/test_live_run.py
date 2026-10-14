@@ -169,7 +169,7 @@ def posts(ex):
 
 
 def write_state(tmp_path, positions):
-    path = tmp_path / "data" / config.LIVE_STATE_NAME
+    path = tmp_path / "data" / config.ML_STATE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     StateStore(path).save(LocalState(positions=positions))
 
@@ -331,7 +331,7 @@ def test_clean_start_trades_through_live_barrier_and_notifies_entry(monkeypatch,
             assert notifier.has("Боевой цикл запущен")
             assert any(type(e).__name__ == "Fill" for e in strategy.events)  # стратегия увидела исполнение
             await stop(task)
-            saved = StateStore(tmp_path / "data" / config.LIVE_STATE_NAME).load()
+            saved = StateStore(tmp_path / "data" / config.ML_STATE_NAME).load()
             assert saved.position("BTCUSDT") == pytest.approx(0.1)
 
     run(go())
@@ -670,7 +670,7 @@ def test_periodic_reconcile_is_skipped_while_orders_are_live(monkeypatch, tmp_pa
                 4_000_000_000_000, status="NEW",  # срок жизни в далёком будущем: expire_due ордер не тронет
             )
             state.next_ticket_id = 2
-            path = tmp_path / "data" / config.LIVE_STATE_NAME
+            path = tmp_path / "data" / config.ML_STATE_NAME
             path.parent.mkdir(parents=True, exist_ok=True)
             StateStore(path).save(state)
             task, _ = start()

@@ -46,7 +46,7 @@ from orchestrator.htf import HtfBias
 from orchestrator.journal import JsonlEventLog
 from orchestrator.kline_feed import SmcKlineFeed
 from orchestrator.microstructure import DepthFeed, MicroStructure
-from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, build_strategies, plans_for
+from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, build_strategies, plans_for, strategy_allowed
 from orchestrator.tick_feed import TickFeed
 from orchestrator.tracker import VirtualTracker
 from orchestrator.types import Mode, Tick
@@ -186,7 +186,8 @@ async def shadow_main(opts: Options) -> None:
                                                    interval_ms=config.INTERVAL_MS[opts.interval],
                                                    flush=recorder.flush if recorder is not None else None)
                     sink = LiveMirrorSink(tracker, live)  # Shadow-трекер получает все сигналы как прежде; одобренные - ещё и боевой движок
-                orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder)
+                orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder,
+                                  symbol_filter=strategy_allowed)  # OBI_Breakout - только символы со стаканом (Binance), см. config.STRATEGY_SYMBOLS
                 feed = SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=opts.interval, history_bars=opts.history)
                 htf_feed = htf = None
                 if D.HTF_FILTER_ENABLED:

@@ -2,6 +2,10 @@
 
 Параметры: аргументы CLI > окружение (VPS_HOST, VPS_PORT, VPS_USER, VPS_PASSWORD, VPS_SSH_KEY_PATH) > ввод в консоли.
 Лучше ключ (`--key`) или `VPS_PASSWORD`: пароль в `--password` виден в истории оболочки.
+Ключи MetaApi (Forex/металлы в Shadow): `--metaapi-token` / `--metaapi-account` или окружение METAAPI_TOKEN / METAAPI_ACCOUNT_ID (окружение
+безопаснее: аргументы видны в истории оболочки). Значения вписываются в `~/trading/.env.shadow` (chmod 600) через временный файл по SFTP:
+в командах SSH, в выводе и логах их нет, в архив и в Git они не попадают. Не заданы - `.env.shadow` на сервере не меняется (уже вписанные
+ключи остаются); заглушки не пишутся: shadow-run с фиктивным токеном упал бы при подключении к MetaApi (R1).
 
 Шаги: 1 архив (deploy_pack, цель shadow, без ключей) · 2 SSH + SFTP · 3 Docker · 4 распаковка · 5 права .env* ·
 6 остановка старых контейнеров · 7 запуск (deploy/shadow.sh up) · 8 PostgreSQL и миграции · 9 глубокая проверка (контейнеры, логи,
@@ -34,6 +38,9 @@ TIMEOUT = 20
 TOTAL = 9
 DC = "docker compose --env-file .env.shadow"
 REQUIRED_SERVICES = ("postgres", "shadow-run", "api")
+ENV_FILE = ".env.shadow"
+METAAPI_TMP = ".metaapi.tmp"
+METAAPI_KEYS = ("METAAPI_TOKEN", "METAAPI_ACCOUNT_ID")
 
 # Признаки блокировки IP биржей (HTTP 451 — гео/юрисдикция, 429/418 — лимиты и бан IP, отказ рукопожатия WebSocket).
 BLOCK_PATTERNS = (
@@ -87,6 +94,38 @@ def parse_services(ps_output: str) -> dict[str, str]:
     return result
 
 
+def validate_metaapi(token: str | None, account: str | None) -> dict[str, str]:
+    """Проверка ключей MetaApi до любых действий. Возвращает {имя: значение} только для заданных; значения в сообщения об ошибках не попадают."""
+    if bool(token) != bool(account):
+        fail("MetaApi: токен и id счёта задаются вместе (--metaapi-token и --metaapi-account)")
+    if not token:
+        return {}
+    if not re.fullmatch(r"[!-~]+", token) or "'" in token or '"' in token or "\\" in token:
+        fail("--metaapi-token: только печатные ASCII-символы без пробелов, кавычек и обратной косой черты")
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", account):
+        fail("--metaapi-account: ожидается id счёта MetaApi (латиница, цифры, дефис)")
+    return {"METAAPI_TOKEN": token, "METAAPI_ACCOUNT_ID": account}
+
+
+def merge_env_command(d: str) -> str:
+    """Команда на сервере: строки METAAPI_* из временного файла заменяют/дописывают одноимённые в .env.shadow. Секретов в тексте команды нет."""
+    return (f"cd {d} && umask 077 && touch {ENV_FILE} && {{ [ -z \"$(tail -c1 {ENV_FILE})\" ] || echo >> {ENV_FILE}; }} && "
+            f"for k in {' '.join(METAAPI_KEYS)}; do if grep -q \"^$k=\" {METAAPI_TMP}; then sed -i \"/^$k=/d\" {ENV_FILE}; "
+            f"grep \"^$k=\" {METAAPI_TMP} >> {ENV_FILE}; fi; done; rc=$?; rm -f {METAAPI_TMP}; chmod 600 {ENV_FILE}; exit $rc")
+
+
+def push_metaapi(cli: paramiko.SSHClient, remote_dir: str, values: dict[str, str]) -> None:
+    sftp = cli.open_sftp()
+    tmp = f"{remote_dir}/{METAAPI_TMP}"
+    try:
+        with sftp.open(tmp, "w") as f:
+            sftp.chmod(tmp, 0o600)  # права до записи секрета
+            f.write("".join(f"{k}={v}\n" for k, v in values.items()))
+    finally:
+        sftp.close()
+    run(cli, merge_env_command(f"~/{remote_dir}"), "запись ключей MetaApi в .env.shadow")  # временный файл удаляется самой командой
+
+
 def get_params(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--host", default=os.environ.get("VPS_HOST"))
@@ -94,6 +133,8 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--user", default=os.environ.get("VPS_USER", "root"))
     ap.add_argument("--password", default=os.environ.get("VPS_PASSWORD"), help="лучше VPS_PASSWORD или --key")
     ap.add_argument("--key", default=os.environ.get("VPS_SSH_KEY_PATH"), help="путь к приватному SSH-ключу")
+    ap.add_argument("--metaapi-token", default=os.environ.get("METAAPI_TOKEN"), help="токен MetaApi (лучше окружение METAAPI_TOKEN); в логи не выводится")
+    ap.add_argument("--metaapi-account", default=os.environ.get("METAAPI_ACCOUNT_ID"), help="id счёта MetaApi (или METAAPI_ACCOUNT_ID)")
     ap.add_argument("--remote-dir", default="trading", help="каталог на сервере относительно домашнего (по умолчанию trading)")
     ap.add_argument("--health-wait", type=int, default=15, help="секунд ожидания перед глубокой проверкой (по умолчанию 15)")
     ap.add_argument("--keep-archive", action="store_true", help="не удалять локальный архив после деплоя")
@@ -104,6 +145,7 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
         fail("хост не задан")
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", a.remote_dir) or a.remote_dir.startswith("/") or ".." in a.remote_dir:
         fail("--remote-dir: только относительный путь из латиницы, цифр и ._/-")
+    a.metaapi = validate_metaapi(a.metaapi_token, a.metaapi_account)
     if not a.key and not a.password:
         a.password = getpass.getpass(f"Пароль {a.user}@{a.host}: ")
     return a
@@ -188,6 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         step(5, "Права на секреты")
         run(cli, f"cd {d} && for f in .env .env.shadow; do if [ -f $f ]; then chmod 600 $f; fi; done", "chmod 600")
         ok(".env / .env.shadow (если есть) — 600")
+        if a.metaapi:
+            push_metaapi(cli, a.remote_dir, a.metaapi)
+            ok("METAAPI_TOKEN / METAAPI_ACCOUNT_ID записаны в .env.shadow (значения не выводятся)")
+        else:
+            print(_c("33", "  MetaApi: ключи не заданы, .env.shadow не менялся (Forex/металлы заработают после ввода ключей)"))
 
         step(6, "Остановка старых контейнеров (данные сохраняются)")
         run(cli, f"cd {d} && if [ -f .env.shadow ]; then ./deploy/shadow.sh down; else echo первый-деплой-останавливать-нечего; fi",

@@ -174,6 +174,8 @@ LIVE_RISK_STATE_NAME = ".live_risk_state.json"  # защёлка блокиро�
 # получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - MetaApiLiveClient (MT5).
 LIVE_BINANCE_SYMBOLS = ("BTCUSDT", "ETHUSDT")
 LIVE_MT5_SYMBOLS = ("EURUSD", "XAUUSD", "XAGUSD")
+# Стратегии, которым разрешены только перечисленные символы (остальные - на любых). OBI_Breakout читает L2-стакан и ленту: они есть только у Binance Futures.
+STRATEGY_SYMBOLS = {"OBI_Breakout": LIVE_BINANCE_SYMBOLS}
 LIVE_ENABLE_MT5 = _env_bool("LIVE_ENABLE_MT5")  # подключать MT5 (MetaApi) к боевому контуру; по умолчанию выключено: Binance-контур работает без ключей MetaApi
 LIVE_MT5_ACCOUNT_CURRENCIES = ("USD", "USDT", "USDC")  # суточный PnL складывается с Binance 1:1: счёт MT5 в другой валюте не допускается
 BALANCE_PATH = os.environ.get("BINANCE_BALANCE_PATH", "/fapi/v3/balance")
@@ -222,7 +224,7 @@ QUOTE_ASSET = "USDT"
 LIVE_PRICE_TICK = {"BTCUSDT": 0.1, "ETHUSDT": 0.01}
 RECONCILE_QTY_TOLERANCE = 1e-9
 SAFE_MODE_LOCK_NAME = ".safe_mode"  # рядом с .ban_lock; снимается только вручную
-LIVE_STATE_NAME = "live_state.json"
+ML_STATE_NAME = "live_state.json"  # состояние ML-бота (execution/state.py); у боевого движка SMC своё имя - LIVE_STATE_NAME выше
 
 # --- Этап 7/8: боевой оркестратор (scripts/live_run.py) ---------------------------
 ACCOUNT_PATH = os.environ.get("BINANCE_ACCOUNT_PATH", "/fapi/v3/account")  # эквити: totalMarginBalance
