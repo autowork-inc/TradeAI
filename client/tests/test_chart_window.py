@@ -39,7 +39,7 @@ def test_pandas_time_resolution_cannot_break_the_time_axis():
 def test_all_drawings_reach_the_chart_script(fx):
     snap, spec = make_spec(fx)
     html = static_html(spec)
-    for needle in ("Причина входа", "Результат", "FVG", "createPriceLine",  "Сигнал", "свип", "CHoCH", "пул ликвидности", "Вход ", "Трейлинг"):
+    for needle in ("Причина входа", "Результат", "FVG", "createPriceLine",  "Сигнал", "свип", "CHoCH", "Хронология", "Вход ", "Трейлинг"):
         assert needle in html or json.dumps(needle)[1:-1] in html, needle  # тексты маркеров библиотека кладёт в JSON с \uXXXX-экранированием
     # данные свечей ушли с корректными секундами эпохи (не 1970 год)
     first = spec["bars"][0]["t"] // 1000

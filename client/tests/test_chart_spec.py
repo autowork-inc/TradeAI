@@ -46,14 +46,14 @@ def test_closed_smc_short_has_all_drawings(fx):
     assert sp["boxes"][0]["t1"] >= sp["bars"][0]["t"] and sp["boxes"][0]["t2"] <= sp["helper"][-1][0]
     # линии плана из геометрии (SL/TP/вход) не дублируются; пул ликвидности - отрезок
     assert [s["label"] for s in sp["segments"]] == ["пул ликвидности"]
-    assert {m["text"] for m in sp["setup_markers"]} == {"свип", "CHoCH"}
+    assert {m["full"] for m in sp["setup_markers"]} == {"свип", "CHoCH"} and {m["text"] for m in sp["setup_markers"]} == {"С", "CH"}
 
 
 def test_entry_and_close_markers_follow_the_trade_and_sit_on_the_grid(fx):
     snap = fx("snapshot_smc_short.json")
     sp = spec_for(snap)
     ms = sorted(sp["trade_markers"], key=lambda m: m["t"])
-    assert [m["text"].split()[0] for m in ms] == ["Вход", "+1R", "+3R", "Трейлинг"]
+    assert [m["full"].split()[0] for m in ms] == ["Вход", "+1R", "+3R", "Трейлинг"] and [m["text"] for m in ms] == ["В", "+1", "+3", "Т"]
     assert ms[0]["shape"] == "arrow_down" and ms[0]["position"] == "above"  # шорт: стрелка вниз над ценой
     assert ms[-1]["shape"] == "square" and all(m["t"] % IV == 0 for m in ms)
     assert ms[1]["color"] == "#26a69a"  # прибыльное закрытие - зелёное
@@ -67,7 +67,7 @@ def test_entry_and_close_markers_follow_the_trade_and_sit_on_the_grid(fx):
 def test_long_trade_mirrors_marker_directions(fx):
     snap = fx("snapshot_breakout_long.json")
     sp = spec_for(snap)
-    entry = next(m for m in sp["trade_markers"] if m["text"].startswith("Вход"))
+    entry = next(m for m in sp["trade_markers"] if m["full"].startswith("Вход"))
     assert entry["shape"] == "arrow_up" and entry["position"] == "below"
     assert {s["label"] for s in sp["segments"]} == {"уровень равных хаёв"} and not sp["boxes"]
     levels = {h["text"].split()[0] for h in sp["hlines"] if h["text"].startswith("+")}
@@ -110,7 +110,7 @@ def test_open_trade_extends_the_grid_to_now_and_marks_partial_close(fx):
     now = fmt.to_ms(snap["trade"]["signal_time"]) + 60 * IV
     sp = build_chart_spec(snap, None, now_ms=now)
     assert sp["helper"][-1][0] >= now - now % IV
-    assert [m["text"].split()[0] for m in sorted(sp["trade_markers"], key=lambda m: m["t"])] == ["Вход", "+1R"]
+    assert [m["full"].split()[0] for m in sorted(sp["trade_markers"], key=lambda m: m["t"])] == ["Вход", "+1R"]
     assert sp["trade_markers"][-1]["shape"] == "circle"  # сделка ещё открыта: частичное закрытие - не итоговое (не квадрат)
 
 
@@ -163,3 +163,13 @@ def test_panel_is_structured_and_colored_by_result(fx):
 
 def test_review_absent_for_open_trade(fx):
     assert spec_for(fx("snapshot_open.json"))["panel"]["review"] is None
+
+
+def test_chart_labels_are_one_or_two_characters_and_details_go_to_the_timeline(fx):
+    sp = spec_for(fx("snapshot_smc_short.json"))
+    assert all(len(m["text"]) <= 2 for m in [*sp["trade_markers"], *sp["setup_markers"]]) and all(len(v["text"]) <= 2 for v in sp["vlines"])
+    tl = sp["panel"]["timeline"]
+    assert [e["code"] for e in tl].count("В") == 1 and {"С", "CH", "БУ"} - {e["code"] for e in tl} <= {"БУ"}
+    texts = " | ".join(e["text"] for e in tl)
+    assert "Сигнал стратегии" in texts and "Вход " in texts and "свип" in texts and "CHoCH" in texts and "Трейлинг" in texts
+    assert all(e["time"].endswith("UTC") for e in tl) and len(tl) == len(sp["trade_markers"]) + len(sp["setup_markers"]) + 1

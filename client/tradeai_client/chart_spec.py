@@ -20,7 +20,18 @@ MAX_GRID_BARS = 900
 PANEL_WIDTH_CHARS = 44  # ширина боковой панели ~31% окна (см. chart_window.PANEL_WIDTH)
 _UNIT_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
 _PLAN_LABEL = re.compile(r"^(SL|TP|вход)", re.IGNORECASE)  # линии плана сделки: рисуются из полей сделки
+# Подписи на самом графике - 1-2 буквы (текст поверх свечей слипался): полные названия, цены и время - в блоке «Хронология» правой панели
+_EXIT_CODE = {"scale_1r": "+1", "scale_2r": "+2", "scale_3r": "+3", "be": "БУ", "sl": "SL", "tp": "TP", "trail": "Т", "timeout": "Тм"}
+_SETUP_CODES = {"свип": "С", "choch": "CH", "fvg": "F"}
 _CANDLE_KEYS = ("open_time", "open", "high", "low", "close", "volume")
+
+
+def _setup_code(label: str) -> str:
+    low = label.strip().lower()
+    if low in _SETUP_CODES:
+        return _SETUP_CODES[low]
+    words = [w for w in re.split(r"\W+", label) if w]
+    return ("".join(w[0] for w in words[:2]).upper() or "?")
 
 
 class ChartDataError(ValueError):
@@ -111,7 +122,8 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
     trade_markers: list[dict[str, Any]] = []
     if entry_ms is not None and trade.get("entry_price") is not None:
         trade_markers.append({"t": snap_t(entry_ms), "price": trade["entry_price"], "position": "below" if long else "above",
-                              "shape": "arrow_up" if long else "arrow_down", "color": BLUE, "text": f"Вход {fmt.fmt_price(trade['entry_price'])}"})
+                              "shape": "arrow_up" if long else "arrow_down", "color": BLUE, "text": "В",
+                              "full": f"Вход {fmt.fmt_price(trade['entry_price'])}", "ts": entry_ms})
     for i, (ts, c) in enumerate(close_events):
         if ts is None:
             continue
@@ -120,7 +132,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         label = clean_text(fmt.EXIT_RU.get(c["reason"], c["reason"]))
         trade_markers.append({"t": snap_t(ts), "price": c["price"], "position": "above" if long else "below",
                               "shape": "square" if trade["status"] == "closed" and i == len(close_events) - 1 else "circle", "color": color,
-                              "text": f"{label} {fmt.fmt_r(net)}"})
+                              "text": _EXIT_CODE.get(c["reason"], "З"), "full": f"{label} @ {fmt.fmt_price(c['price'])}  {fmt.fmt_r(net)}", "ts": ts})
     trade_markers = [m for m in trade_markers if m["t"] <= grid_end]
 
     # геометрия сетапа
@@ -141,7 +153,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
                 bar = next(b for b in bars if b["t"] == t)
                 above = float(g["p1"]) >= (bar["h"] + bar["l"]) / 2
                 setup_markers.append({"t": t, "position": "above" if above else "below", "shape": "circle",
-                                      "color": AMBER if label == "свип" else VIOLET, "text": label})
+                                      "color": AMBER if label == "свип" else VIOLET, "text": _setup_code(label), "full": label, "ts": int(g["t1"])})
         else:
             raise ChartDataError(f"Неизвестный тип геометрии: {g['type']!r}")
 
@@ -176,7 +188,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
 
     vlines = []
     if signal_ms is not None:
-        vlines.append({"t": snap_t(signal_ms), "color": AMBER, "text": "Сигнал"})
+        vlines.append({"t": snap_t(signal_ms), "color": AMBER, "text": "С"})
 
     # текстовые панели
     reason = snap.get("reason") or {}
@@ -197,6 +209,16 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         notes.append("Свечи после сигнала не загружены: показаны только свечи снапшота.")
     result += notes
 
+    # хронология: всё, что на графике обозначено буквой, расписано здесь (код, время, что это было, цена)
+    timeline = []
+    if signal_ms is not None:
+        timeline.append({"ts": signal_ms, "code": "С", "text": "Сигнал стратегии", "tone": "neutral"})
+    for m in trade_markers + setup_markers:
+        net_tone = "neutral" if m in setup_markers else ("good" if m["color"] == UP else "bad" if m["color"] == DOWN else "neutral")
+        timeline.append({"ts": m["ts"], "code": m["text"], "text": m["full"], "tone": net_tone})
+    timeline.sort(key=lambda e: e["ts"])
+    for e in timeline:
+        e["time"] = _utc(e.pop("ts")) + " UTC"
     # структурная панель (HTML в окне графика): карточки «Результат», «Разбор сделки», «Причина входа»
     exit_t = snap_t(exit_ms) if exit_ms is not None else None
     after = [b for b in bars if b["post"] and exit_t is not None and b["t"] > exit_t]
@@ -216,6 +238,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         "reason": {"title": clean_text(reason.get("title", "")),
                    "steps": [clean_text(x) for x in str(reason.get("summary", "")).splitlines() if x.strip()],
                    "facts": [[clean_text(f["label"]), clean_text(f["value"])] for f in reason.get("facts", [])]},
+        "timeline": [{**e, "text": clean_text(e["text"]), "code": clean_text(e["code"])} for e in timeline],
         "notes": [clean_text(n) for n in notes],
     }
 

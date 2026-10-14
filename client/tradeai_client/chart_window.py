@@ -75,7 +75,7 @@ def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
         line = chart.create_line(name=f"seg{i}", color=seg["color"], style="dashed", width=1, price_line=False, price_label=False)
         line.set(pd.DataFrame({"time": pd.DatetimeIndex([_ts(seg["t1"]), _ts(max(seg["t2"], seg["t1"] + spec["interval_ms"]))]).astype("datetime64[ns]"),
                                f"seg{i}": [seg["price"], seg["price"]]}))
-        line.marker(time=_ts(seg["t1"]), position="above", shape="circle", color=seg["color"], text=seg["label"])
+        line.marker(time=_ts(seg["t1"]), position="above", shape="circle", color=seg["color"], text="")  # название уровня - в «Хронологии»
     for v in spec["vlines"]:
         chart.vertical_line(_ts(v["t"]), color=v["color"], width=1, style="dashed", text=v["text"])
 
@@ -105,6 +105,9 @@ _PANEL_CSS = """
 #tradeai-panel .pt{padding:3px 0 3px 10px;border-left:3px solid #5b6372;margin:4px 0}
 #tradeai-panel .pt.good{border-left-color:#2bb673;background:none}#tradeai-panel .pt.bad{border-left-color:#e5534b;background:none}
 #tradeai-panel .score{font-size:30px;font-weight:700;color:#ffb300}
+#tradeai-panel .ev{display:grid;grid-template-columns:34px 112px 1fr;gap:6px;padding:3px 0;align-items:baseline}
+#tradeai-panel .ev .code{font-weight:700;text-align:center;background:#232a37;border-radius:4px;padding:0 4px}
+#tradeai-panel .ev .when{color:#8b93a3;font-size:13px}
 #tradeai-panel .warn{color:#ffb300;font-size:13px}
 """
 
@@ -122,6 +125,8 @@ _PANEL_JS = """
   if(res.warning) el('div','warn',res.warning,c);
   if(d.review){var v=el('div','card',null); el('h3',null,'Разбор сделки',v); el('div','score',d.review.headline,v);
     d.review.points.forEach(function(p){el('div','pt '+p.tone,p.text,v);});}
+  if(d.timeline&&d.timeline.length){var tl=el('div','card'); el('h3',null,'Хронология',tl);
+    d.timeline.forEach(function(e){var r=el('div','ev',null,tl); el('span','code t-'+e.tone,e.code,r); el('span','when',e.time,r); el('span','what',e.text,r);});}
   var r=el('div','card'); el('h3',null,'Причина входа',r); el('div',null,d.reason.title,r).style.fontWeight='600';
   d.reason.steps.forEach(function(s){el('div','step',s,r);});
   if(d.reason.facts.length){var f=el('div','card'); el('h3',null,'Параметры сигнала',f); d.reason.facts.forEach(function(kv){row(f,kv[0],kv[1]);});}
