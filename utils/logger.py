@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 import config
 
 # Библиотеки MetaApi (socket.io/engine.io) пишут каждый пакет на уровне INFO ("Received packet MESSAGE") - заглушаем до WARNING.
-_NOISY_LOGGERS = ("engineio.client", "socketio.client", "metaapi_cloud_sdk")
+_NOISY_LOGGERS = ("engineio.client", "socketio.client", "metaapi_cloud_sdk", "httpx", "httpcore")
 _FORMAT = "%(asctime)sZ %(levelname)-8s %(name)s: %(message)s"
 
 

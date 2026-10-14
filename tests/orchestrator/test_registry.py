@@ -18,5 +18,5 @@ def test_websocket_library_loggers_muted(tmp_path, monkeypatch):
     from utils.logger import setup_logging
     monkeypatch.setattr(config, "LOG_DIR", tmp_path)
     setup_logging("t")
-    for name in ("engineio.client", "socketio.client", "metaapi_cloud_sdk"):
+    for name in ("engineio.client", "socketio.client", "metaapi_cloud_sdk", "httpx", "httpcore"):
         assert logging.getLogger(name).level == logging.WARNING

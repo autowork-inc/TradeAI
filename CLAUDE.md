@@ -62,7 +62,7 @@
                                                            ai_civ-* — ЧУЖИЕ контейнеры на этом сервере (порт 8000 занят ими): не трогать
 ```
 
-Состояние сервера на 2026-10-14 (проверено `docker ps`, SQL): `shadow-run`, `api`, `postgres` — healthy; `depth-stream` работает; контейнера `live-run` нет. В БД схема v2; сделок: 1 `closed`, 1 `open`, 1 `cancelled`; 51 событие `state_events`. После деплоя 2026-10-14 лог `shadow-run` показывает историю 15m/4h по 8 крипто-символам **и** загрузку MT5 M15 по EURUSD/XAUUSD/XAGUSD: ключи `METAAPI_*` на сервере уже заданы, все 11 символов в работе (healthy). Шум остался от `httpx` (INFO-запрос к MetaApi каждые ~5 с на символ) — не заглушён, ждёт решения.
+Состояние сервера на 2026-10-14 (проверено `docker ps`, SQL): `shadow-run`, `api`, `postgres` — healthy; `depth-stream` работает; контейнера `live-run` нет. В БД схема v2; сделок: 1 `closed`, 1 `open`, 1 `cancelled`; 51 событие `state_events`. После деплоя 2026-10-14 лог `shadow-run` показывает историю 15m/4h по 8 крипто-символам **и** загрузку MT5 M15 по EURUSD/XAUUSD/XAGUSD: ключи `METAAPI_*` на сервере уже заданы, все 11 символов в работе (healthy). `httpx`/`httpcore` (INFO-запросы к MetaApi каждые ~5 с) заглушены до WARNING.
 
 ### 3.1. Признаки (`features/`)
 
