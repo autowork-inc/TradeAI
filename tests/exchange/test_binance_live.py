@@ -461,7 +461,7 @@ def test_use_testnet_flag_switches_only_the_order_url(monkeypatch):
                               text=True, cwd=root, check=True, env=full).stdout.split()
 
     on = run_({"USE_TESTNET": "true", "BINANCE_PROFILE": "mainnet"})
-    off = run_({"BINANCE_PROFILE": "mainnet"})
+    off = run_({"BINANCE_PROFILE": "mainnet", "USE_TESTNET": "false"})  # явно: иначе подтянется USE_TESTNET из локального .env
     assert on[:2] == ["True", "https://testnet.binancefuture.com"] and on[2] != on[1]  # данные - mainnet, ордера - testnet
     assert off[0] == "False" and off[1] == off[2]
 

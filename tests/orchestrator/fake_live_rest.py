@@ -25,6 +25,7 @@ class FakeRest:
         self.algos: dict[str, dict[str, Any]] = {}
         self.positions: dict[str, float] = {}
         self.entry_prices: dict[str, float] = {}
+        self.hide_avg_price = False  # как testnet: в RESULT-ответе MARKET нет avgPrice (приходит 0)
         self.fills: list[dict[str, Any]] = []  # все исполнения: symbol, side, qty, price, via (market | limit | cid algo-ордера)
         self.strict_immediate = True  # algo-ордер, который сработал бы сразу, отвергается с -2021
         self.income: list[dict[str, Any]] = []
@@ -172,6 +173,8 @@ class FakeRest:
             if p.get("reduceOnly"):  # reduce-only не увеличивает позицию
                 qty = min(qty, abs(pos)) if (pos > 0) == (p["side"] == "SELL") else 0.0
             o["executedQty"], o["avgPrice"], o["status"] = str(qty), str(self.price), "FILLED" if qty else "EXPIRED"
+            if self.hide_avg_price:
+                o["avgPrice"] = "0"
             if qty:
                 self._move(p["symbol"], p["side"], qty, self.price, "market")
         else:

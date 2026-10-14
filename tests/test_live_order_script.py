@@ -114,7 +114,8 @@ def test_main_runs_end_to_end_and_writes_the_json_report(monkeypatch, tmp_path, 
 
 
 def test_command_line_exits_with_config_error_code_before_any_network_when_not_on_testnet():
-    env = {k: v for k, v in os.environ.items() if k not in ("USE_TESTNET", "BINANCE_API_KEY", "BINANCE_API_SECRET")}
+    # load_dotenv() не перезаписывает уже заданные переменные: явное "false" защищает от USE_TESTNET и ключей из локального .env (иначе скрипт ушёл бы в сеть)
+    env = {k: v for k, v in os.environ.items() if k not in ("BINANCE_API_KEY", "BINANCE_API_SECRET")} | {"USE_TESTNET": "false"}
     out = subprocess.run([sys.executable, "-m", "scripts.test_live_order"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
     assert out.returncode == 3  # ConfigError
 

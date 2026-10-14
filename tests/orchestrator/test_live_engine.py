@@ -103,6 +103,16 @@ def test_market_long_entry_then_sl_and_scale_out_levels_in_the_right_order(tmp_p
     assert env.rest.calls("GET", config.INCOME_PATH)[0]["startTime"] == utc_day_start_ms(NOW)  # сутки UTC
 
 
+def test_entry_price_falls_back_to_position_risk_when_the_exchange_sends_no_avg_price(tmp_path):
+    """Testnet 2026-10-14: ответ RESULT на MARKET без avgPrice -> раньше fill_price = 0 (R, безубыток, трейлинг считались бы от нуля)."""
+    env = Env(tmp_path, price=100.5)
+    env.rest.hide_avg_price = True
+    run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))
+    assert env.trade().fill_price == 100.5 and env.trade().status == OPEN
+    assert env.event("live_entry_filled").detail["avg_price"] == 100.5
+    assert [a["triggerPrice"] for a in env.algos()] == ["98", "103", "108"]  # уровни - от фактической цены, как при avgPrice в ответе
+
+
 def test_market_short_is_mirrored(tmp_path):
     env = Env(tmp_path, price=100.0)
     run(env.engine.execute(signal(direction=Direction.SHORT, entry=100.0, sl=102.0), NOW))

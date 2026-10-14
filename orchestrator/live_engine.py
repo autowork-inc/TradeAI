@@ -485,8 +485,13 @@ class LiveExecutionEngine:
             await self._cancel_entry(trade)  # остаток не нужен: план делится на ИСПОЛНЕННЫЙ объём
             res = await self.client.get_order(trade.plan.symbol, trade.entry_cid)
         if res.executed_qty > _EPS:
-            trade.filled_qty, trade.fill_price = res.executed_qty, res.avg_price
-            self._emit_trade(trade, "live_entry_filled", {"qty": res.executed_qty, "avg_price": res.avg_price, "status": res.status})
+            avg = res.avg_price
+            if avg <= 0:  # testnet на ответ RESULT для MARKET не присылает avgPrice (проверено 2026-10-14): цена входа - из positionRisk
+                avg = (await self.client.get_position(trade.plan.symbol)).entry_price
+                if avg <= 0:
+                    raise LiveExecutionError(f"{trade.trade_id}: ордер исполнен ({res.executed_qty}), но цена входа неизвестна (avgPrice и entryPrice = 0)")
+            trade.filled_qty, trade.fill_price = res.executed_qty, avg
+            self._emit_trade(trade, "live_entry_filled", {"qty": res.executed_qty, "avg_price": avg, "status": res.status})
             await self._protect(trade)
         elif res.done:
             self._finish(trade, CANCELLED, f"entry_{res.status.lower()}", now)

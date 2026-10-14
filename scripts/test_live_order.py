@@ -175,8 +175,10 @@ async def run_check(client: BinanceLiveClient, opts: Options, report: Report) ->
         entered = True
         entry = await client.market_order(symbol, "BUY", qty, client_id=client_id(client.id_prefix, "E", tag), ref_price=mark)
         report.facts["entry_order"] = entry.__dict__
-        report.check(entry.status == "FILLED" and abs(entry.executed_qty - qty) < 1e-9 and entry.avg_price > 0, "market_entry",
-                     f"{entry.status}, исполнено {entry.executed_qty}/{qty} по {entry.avg_price} (нотионал ≈ {entry.executed_qty * entry.avg_price:.2f} USDT)")
+        # testnet на RESULT-ответ MARKET не присылает avgPrice (0): цену входа даёт positionRisk (движок поступает так же) - это INFO, не FAIL
+        report.check(entry.status == "FILLED" and abs(entry.executed_qty - qty) < 1e-9, "market_entry",
+                     f"{entry.status}, исполнено {entry.executed_qty}/{qty}, avgPrice в ответе {entry.avg_price}"
+                     + ("" if entry.avg_price > 0 else " (биржа не прислала; цена входа - из positionRisk)"))
         pos = await client.get_position(symbol)
         report.check(abs(pos.amt - entry.executed_qty) < 1e-9 and pos.entry_price > 0, "position_risk",
                      f"positionAmt {pos.amt}, entryPrice {pos.entry_price} (ответ разобран строго)")
@@ -209,7 +211,13 @@ async def run_check(client: BinanceLiveClient, opts: Options, report: Report) ->
         await client.stop_loss(symbol, "SELL", be_price, client_id=be_cid, qty=entry.executed_qty)
         report.ok("breakeven_new_stop_with_two_live", f"третий reduceOnly-ордер (новый стоп {be_price}) принят при живых SL и TP")
         await client.cancel_algo_order(sl_cid)
-        states = {c: await algo_state(client, c) for c in (sl_cid, tp_cid, be_cid)}
+        # DELETE отвечает success, а GET algoOrder ещё некоторое время показывает NEW (проверено на testnet 2026-10-14): ждём терминальный статус до 10 с
+        states = {}
+        for _ in range(20):
+            states = {c: await algo_state(client, c) for c in (sl_cid, tp_cid, be_cid)}
+            if states[sl_cid] in TERMINAL:
+                break
+            await asyncio.sleep(0.5)
         report.check(states[sl_cid] in TERMINAL and states[tp_cid] == "NEW" and states[be_cid] == "NEW", "breakeven_old_stop_cancelled",
                      f"старый SL {states[sl_cid]}, TP {states[tp_cid]}, новый стоп {states[be_cid]}")
         # отказ «сработал бы сразу»: код ответа биржи (информационно)
