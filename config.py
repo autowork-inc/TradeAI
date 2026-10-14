@@ -173,7 +173,7 @@ LIVE_PNL_MAX_AGE_S = 120.0  # PnL за сутки старше этого воз
 LIVE_RISK_STATE_NAME = ".live_risk_state.json"  # защёлка блокировки по суточному лимиту (переживает рестарт)
 # Мульти-биржевой боевой контур (решение пользователя 2026-10-13, вариант А): какой символ исполняется на какой площадке. Любой другой символ
 # получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - MetaApiLiveClient (MT5).
-LIVE_BINANCE_SYMBOLS = ("BTCUSDT", "ETHUSDT")
+LIVE_BINANCE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT")  # 2026-10-14: = крипто-часть SHADOW_SYMBOLS; TRADE_MODE по умолчанию shadow (ничего не отправляется)
 LIVE_MT5_SYMBOLS = ("EURUSD", "XAUUSD", "XAGUSD")
 # Стратегии, которым разрешены только перечисленные символы (остальные - на любых). OBI_Breakout читает L2-стакан и ленту: они есть только у Binance Futures.
 # Для Shadow это вся Binance-крипта пула (SHADOW_SYMBOLS без MT5-символов); LIVE_BINANCE_SYMBOLS (боевое исполнение) не расширяется.

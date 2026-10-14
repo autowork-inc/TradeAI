@@ -51,7 +51,7 @@ def test_symbols_go_to_their_venue(symbol, venue):
     assert router.venues == ("binance", "mt5")
 
 
-@pytest.mark.parametrize("symbol", ["DOGEUSDT", "SOLUSDT", "US500", "BRN", "GBPUSD", "btcusdt", ""])
+@pytest.mark.parametrize("symbol", ["DOGEUSDT", "US500", "BRN", "GBPUSD", "btcusdt", ""])
 def test_other_symbols_are_unsupported(symbol):
     router, *_ = make_router(with_binance=True)
     rej = router.reject_unsupported(symbol)
@@ -320,3 +320,12 @@ def test_router_pnl_per_venue_and_account_currency_check():
 def test_build_router_without_mt5_is_binance_only():
     router = run(build_router(BinanceLiveClient(object()), with_mt5=False))
     assert router.venues == ("binance",) and router.mt5 is None and router.venue_of("EURUSD") is None
+
+
+def test_live_binance_pool_is_the_eight_shadow_cryptos_and_mt5_stays_separate():
+    crypto = tuple(s for s in config.SHADOW_SYMBOLS if s not in config.LIVE_MT5_SYMBOLS)
+    assert config.LIVE_BINANCE_SYMBOLS == crypto and len(crypto) == 8
+    assert config.LIVE_MT5_SYMBOLS == ("EURUSD", "XAUUSD", "XAGUSD") and not config.LIVE_ENABLE_MT5
+    assert config.TRADE_MODE == "shadow"  # по умолчанию ничего не отправляется
+    assert set(config.LIVE_BINANCE_SYMBOLS).isdisjoint(config.LIVE_MT5_SYMBOLS)
+    config.validate()
