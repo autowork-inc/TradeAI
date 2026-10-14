@@ -1,1163 +1,294 @@
 # CLAUDE.md — проект TradeAI
 
-> Главный файл проекта. Здесь лежат план, архитектура, принятые решения, открытые вопросы и журнал изменений.
-> Claude обновляет этот файл после каждого значимого шага. Источник правды — этот файл, а не память чата.
-> Последнее обновление: 2026-10-13 (**сопровождение MT5-позиций планом выхода Shadow (Scale Out / безубыток / трейлинг / тайм-аут, закрытый рынок 10018 — отложенная команда без Safe Mode), паритет с `VirtualTracker` на 176 траекториях; пул Shadow = BTC, ETH, EURUSD, XAUUSD, XAGUSD, данные Forex/металлов из MetaApi (`orchestrator/mt5_feeds.py`) — разд. 3.28**; мульти-биржевой боевой контур (вариант А): `exchange/router.py` (Binance: BTCUSDT, ETHUSDT / MT5: EURUSD, XAUUSD, XAGUSD / иначе `unsupported_symbol`), отказ `market_closed` для закрытого Forex без Safe Mode, сквозной суточный лимит $50 по сумме Binance + MT5 — разд. 3.27**; исполнение MT5: `exchange/symbol_mapper.py`, `exchange/mt5_risk.py`, торговые методы `MetaApiLiveClient`, живая связь с демо-счётом проверена; US500 и нефть у брокера недоступны — разд. 3.26**; клиент MetaApi, разд. 3.25; Git-репозиторий и `.gitignore`; пул Shadow → `BTCUSDT`, `ETHUSDT` (задеплоено); БД очищена скриптом `scripts/reset_db.py` (разд. 3.24); скелет `exchange/mt5_metaapi.py` для Forex/металлов через MetaApi — разд. 3.24**) · 2026-10-13 (**Live Execution Engine доработан по решениям пользователя: выход = Shadow (Scale Out, безубыток, трейлинг, тайм-аут) с тестом паритета, файл состояния + сверка с биржей при старте, `USE_TESTNET`, скрипт `scripts/test_live_order.py`; по-прежнему ВЫКЛЮЧЕН, на сервер не деплоился — разд. 3.23**) · 2026-10-12 (боевой модуль исполнения: `exchange/binance_live.py`, Live Risk Manager, флаг `TRADE_MODE=shadow|live`) · 2026-10-11 (**аналитический контур AI Risk Manager: локальный MCP-сервер `mcp_server/` — только чтение БД, 3 инструмента, разд. 3.22**; мульти-стратегийный Shadow: 5 параллельных стратегий, изоляция позиций по ключу `символ + strategy_id`, миграция БД v2, лента и стакан для OBI — разд. 3.21**; HTF-фильтр H4 и новый пул монет Shadow — разд. 3.20; прямой доступ к API по IP :8001, клиент в один клик — разд. 3.19) · 2026-10-10 — **ФИНАЛЬНАЯ ВЕРСИЯ уровня кода.** Этап 6 ✅ принят пользователем (разд. 3.19), О28–О32 утверждены, открытые вопросы закрыты (разд. 6.1); итоговый статус — разд. 7.1
+> Главный файл проекта: что это, как устроено, что работает, что не проверено, какие решения приняты.
+> Источник правды — этот файл и код, а не память чата. Claude обновляет его после каждого значимого шага.
+> **Последняя полная сверка с кодом и сервером: 2026-10-14.** Всё, что не проверено, помечено «❓». Предыдущая (длинная) версия — в git, коммит `907b64e`.
 
 ---
 
-## 0. Правила работы над проектом
+## 0. Правила работы
 
-1. Все ответы и документация на русском языке.
-2. Каждое утверждение перепроверяется. Непроверенное явно помечается как «❓ не проверено» и не выдаётся за факт.
-3. **Действовать только после утверждения плана.** Код пишется только по утверждённым пунктам (статус ✅ в разделе 6).
-4. Объяснять простым языком: понятно и специалисту, и новичку. Термины расшифровываются (см. Глоссарий, раздел 10).
-5. Ответы структурированы: заголовки, таблицы, этапы.
-6. После каждого шага обновляются разделы «Этапы» (7), «Журнал решений» (8) и «Журнал изменений» (9).
-
----
-
-## 1. Контекст проекта
-
-- **Что есть сейчас:** рабочий асинхронный торговый движок для Binance USDⓈ-M Futures (Testnet/Mainnet).
-- **Стек:** Python, asyncio, Polars (пайплайн признаков `WsLiveFeatureFeed`), система барьеров `LiveBarrier`, идемпотентность ордеров через `clientOrderId`, Docker Compose, Safe Mode.
-- **Ранее (Stage 1):** сбор и хранение сырых данных: свечи OHLCV в `.parquet`, снимки стакана в `.jsonl`.
-- **Пивот:** уход от HFT/ML-предсказаний по стакану к системному алгоритмическому Swing-трейдингу (таймфреймы 15m/1h) на базе Smart Money Concepts (SMC) и Price Action.
-- **Цель текущего этапа:** Multi-Strategy Orchestrator + БД логов + клиент мониторинга + две стратегии (SMC Swing, Breakout Buildup).
-- **Приоритет с 2026-10-10 (решение пользователя):** боевое исполнение (Этап 4) **заморожено** — код `LiveBarrier`, LIVE-приёмник и скрипт `test_algo_live.py` остаются как есть и не развиваются; главная цель — **Shadow Mode на VPS** с записью в PostgreSQL для сбора реальной статистики на публичном mainnet WebSocket (разд. 3.16–3.18).
-- **Этап 6 (✅ принят 2026-10-10, по заданию пользователя):** FastAPI-сервер мониторинга на VPS (`api/`, сервис `api` в compose) и настольный клиент Flet (`client/`, собирается в `.exe` через `flet pack`): Dashboard (живое состояние автомата), Statistics, History с окном графика сделки (разд. 3.19).
+1. Ответы и документация — на русском. Объяснять просто: термины — в глоссарии (разд. 10).
+2. Каждое утверждение перепроверяется; непроверенное помечается «❓ не проверено» и не выдаётся за факт.
+3. Код пишется только по утверждённым пунктам (разд. 6).
+4. После значимого шага обновляются разд. 7 (этапы), 8 (решения), 9 (изменения).
+5. Секреты (ключи бирж, токен MetaApi, пароли, `.env*`) не коммитятся и не пакуются в архивы деплоя; на сервер секреты вписывает пользователь сам.
 
 ---
 
-## 2. Жёсткие архитектурные правила (не обсуждаются)
+## 1. Что это
+
+Система алгоритмического свинг-трейдинга (таймфрейм M15, фильтр H4) на Smart Money Concepts и Price Action.
+**Сейчас работает только Shadow Mode:** пять стратегий считают виртуальные сделки по реальному рынку, ордера не отправляются; сделки пишутся в PostgreSQL на VPS; смотреть их можно через API и настольный клиент `TradeAI-Monitor.exe` или через MCP-сервер на ПК.
+Боевое исполнение написано и протестировано на имитациях, но **выключено** (`TRADE_MODE=shadow`) и ни разу не проверялось на живой бирже.
+
+| Рынок | Инструменты в Shadow | Источник данных | Боевое исполнение (выключено) |
+|---|---|---|---|
+| Крипта | `BTCUSDT`, `ETHUSDT` | Binance Futures (mainnet, публичные WebSocket/REST) | Binance Futures (`exchange/binance_live.py`) |
+| Forex / металлы | `EURUSD`, `XAUUSD`, `XAGUSD` | MetaApi (облачный шлюз к MT5) | MetaApi → MT5 (`exchange/mt5_*.py`, `router.py`) |
+
+Исторически (до пивота) в проекте есть ML-контур на стакане Binance (сборщики, конвейер признаков, бэктестер, боевой мост `execution/`, модель Ridge) — он описан в разд. 3.10 и в `README.md`; **в эксплуатации сейчас активен только сборщик стакана `depth-stream`**.
+
+---
+
+## 2. Жёсткие архитектурные правила
 
 | # | Правило | Как проверяется |
 |---|---|---|
-| R1 | **Fail-Fast.** Никаких «слепых» `try/except`. Ошибка роняет процесс → Docker перезапускает → Safe Mode блокирует торги. | Код-ревью: нет подавления исключений |
-| R2 | **Математика паттернов только векторно в Polars:** `rolling_*`, `shift`, `when/then/otherwise`, `forward_fill`, `cum_sum`, `.over()`. Никаких итераций по строкам и `apply()`. | Код-ревью + поиск `apply`, `iter_rows`, `map_elements` |
-| R3 | **Нет заглядывания в будущее (lookahead bias).** Swing High на баре `i` валиден, только если это максимум в окне `[i−k, i+k]`. Флаг появляется на баре `i+k`, не раньше. | Обязательный «тест обрезки» (см. R4) |
-| R4 | **Тест обрезки** для каждого признака: признаки, посчитанные по данным до момента `t`, обязаны совпасть со строкой `t` из расчёта по всей истории. | pytest, сотни случайных `t` |
-| R5 | **Используются только закрытые свечи** (в kline-потоке флаг закрытия = true). | Код-ревью FeatureEngine |
-| R6 | **Стопы живут на бирже, а не в памяти бота.** Позиция открыта → сразу защитный SL на бирже. | Тест на testnet: убить процесс, стоп остаётся |
-| R7 | **Снапшот пишется в БД до отправки ордера.** Не бывает ордера без записанной причины входа. | Код-ревью порядка вызовов |
-| R8 | **Одна функция детекции для бэктеста и live.** Нет отдельной «живой» логики паттернов. | Сравнение сигналов бэктеста и shadow |
+| R1 | **Fail-Fast.** Никаких «слепых» `try/except`: ошибка роняет процесс, Docker перезапускает, Safe Mode блокирует торги. Исключение — осознанные повторы временных сбоев MetaApi и ожидаемые отказы (значения, не исключения), см. разд. 3 | Тесты запрещают `except Exception`, голый `except:`, `suppress` в `orchestrator/`, `strategies/`, `features/`, `shadow_run.py` |
+| R2 | Математика паттернов — только векторно в Polars (`rolling_*`, `shift`, `when/then/otherwise`, `forward_fill`, `cum_sum`, `.over()`); без `apply`/`iter_rows`/`map_elements` | Тест-грепом |
+| R3 | Нет заглядывания в будущее: свинг на баре `i` виден только с бара `i+k` | R4 |
+| R4 | Тест обрезки: признаки по данным до `t` совпадают со строкой `t` расчёта по всей истории | pytest, сотни случайных `t` |
+| R5 | Только закрытые свечи | Контракт фидов + тесты |
+| R6 | Стопы живут на бирже/у брокера, а не в памяти бота | Тесты имитации; на живой бирже ❓ |
+| R7 | Снапшот/намерение пишется до отправки ордера | Порядок вызовов в движке, тесты |
+| R8 | Одна функция детекции для бэктеста и live; выход боевого контура = выход Shadow | Тесты паритета (разд. 3.8, 3.9) |
 
 ---
 
 ## 3. Архитектура
 
+### 3.0. Карта процессов
+
 ```
- Binance WS (закрытые свечи 15m/1h)
-        │
- WsLiveFeatureFeed ──► FeatureEngine (Polars, чистые функции, без циклов)
-        │                 свинги · ATR · свип · FVG · CHoCH · EQH/HL · объём
-        ▼
- Orchestrator
-   ├─ StrategySMC.detect(df)      → Signal | None   (чистая функция)
-   ├─ StrategyBreakout.detect(df) → Signal | None   (чистая функция)
-   ├─ CoinOwnershipLock           (правило «владелец монеты»)
-   ├─ RiskSizer                   (объём из % риска на сделку)
-   └─ маршрут: LIVE → LiveBarrier  |  SHADOW → VirtualTracker
-        │
- LiveBarrier: LIMIT/MARKET → /fapi/v1/order ;  STOP/TP → /fapi/v1/algoOrder
-        │         идемпотентность: clientOrderId / clientAlgoId
-        ▼
- PostgreSQL (trades, trade_snapshots, state_events)
-        │
- FastAPI на VPS (только чтение: REST + WebSocket) ── прямой доступ http://<IP VPS>:8001, защита X-API-Key (с 2026-10-11; SSH-туннель — по желанию)
-        │
- Flet-клиент (.exe): Dashboard · History · окно графика
+ ПК пользователя (Windows)                                  VPS 193.233.75.254 (Ubuntu 24.04, Docker 29, Compose 2.40; 6 ядер / 8 ГБ)
+ ─────────────────────────                                  ────────────────────────────────────────────────────────────────
+ TradeAI-Monitor.exe ──HTTP :8001, X-API-Key──────────────► api (FastAPI, только чтение БД)
+ Cursor / Claude Desktop ─MCP(stdio)─► mcp_server ─SSH-туннель 127.0.0.1:15432─► postgres:16 (порт наружу не публикуется)
+                                                                       ▲ пишет
+ Binance fstream (kline_15m/4h, aggTrade, markPrice, depth10) ─────► shadow-run: 5 стратегий → VirtualTracker → PgRecorder
+ MetaApi (свечи M15, котировки; нужны ключи — их на сервере нет) ──►   (контейнер без ключей Binance, read-only ФС, без лимитов CPU/RAM)
+                                                           depth-stream (отдельный сборщик стакана для ML, профиль `collectors`)
+                                                           ai_civ-* — ЧУЖИЕ контейнеры на этом сервере (порт 8000 занят ими): не трогать
 ```
 
-### 3.1. Граница «векторы / события» (✅ утверждено, D1)
-- **Polars:** все признаки, определение сетапа и геометрия. На каждой закрытой свече пересчитываются последние ~300 баров целиком.
-- **Python-обработчики событий:** жизненный цикл ордера (выставлен → исполнен → безубыток → закрыт). Это реакция на ответы биржи, а не перебор строк DataFrame.
+Состояние сервера на 2026-10-14 (проверено `docker ps`, SQL): `shadow-run`, `api`, `postgres` — healthy; `depth-stream` работает; контейнера `live-run` нет. В БД схема v2; сделок: 1 `closed`, 1 `open`, 1 `cancelled`; 51 событие `state_events`. Shadow-run работает **только по BTC/ETH** (в `.env.shadow` нет `METAAPI_*`).
 
-### 3.2. Блок 1 — Orchestrator
-- Изоляция: у каждой стратегии свой виртуальный трекер позиций (Shadow Mode).
-- Конфликты в One-Way Mode: правило «владелец монеты» (✅ D4): кто первый вошёл, тот управляет стейтом монеты; остальные сигналы пишутся в лог как `skipped_due_to_lock`.
-- Shadow-стратегии запускаются в отдельном Docker-контейнере, тот же код (✅ D5).
-- При старте: сверка позиций и ордеров с биржей. Если за N минут больше M рестартов → Safe Mode.
+### 3.1. Признаки (`features/`)
 
-### 3.3. Блок 2 — PostgreSQL (✅ реализовано в Этапе 5, подробности — разд. 3.17)
-- `trades`: id (= `signal_id`), strategy_name, **strategy_id** (с миграции v2, 2026-10-11; для новых строк равен strategy_name, у старых — прежнее имя `smc` / `breakout`), coin, side, kind, mode (live/shadow), status, qty, remaining_frac, signal_time, entry_time, exit_time, planned_entry, entry_price, exit_price (средневзвешенная по закрытиям), sl, tp, stop_price, risk, risk_amount, pnl, fees, r_multiple, gross_r, mfe_r, mae_r, exit_reason (sl/be/trail/tp/timeout/…), be_armed, gap_affected, client_order_id, plan (JSONB: уровни Scale Out), created_at, updated_at.
-- `trade_closes` (добавлена 2026-10-10): **каждое** закрытие — частичное и итоговое: seq, ts, reason (`scale_1r`/`scale_3r`/`sl`/`be`/`trail`/`tp`/`timeout`), frac, qty, price, gross_r, fees_r, net_r, pnl, fees.
-- `trade_snapshots`: trade_id, **strategy_id** (v2), created_at, candles (JSONB, последние 100 свечей: OHLCV + ATR), geometry (JSONB), meta (JSONB).
-- `state_events`: ts, coin, strategy, **strategy_id** (v2; NULL у системных событий `htf`, это не стратегия), signal_id, from_state, to_state, kind, reason, detail (JSONB): переходы автомата сетапа SMC (`short:S1` → `short:S2` …) и жизненный цикл сделок.
-- Цены и объёмы хранятся в `NUMERIC`, время в `TIMESTAMPTZ` (UTC).
-- Единый формат геометрии: `{type: zone|line|marker, t1, t2, p1, p2, label}`. Клиент рисует его, ничего не зная о стратегиях.
+- `features/smc.py`: `add_features(df, SmcParams, interval_ms)` → свечи + колонки; `validate_candles` (fail-fast: пропуск свечи, null, невозможная свеча, несколько символов → `DataError`). Колонки: `atr` (SMA-ATR(14), не Уайлдер — иначе live≠бэктест, О7), `vol_sma_prev`, `vol_ratio`; `swing_high/low` (k=5, окно 11; `left_max < cand >= right_max`; амплитуда > 1.5·ATR[i−1]); три последних свинга `sh1..3_*`, `sl1..3_*`; поджатие `eqh_*`, `hl_ok`, `buildup*`; FVG `fvg_bear/bull_*` (импульс > 1.0·ATR).
+- `features/htf.py`: HTF Bias по H4 — **структура свингов** (HH+HL = Bullish, LH+LL = Bearish, иначе Neutral; не EMA, т.к. EMA зависит от глубины истории). H4-свеча видна M15-свече только после своего закрытия.
+- `features/defaults.py`: константы сделок — риск 1% (`RISK_PER_TRADE`), потолок плеча позиции `MAX_EXPOSURE=5.0`, буфер SL 0.2·ATR, TP 3R, BE на +1R, срок сетапа 30 свечей, срок лимитки 10 свечей, вход на 50% FVG, Scale Out `((1R, 50%), (3R, 40%))` + runner 10% с трейлингом 3·ATR (`atr`; режим `wick` — по теням 3 свечей), `HTF_INTERVAL=4h`, `HTF_FILTER_ENABLED=True`.
 
-### 3.4. Блок 3 — Flet-клиент (✅ реализован в Этапе 6, подробности и отступления — разд. 3.19)
-- Подключение к VPS: REST (история) + WebSocket (живой статус), напрямую по IP сервера (порт 8001, ключ `X-API-Key`); до 2026-10-11 — только через SSH-туннель.
-- Dashboard: состояния стейт-машины по монетам.
-- History: таблица сделок; двойной клик → окно графика (`lightweight-charts-python`, отдельное окно), зоны FVG/риска и линии поджатия из снапшота.
+### 3.2. Стратегии (`strategies/`, реестр `orchestrator/registry.py`)
 
-### 3.5. Блок 4 — Стратегия 1: SMC Swing (LIMIT), шорт и лонг симметрично (D6)
-Описание дано для Bearish (шорт); Bullish (лонг) — зеркально: свип лоу, Bullish FVG, CHoCH вверх.
-1. Market Structure: Swing High/Low по правилу R3, k = 5 (D10), равные хаи — `left_max < cand >= right_max` (D2), фильтр амплитуды (хай кандидата − минимум лоу окна) > 1.5·ATR (D3).
-2. Liquidity Sweep: high > уровня последнего неснятого Swing High, close < этого уровня.
-3. Bearish FVG: low[i−2] > high[i]; тело импульсной свечи (i−1) > **1.0·ATR** (было 1.5, О12; ATR с предыдущего бара).
-4. CHoCH: close ниже последнего подтверждённого Swing Low в рамках медвежьего сетапа.
-5. Состояния: S0 пул ликвидности → S1 свип → S2 падение + FVG → S3 CHoCH → S4 LIMIT на 50% FVG (D7).
-6. Риск: 1% депозита на сделку (D10); SL за хай свипа + буфер; TP = 3R; при касании mark price отметки +1R мгновенный перенос SL в безубыток (D11; выставить новый стоп → отменить старый, т.к. изменение условных ордеров не поддерживается). **В Shadow Mode с 2026-10-10 вместо «100% на 3R» — Scale Out: 50% на +1R, 40% на +3R, 10% runner с трейлингом (разд. 3.16).**
-7. Отмена сетапа: закрытие выше хая свипа; истечение времени жизни — **30 баров** от свипа до CHoCH (было 15, О12), 10 баров на неисполненный LIMIT (D8); цена дошла до TP до исполнения лимитки.
+Пять стратегий работают параллельно на одних свечах M15 и одном потоке H4; решение — на закрытой свече. `strategy_id` = имя стратегии (попадает во все таблицы БД и в ключ позиции `<монета>_<strategy_id>`).
 
-### 3.6. Блок 5 — Стратегия 2: Breakout Buildup (MARKET)
-1. Equal Highs: 3 последних подтверждённых Swing High, (max − min) / min ≤ 0.1%.
-2. Higher Lows: 3 последних подтверждённых Swing Low строго растут и (предложено) лежат между хаями по времени.
-3. Триггер: close > max(Equal Highs).
-4. Фильтр объёма: volume > 2 × SMA20 объёма по предыдущим 20 барам (без пробойного).
-5. Вход MARKET после закрытия пробойной свечи. В бэктесте/shadow вход по открытию следующего бара.
-6. SL под Low 3 + буфер; TP — жёсткий фикс 3R (D9; трейлинги тестируем позже на данных из БД); риск 1% депозита (D10). BE на +1R — ❓ см. О4. **В Shadow с 2026-10-10 управление позицией — Scale Out (разд. 3.16): фикс 3R для входа в `Signal.tp` остаётся, но 10% остатка идут с трейлингом.**
-7. Ограничение: пробой до подтверждения 3-го хая (k баров) пропускается — это цена отсутствия заглядывания в будущее.
-
-### 3.7. Эталонная формула свинга (✅ D2; k = 5 по D10)
-```python
-k = 5                                         # окно 2k+1 = 11 баров
-high = pl.col("high")
-cand      = high.shift(k)                     # кандидат: бар i = j−k
-left_max  = high.shift(k + 1).rolling_max(k)  # бары i−k … i−1
-right_max = high.rolling_max(k)               # бары i+1 … j (текущий)
-is_swing_high = ((cand > left_max) & (cand >= right_max)).fill_null(False)
-# Флаг ставится на строку j — когда бар i+k ЗАКРЫЛСЯ.
-```
-
-### 3.8. Карта интеграции (Этап 0, прочитано в коде 2026-10-08)
-
-**Корень проекта:** `D:\softs\Trading`. Python 3.12.9, Polars 1.44.2 (`requirements.txt`: `polars>=1.44,<2`), pytest 9, numpy нет. Символы `BTCUSDT`, `ETHUSDT` (`config.SYMBOLS`). Тесты: `.venv\Scripts\python.exe -m pytest tests` (938 старых тестов зелёные до и после Этапа 1).
-
-| Компонент | Файл | Что есть на самом деле | Что это значит для плана |
+| strategy_id | Логика | Вход | План выхода |
 |---|---|---|---|
-| `WsLiveFeatureFeed` | `execution/ws_live_features.py` | Наследник `LiveFeatureFeed`. Два WS: `<sym>@depth10@500ms` (`config.WS_BASE_URL`, /public) и `<sym>@kline_1m` (`config.WS_MARKET_URL`, /market). Решение запускает событие закрытия свечи `k.x = true` (R5 уже соблюдён). `poll(now_ms)` отдаёт строки **ML-признаков** (стакан + свечи 1m). Таймфрейм зашит: `INTERVAL = "1m"` в `execution/live_features.py`. Переподключение с backoff, `LIVE_WS_MAX_RECONNECTS` подряд неудач → исключение (fail-fast). Свечи хранятся в `_candles[symbol]` (приватно) | Для 15m/1h переиспользовать не фид целиком, а его кирпичи: `collectors.depth_stream.connect`, `decode_frame`, `parse_klines`, схему `KLINE_SCHEMA`, схему `_stream_loop/_consume`. Нужен новый лёгкий `SmcKlineFeed` (только `@kline_15m` / `@kline_1h`, без стакана), ML-фид не трогаем |
-| Конвейер признаков | `pipeline/features/base.py` | Фасад `FeatureBuilder`: только каузальные операции, **сравнения и `bool` запрещены** (`__eq__`/`__lt__` бросают `ForbiddenOperation`) | SMC-признаки (флаги, `when/then`, `forward_fill`) на нём не выразить. Они живут в отдельном пакете `features/` (создан), ML-конвейер не затронут |
-| `LiveBarrier` | `execution/live_barrier.py` | `submit(OrderIntent(symbol, side, qty, asof_ts, order_type, limit_price, ttl_ms), reduce_only=)` → `POST /fapi/v1/order`. LIMIT идёт `GTX` (post-only, `LIVE_POST_ONLY=True`), срок жизни `expire_due`. Идемпотентность: `clientOrderId` создаётся один раз, запись в `LocalState` на диск **до** POST. Только One-Way. **С Этапа 4 (2026-10-08)** есть Algo API: защитные STOP_MARKET / TAKE_PROFIT_MARKET, перенос в безубыток, разбор `ALGO_UPDATE` (разд. 3.13) | **С 2026-10-09:** защита — `quantity` + `reduceOnly` (не `closePosition`), безубыток «POST нового → DELETE старого» (разд. 3.13); LIVE-приёмник оркестратора готов (разд. 3.14); осталась проверка на testnet скриптом `scripts/test_algo_live.py` (разд. 3.15, запускает пользователь) |
-| Чужие исполнения | `LiveBarrier._foreign`, `check_drift` | Любое исполнение под `clientOrderId`, которого нет в `LocalState`, включает **Safe Mode**; расхождение позиции биржи и локальной тоже | ✅ **Закрыто в Этапе 4:** исполнение порождённого algo-ордера опознаётся по id ордера в движке (`ai` из `ALGO_UPDATE` / `actualOrderId` из REST); пока опознания нет, исполнение ждёт в буфере, а не включает Safe Mode (разд. 3.13) |
-| Safe Mode | `execution/state.py` | `SafeMode`: защёлка-файл `data/.safe_mode`, `trip(reason, details)`, `require_trading()` перед каждым ордером, увеличивающим риск; `clear(by)` только вручную. `reduce_only`-ордера и отмены разрешены | LIVE-приёмник проверяет `safe.active` при приёме сигнала (отказ `safe_mode`) и перед отправкой; цикл `smc_live_run` выходит кодом 4. «Счётчик рестартов → Safe Mode» (разд. 3.2) **пока не реализован** |
-| Состояние | `execution/state.py`, `data/live_state.json` | `LocalState`: `positions`, `orders` (по `clientOrderId`), `next_ticket_id`; атомарная запись | Состояние «владельца монеты» (D4) и сетапов добавляется рядом |
-| Запуск | `scripts/live_run.py`, `Dockerfile`, `docker-compose.yml` | `LiveRun` под ML-стратегию (`--model-path out/ridge_model.json`); сервисы: сборщик стакана, загрузчик свечей, live-run, фандинг. `data/.instance_lock.live_run` присутствует — по заметкам, на testnet крутится боевой процесс: **не запускать второй `live_run` и не трогать работающий** | Оркестратор — новый сервис/точка входа; shadow (D5) — отдельный сервис в compose (с 2026-10-10 вместе с `postgres`, разд. 3.18) |
-| Данные свечей | `data/raw/klines/<SYM>/<TF>/<YYYY-MM>.parquet`, `pipeline/loaders/klines_loader.py` | **Обновлено 2026-10-08:** `config.KLINE_INTERVALS = ("1m","15m","1h")`, `HISTORY_START = 2026-04-01`. Реальные свечи **mainnet** 15m и 1h скачаны (по 18 288 / 4 572 бара на монету, 2026-04-01 → 2026-10-08, без разрывов, валидация `validate_candles` пройдена). **1m остаётся синтетическим** (48 ч, `data/raw/SYNTHETIC.json` описывает только его); синтетические 1h убраны в `data/raw/klines/<SYM>/_synthetic_1h_backup/` | Загрузчик не привязан к двум таймфреймам — ✅ работает с любым из `INTERVAL_MS`. В `.env` профиль `testnet`: для скачивания реальных данных запускать с `BINANCE_PROFILE=mainnet` (публичные свечи, ключи не нужны) |
-| PostgreSQL, Orchestrator, FastAPI, Flet | — | В коде отсутствуют | Этапы 3, 5, 6 |
-| Стиль кода | везде | Русские докстринги/логи, ошибки из `utils/errors.py` (`DataError`, `ConfigError`, ...) с кодами выхода, 4xx/5xx и сетевые — отдельные классы | `features/` следует тому же |
+| `SMC_Pro_Trend` | Свип пула ликвидности → медвежий/бычий FVG → CHoCH (автомат S0…S4); H4-фильтр: шорт не при Bullish, лонг не при Bearish (Neutral разрешён). SL за хай свипа + 0.2·ATR, TP 3R. Свип без сетапа против H4 не начинается | LIMIT на 50% FVG | Scale Out 50% на +1R (+BE) / 40% на +3R / runner 10% |
+| `SMC_Counter_Trend` | Свип пула глубиной ≥ 1.5·ATR, закрытие обратно, объём > 1.5·SMA20, разворотная свеча, **строго против H4** (Neutral — запрет) | MARKET | 100% на +1R |
+| `OBI_Breakout` | BOS (закрытие за свингом + тело > 1·ATR) + подтверждение: OBI топ-10 ≥ ±0.25 за последние 120 с свечи **или** дельта ленты ≥ ±0.30 при объёме ≥ 1.5·SMA20 | MARKET | Scale Out по умолчанию |
+| `ICT_Killzones` | Ложный пробой диапазона Азии (00:00–07:00 UTC) в killzone Лондона (07–10) или Нью-Йорка (12–15), без перехода на летнее время | MARKET | Scale Out по умолчанию |
+| `VWAP_Reversion` | Касание ±3σ дневного Anchored VWAP (с 00:00 UTC, ≥ 16 свечей суток) за 3 свечи + разворотный паттерн (поглощение / pin-bar) | MARKET | 50% на +1R (+BE), 50% на +2R, без runner'а |
 
-### 3.9. Модуль признаков `features/` (Этап 1, готов)
+Вне боевого набора остаётся `strategies/breakout.py` (Breakout Buildup: 3 равных хая + растущие лои + пробой при объёме > 2×SMA20) — код и тесты есть, в реестр не входит. `strategies/simulate.py` + `runner.py` — пессимистичный бэктест SMC/Breakout на схеме «100% на 3R» (поэтому его выходы **не сопоставимы** с Scale Out Shadow).
 
-| Файл | Содержимое |
+### 3.3. Оркестратор и Shadow Mode (`orchestrator/`, `scripts/shadow_run.py`)
+
+- `Orchestrator.on_context(ctx)`: проверка непрерывности свечей → `on_bar_closed` приёмникам → для каждой стратегии `analyze/detect` → маршрут сигнала: старый (> 30 с) → `skipped_stale`; монета занята → `skipped_due_to_lock`; отказ риска → `skipped_risk`; иначе `submit` + снапшот в БД (последние 100 свечей + геометрия + meta).
+- `CoinOwnershipLock` (D4): у **каждой SHADOW-стратегии своя** блокировка монеты; все LIVE-стратегии делят одну.
+- `VirtualTracker`: ключ позиции `<монета>_<strategy_id>`, вторая активная позиция по ключу — `TrackerError`; эквити виртуальный 10 000 USDT, риск 1%, потолок плеча 5.0 (иначе `skipped_risk`/`exposure`, объём молча не урезается). Правила: LIMIT исполняется при строгом проходе цены сделки (maker 0.02%), MARKET — по первому тику после сигнала (taker 0.05%); стоп/уровни исполняются по цене тика; на одном тике сначала стоп, потом уровни; безубыток — mark price +1R **или** первый уровень (только к прибыли); runner: стоп = лучшая цена ∓ 3·ATR последней закрытой свечи, только подтягивается, действует со следующего тика; тайм-аут 192 свечи; отмены лимитки: закрытие за хаем свипа (`invalidated`), 10 свечей (`ttl`), цена дошла до TP (`tp_before_fill`); обрыв потока тиков → `gap_affected` (в статистику не входят).
+- Фиды Binance: `SmcKlineFeed` (WS `kline_15m` / `kline_4h` на `/market/stream` + REST-история 300 свечей после подписки, replay после обрыва), `TickFeed` (`aggTrade` + `markPrice@1s`), `DepthFeed` (`depth10@500ms`, `/public/stream`) → `MicroStructure` (колонки `ms_obi`, `ms_delta` только на последней строке; неполные данные → null, fail-closed). Переподключение — `ReconnectingStream`, `LIVE_WS_MAX_RECONNECTS` подряд → падение.
+- `scripts/shadow_run.py`: сборка из `config.SHADOW_SYMBOLS`; MT5-символы включаются только при наличии `METAAPI_TOKEN` и `METAAPI_ACCOUNT_ID` в окружении (иначе предупреждение в лог и работа по крипте); цикл раз в секунду, пульс `.shadow_heartbeat` (healthcheck: свежее 120 с), сводка в лог раз в час. Состояние позиций — в памяти: при рестарте висящие сделки помечаются `aborted/process_restart` и в статистику не входят (О17, О26).
+- Коды выхода процессов: 0 штатно; 1 сбой; 2 бан биржи (`.ban_lock`); 3 конфигурация / 4xx; 4 Safe Mode.
+
+### 3.4. Данные Forex и металлов для Shadow (`orchestrator/mt5_feeds.py`)
+
+Binance не отдаёт `EURUSD/XAUUSD/XAGUSD`, поэтому для них отдельные фиды с тем же контрактом: `Mt5KlineFeed` (M15 из MetaApi `get_candles`, опрос раз в 5 с, свеча закрыта при `open+15м+3с ≤ сейчас`), `Mt5HtfView` (H4 **производный из M15**, границы UTC 00/04/…; обрабатывает тот же снимок хранилища, что и M15, иначе M15 остался бы без своего H4), `Mt5TickFeed` (котировка раз в секунду → два тика trade+mark по середине bid/ask; ленты и стакана нет, поэтому `OBI_Breakout` по MT5 не торгует).
+Выходные и паузы: дыры между известными закрытыми свечами заполняются **плоскими свечами** (O=H=L=C=прошлый close, объём 0) «назад» — когда пришла следующая реальная свеча; плоские свечи и 20 свечей после дыры ≥ 4 свечей получают `received = закрытие + 1 ч` → `skipped_stale`, не торгуются. Временные сбои MetaApi повторяются до 20 раз подряд (на тиках — с `gap_affected`), затем падение. Shadow использует у MetaApi только данные (тест запрещает торговые вызовы в `mt5_feeds.py` и `shadow_run.py`).
+❓ Ни один запрос к MetaApi из этого кода живьём не выполнялся (формат времени `time` — UTC по документации).
+
+### 3.5. База данных (`persistence/`, PostgreSQL 16)
+
+- Драйвер `asyncpg` (без ORM); миграции собственные (`schema_migrations`, `pg_advisory_xact_lock`; схема новее программы → ошибка); текущая версия **2** (Alembic не используется, О34).
+- `trades`: `id` (= `signal_id`), `strategy_name`, **`strategy_id`**, `coin`, `side`, `kind`, `mode` (live/shadow), `status` (`pending_limit|pending_market|open|closed|cancelled|aborted`), `qty`, `remaining_frac`, времена сигнала/входа/выхода, `planned_entry`, `entry_price`, `exit_price` (средневзвешенная), `sl`, `tp`, `stop_price`, `risk`, `risk_amount`, `pnl`, `fees`, `r_multiple`, `gross_r`, `mfe_r`, `mae_r`, `exit_reason`, `be_armed`, `gap_affected`, `client_order_id`, `plan` (JSONB). Уникальный частичный индекс `trades_one_active_per_key (coin, strategy_id, mode)` для активных статусов.
+- `trade_closes` — каждое закрытие (частичное и итоговое): `seq`, `reason` (`scale_1r|scale_3r|sl|be|trail|tp|timeout`), `frac`, `price`, `gross_r`, `fees_r`, `net_r`, `pnl`. `trade_snapshots` — свечи (JSONB), геометрия (единый формат `{type: zone|line|marker, t1, t2, p1, p2, label}`), `meta`. `state_events` — переходы автомата SMC (`S0…S4`), жизненный цикл сделок, смена HTF bias (`strategy_id` NULL у системных событий `htf`).
+- Запись: очередь `asyncio.Queue` (FIFO) + задача-писатель; ошибка записи или переполнение (20 000) роняет процесс (`recorder.check()` каждую секунду). Без `DATABASE_URL` — только JSONL-журнал `shadow_events.jsonl`.
+- Метрики (`api/stats.py`, `mcp_server`): сделка = `status='closed'` и не `gap_affected`; Win Rate = доля `net R > 0`; Profit Factor = прибыль R / модуль убытка R; просадка по накопленному R; порог «достаточно данных» — 200 сделок.
+- `scripts/reset_db.py` — `TRUNCATE` четырёх таблиц (без `--yes` только показывает счётчики). Бэкап — `deploy/shadow.sh backup` (вручную; расписания нет).
+
+### 3.6. API и клиент
+
+**API (`api/`, контейнер `api`, образ без кода стратегий и ключей бирж):** `GET /api/health` (без ключа), `/api/info`, `/api/stats`, `/api/trades`, `/api/trades/{id}/snapshot` (сделка, закрытия, свечи, геометрия, текст причины входа из `api/reason.py`), `WS /ws/live_state` (состояние автомата из `state_events` + открытые сделки + пульс; опрос БД раз в 2 с). Защита: заголовок `X-API-Key` (≥ 32 символа, пусто — контейнер не стартует), сравнение `hmac.compare_digest`, 10 неверных ключей за 60 с → 429; `/docs` и `openapi.json` отключены; сессии БД read-only; контейнер read-only, не root, 256 МБ / 0.5 CPU. Порт `0.0.0.0:8001 → 8000` (HTTP **без TLS**: ключ идёт открытым текстом). Автомат S0…S4 показывается только для `SMC_Pro_Trend`.
+
+**Клиент (`client/`, Flet; на сервер не отправляется):** вкладки Dashboard (карточки монет, шорт/лонг, лента событий), Statistics (KPI, рейтинг монет, кривая капитала, разбивки), History (таблица с фильтрами; двойной клик или кнопка → окно графика `lightweight-charts` в отдельном процессе: свечи, маркеры входа/закрытий, SL/TP, зона FVG, текст причины; свечи после сигнала достраиваются из публичного REST Binance). `client/dist/TradeAI-Monitor.exe` (≈ 90 МиБ, собран `flet pack` 2026-10-11, **ключ API зашит в сборку — не передавать посторонним**). Настройки: `settings.json` рядом с `.exe` → иначе дефолты сборки (`build_defaults.py`: `http://193.233.75.254:8001`) → переменные `TRADEAI_API_URL/KEY`. Сборка: `client/build_exe.ps1 -ServerUrl … -ApiKey …` (подмена ключа только на время сборки). **Известное отставание:** списки монет в фильтрах `.exe` (`client/tradeai_client/fmt.py::COINS`) не содержат `EURUSD/XAUUSD/XAGUSD` — сделки по ним в таблицах видны, но фильтра по ним нет; нужна пересборка. ❓ Не проверено на практике: двойной клик на реальном ПК, Windows 10 без WebView2.
+
+### 3.7. MCP-сервер для ИИ-аналитика (`mcp_server/`, работает на ПК)
+
+stdio-сервер `tradeai-risk-analyst` (пакет `mcp>=1.9,<2`) для Cursor / Claude Desktop; в БД на VPS ходит **только на чтение**. Инструменты: `get_strategies_overview(time_window_hours=168)`, `get_trade_details(strategy_id, limit=20)`, `analyze_drawdown_causes(strategy_id, worst_trades_limit=15)`. Защита чтения: `default_transaction_read_only=on`, один оператор `SELECT/WITH`, параметризованные запросы. Доступ — SSH-туннель `127.0.0.1:15432 → контейнер postgres` (`tunnel.ps1`, ключ `~/.ssh/id_ed25519` без парольной фразы, автопереподключение; автозапуск — задача Планировщика «TradeAI MCP Tunnel» (состояние Ready; туннель сейчас запущен); `DATABASE_URL` — в `mcp_server/.env` на ПК). ❓ Автозапуск после реальной перезагрузки Windows не наблюдался.
+
+### 3.8. Боевой контур Binance (`exchange/binance_live.py`, `orchestrator/live_*`) — ВЫКЛЮЧЕН
+
+- Флаги: `TRADE_MODE=shadow|live` (по умолчанию shadow; при `shadow` боевой код не импортируется), `USE_TESTNET` (ордера на `testnet.binancefuture.com`, данные Shadow остаются mainnet), `LIVE_ALLOW_MAINNET` (без него mainnet не стартует), `APPROVED_STRATEGIES` (по умолчанию `SMC_Pro_Trend`). В контейнере `shadow-run` ключей Binance нет — включить live там физически нечем.
+- Путь: `LiveMirrorSink` — Shadow-трекер получает **все** сигналы всегда; одобренные и принятые трекером уходят в `LiveExecutionEngine` (`orchestrator/live_engine.py`). Транспорт — `execution/rest.SignedRest` (HMAC, поправка часов).
+- `LiveRiskManager` (`live_risk.py`): фиксированный размер = `LIVE_MARGIN_USDT(10) × LIVE_LEVERAGE(10)` = 100 USDT, ISOLATED; стоп ближе `0.8/плечо` (8%) от входа; одна позиция на монету; минимумы биржи; **суточный лимит убытка 50 USDT по сумме Binance+MT5** (реализованный PnL + комиссии + фандинг с 00:00 UTC; ≥ лимита → защёлка в файле до 00:00 UTC следующих суток, новые входы блокируются на обеих площадках, лимитки снимаются, открытые позиции не трогаются; нет свежего (< 120 с) PnL любой площадки → входов нет); план выхода обязан делиться на сетке лота (иначе `plan_not_representable`).
+- **Выход = Shadow** (тест паритета `tests/orchestrator/test_live_parity.py`: 176 траекторий, 304 закрытия совпали по причине/доле/цене; допустимое отличие — «немедленный стоп»): SL на весь объём + `TAKE_PROFIT_MARKET` на каждый уровень (`quantity` + `reduceOnly`, Algo Service `/fapi/v1/algoOrder`), безубыток «POST нового стопа → DELETE старого», трейлинг runner'а, тайм-аут 192 свечи. Аварии (не поставилась защита, гэп за стоп, неизвестный исход) → Safe Mode + закрытие + падение.
+- Состояние `live_engine_state.json` (write-ahead) + сверка с биржей при старте (`recover`): позиция со стопом подтягивается и сопровождается, без стопа — Safe Mode.
+- `scripts/test_live_order.py` — принудительная тестовая сделка ~10 USDT на testnet (запускает пользователь; охрана: только testnet, чистый счёт).
+- **Заморожено с 2026-10-10:** `execution/live_barrier.py` (Algo API, безубыток, сверка), `orchestrator/live_route.py`, `scripts/smc_live_run.py`, `scripts/test_algo_live.py` — код и тесты на имитации сохранены, не развиваются; сервиса в compose нет.
+- ❓ **Не проверено на живой бирже** (разд. 4): принимает ли Algo Service сумму reduceOnly-ордеров больше позиции (SL на весь объём + TP-уровни + третий стоп при переносе), форматы `/fapi/v3/balance`, `income`, `openAlgoOrders`, `premiumIndex`, код `-2021`.
+
+### 3.9. Боевой контур MT5 (`exchange/mt5_*.py`, `router.py`) — ВЫКЛЮЧЕН (`LIVE_ENABLE_MT5=false`)
+
+- `MetaApiLiveClient` (RPC-режим SDK `metaapi-cloud-sdk>=29.1,<30`; токен — только печатный ASCII, иначе `ConfigError` до сети): подключение с таймаутами, чтение (счёт, котировки, позиции, ордера, спецификации, `get_candles`), торговля в лотах (`market_order`/`limit_order` со SL/TP в одном запросе, `modify_position`, `close_position(volume)`, `cancel_order`), режим исполнения FOK→IOC→RETURN, строгая проверка сетки цены/объёма до отправки, таблица кодов MT5 (`RETCODES`: `retryable`, `outcome_unknown`; 10018 = `MarketClosedError`).
+- `SymbolMapper`: внутренний символ → имя брокера (точное, суффикс, псевдоним, `MT5_SYMBOL_MAP`) **с проверкой класса актива по `path`** (у брокера `BRN`, `GOLD`, `WTI` — акции; торговать ими вместо нефти/золота нельзя). `mt5_risk.size_position`: лот по 1% Equity через `lossTickValue`, округление вниз, отказы `below_min_size/exposure/bad_risk/stop_too_close`.
+- Живая read-only проверка у текущего брокера (демо, USD $100 000, hedging, 1:100): торгуются `EURUSD`, `XAUUSD`, `XAGUSD`; нефти нет, индексы (`US500` и др.) — `tradeMode DISABLED`; поэтому `BRN` и `US500` исключены (О62).
+- `ExecutionRouter`: маршрут по символу (`LIVE_BINANCE_SYMBOLS`: BTC, ETH; `LIVE_MT5_SYMBOLS`: EURUSD, XAUUSD, XAGUSD; иначе `unsupported_symbol`); **закрытый рынок** (`tradeMode ≠ FULL` или ответ 10018) — обычный отказ `market_closed` без Safe Mode и падения; неизвестный исход отправки — исключение.
+- **Сопровождение позиции** (`exchange/mt5_exit.py`) — та же математика, что у Shadow, но уровни исполняет бот: Scale Out `close_position(volume)` (доли в лотах вниз до `volumeStep`), безубыток и трейлинг `modify_position`, тайм-аут 192 свечи; брокерский TP — только у плана без runner'а; «стоп уже за ценой» (10016) → выход по рынку без Safe Mode; закрытый рынок при сопровождении → команда откладывается и повторяется (`live_mt5_deferred/replayed`), без Safe Mode; выполненные уровни выводятся из лотов брокера (повтор не закроет лишнего); состояние — `live_mt5_state.json` + брокер; чужая позиция подхватывается без управления. Паритет с `VirtualTracker`: `tests/exchange/test_mt5_exit.py`, 176 траекторий, закрытия совпали точно.
+- ❓ Ни одного ордера на MT5 не отправлялось (всё проверено на имитации RPC); поведение `POSITION_MODIFY` при одном заданном уровне не проверено (клиент всегда передаёт оба); нужна «пробная сделка» минимального лота на демо.
+
+### 3.10. ML-контур и общие модули (ранний этап, не в эксплуатации)
+
+| Каталог | Что это |
 |---|---|
-| `features/smc.py` | `add_features(df, SmcParams, interval_ms=)` → свечи + 33 колонки (`feature_columns()`); `validate_candles` (fail-fast) |
-| `features/defaults.py` | Утверждённые константы сделок: риск 1%, буфер SL 0.2·ATR, TP 3R, BE на +1R, TTL 15/10 баров, вход на 50% FVG, поток `@markPrice@1s` |
-| `tests/features/test_smc.py` | 23 теста: ручные паттерны, **R4 тест обрезки**, паритет окна live (R8), статический запрет итераций (R2), валидация входа |
+| `collectors/` | `klines_downloader` (свечи → `data/raw/klines/<SYM>/<TF>/<YYYY-MM>.parquet`), `funding_downloader` (фандинг), `depth_stream` (запись стакана `depth10@500ms` → `data/raw/depth/...jsonl`; **единственный сервис этого контура, запущенный на сервере**, профиль `collectors`, `restart: always`) |
+| `pipeline/` | загрузчики, `quality` (DataQualityGate), `sync` (шкала знания / водяной знак), `features` (микроструктура), `labels`, `guards` (ProvenanceGuard), `splits.walkforward` (PurgedWalkForward) |
+| `backtester/` | `BacktestEngine`, `OrderBookBarrier` (матчинг по стакану), риск-гуарды, `BaselineStrategy`, `ml_strategy` (Ridge) |
+| `execution/` | боевой мост ML-бота: `rest` (подписанный REST), `state` (`LocalState`, `SafeMode` — защёлка `.safe_mode`), `live_barrier` (идемпотентный `clientOrderId`, Algo API — заморожено), `reconcile`, `user_stream`, `live_feed`/`live_features`/`ws_live_features`, `smart_execution` (чейзинг лимиток post-only), `exchange_filters` |
+| `utils/` | `errors` (типы ошибок с кодами выхода), `logger`, `storage` (атомарная запись), `binance_rest`, `runner` (общий запуск + коды выхода), `ban_lock`, `instance_lock`, `notifier` (Telegram; без токена только лог) |
+| `scripts/` | `live_run` (ML-оркестратор, testnet по умолчанию; **сейчас не запущен ни на сервере, ни локально**), `train_walkforward` (walk-forward обучение → `out/ridge_model.json`), `generate_synthetic_history` (синтетика для обучения без сбора), `stage2_report` / `stage2_charts` (отчёт и графики бэктеста SMC), `demo_api_data` (демо-БД для клиента), `test_mt5_connection` (read-only проверка MetaApi) |
 
-Колонки (все — по закрытым свечам, значение в строке `j` зависит только от строк ≤ `j`):
+Данные локально: свечи 15m/1h mainnet BTC/ETH с 2026-04-01 по 2026-10-08 (по 18 288 / 4 572 бара, без разрывов), 1m — синтетика 48 ч (`data/raw/SYNTHETIC.json`), стакан — 432 МБ; `HISTORY_START = 2026-04-01` изменён глобально (докачка 1m при пустой папке начнёт с этой даты). `README.md` описывает ML-контур (Этапы 1–8); его счётчик тестов («893») устарел.
 
-| Группа | Колонки | Смысл |
-|---|---|---|
-| Волатильность | `atr`, `vol_sma_prev`, `vol_ratio` | SMA-ATR(14) истинного диапазона; SMA(20) объёма **без текущего бара**; `volume / vol_sma_prev` |
-| Свинги | `swing_high`, `swing_low` | Флаг на баре `j = i + k` (k = 5): D2 (`left_max < cand >= right_max`) + D3 (амплитуда > 1.5·ATR[i−1]) |
-| Три последних свинга | `sh1..3_price`, `sh1..3_time`, `sl1..3_price`, `sl1..3_time` | 1 — самый свежий подтверждённый; `*_time` = `open_time` бара-свинга (не бара подтверждения) |
-| Поджатие | `eqh_spread`, `eqh_ok`, `hl_ok`, `buildup`, `buildup_level`, `buildup_low3` | Спред 3 хаёв ≤ 0.1%; 3 лоу строго растут; `buildup` = оба + (О6) лоу образовались после самого старого хая; `buildup_level` = max(3 хаёв), `buildup_low3` = последний свинг-лоу (для SL) |
-| FVG | `fvg_bear/bull`, `_top`, `_bottom`, `_mid`, `_t1` | Разрыв 3 свечей + тело импульса > 1.0·ATR[i−2] (О12; было 1.5) и направление импульса; `_mid` — цена лимитки (D7); `_t1` — `open_time` свечи `i−2` (начало зоны для графика) |
+### 3.11. Деплой и эксплуатация
 
-Как выполнены правила: **R2** — только `shift/rolling_max/rolling_min/when-then/forward_fill/max_horizontal`; цикл есть лишь по смещениям окна SMA (константа 14/20), не по строкам; тест грепом запрещает `apply/iter_rows/map_elements/...`. **R3** — флаг свинга на `i+k`, ATR берётся `shift(k+1)`. **R4** — тест обрезки сравнивает **точным равенством** все колонки (300 случайных `t` × 3 набора параметров на 700 барах + все `t` подряд на ручном паттерне); проверено мутациями: сдвиг окна вперёд и «центрированный» ATR ловятся. **R5** — вход только закрытые свечи (контракт, проверяет вызывающий). **R8** — окно 120 и 300 баров даёт те же значения после прогрева (`SmcParams.warmup_bars`). **R1** — любое нарушение контракта (пропуск свечи, null, невозможная свеча, несколько символов) → `DataError`.
+- `python -m scripts.deploy_pack` — архив `trading_shadow.tar.gz` (+`.sha256`): список файлов берётся из строк `COPY` в `Dockerfile`; цель `shadow` отказывается пакетировать `.env*`, `*.pem`, `*.key`; `client/`, `mcp_server/`, `tests/` не попадают.
+- `python -m scripts.auto_deploy --host 193.233.75.254 --key ~/.ssh/id_ed25519` — 9 шагов (архив → SSH/SFTP → Docker → распаковка в `~/trading` → `chmod 600` → `shadow.sh down` → `up` → миграции → глубокая проверка лога и детектор блокировки IP Binance). **На Windows запускать `python -X utf8 -m scripts.auto_deploy …`** (иначе падает вывод docker в cp1251). Данные БД при деплое не удаляются; виртуальные позиции при рестарте помечаются `aborted`.
+- `deploy/shadow.sh` на сервере: `up | status | logs [сервис] | apikey | stats | backup | psql | down` (удаления томов нет). `.env.shadow` на сервере: `POSTGRES_PASSWORD`, `API_KEY` (создаются скриптом, `chmod 600`), опционально `API_BIND`/`API_PORT`, `METAAPI_TOKEN`, `METAAPI_ACCOUNT_ID`, `MT5_SYMBOL_MAP`.
+- **Включить Forex/металлы в Shadow:** вписать `METAAPI_TOKEN` и `METAAPI_ACCOUNT_ID` в `~/trading/.env.shadow` (лучше токен только на чтение рыночных данных) и выполнить `./deploy/shadow.sh up`.
+- Compose (профили): `shadow` = `postgres` (2 ГБ / 2 CPU, том `pgdata`), `shadow-run` (без лимитов, `restart: on-failure:20`), `api`; `collectors` = `depth-stream`; `jobs` = `klines-downloader`, `funding-downloader`; без профиля = `live-run` (ML, `restart: "no"`, `env_file: .env`).
+- Git: локальный репозиторий, ветка `main`; **есть удалённый `origin` (github.com/autowork-inc/TradeAI)**; локально 4 коммита впереди и 2 позади него (расхождение не разобрано, `push` не выполнялся). `.gitignore` исключает `.env*` (кроме `*.example`), ключи, `data/`, `logs/`, `out/`, `*.tar.gz`, `client/dist`, `settings.json`.
 
-Отступление, о котором надо знать: ATR — простое скользящее среднее (SMA), а не Уайлдер. Рекурсивное сглаживание зависит от того, с какого бара начато окно, и live (последние ~300 баров) расходился бы с бэктестом (нарушение R8). См. О7.
+### 3.12. Результаты бэктеста SMC (`out/stage2/report.md`, 2026-04-01 → 2026-10-08, BTC+ETH, параметры после О12)
 
-### 3.10. Детекторы и симулятор (Этап 2, код готов; критерий — ваше визуальное подтверждение, см. 3.11)
+1118 свипов → 334 дошли до FVG → 105 CHoCH → 99 заявок при потолке плеча 5.0 → 37 исполненных сделок (5 TP / 17 SL / 11 BE / 4 тайм-аута): net R = −0.28, ожидание −0.007 R ± 0.235 на сделку (лонг +0.38, шорт −0.47 — в пределах шума); breakout — 3 сделки. Главные «горла» воронки: свип оказался пробоем (61% сетапов), импульс FVG, невозможность исполнить лимитку. **Вывод о прибыльности сделать нельзя** (выборка статистически пуста). Фильтр H4, четыре новые стратегии и Scale Out в бэктесте не участвовали.
 
-| Файл | Содержимое |
-|---|---|
-| `strategies/smc_setups.py` | Автомат SMC S0→S4, лонг и шорт одной функцией (зеркало цен). Колонки `short_*` / `long_*` (`setup_columns`) |
-| `strategies/breakout.py` | Триггер Breakout Buildup (только лонг): колонки `breakout_signal/level/sl` |
-| `strategies/simulate.py` | Пессимистичная векторная симуляция исходов (сигналы × смещения баров) + `apply_ownership_lock` (D4) |
-| `strategies/runner.py` | Склейка: свечи → признаки → детекторы → сигналы → симуляция → блокировка → `summarize` |
-| `scripts/stage2_report.py`, `scripts/stage2_charts.py` | Отчёт (воронка, итоги, чувствительность, абляция) → `out/stage2/report.md`; графики → `out/stage2/examples.html` |
-| `tests/strategies/` | 56 тестов: ручные сценарии, зеркальность, **R4 обрезка**, **R8 окно**, симулятор, Breakout, раннер |
+### 3.13. Тесты
 
-**Как автомат записан без циклов (R2).** Один сетап = один свип; номер сетапа `sid = cum_sum(свип)`. Все «текущие» величины сетапа — `forward_fill` / `cum_max` / `cum_sum` внутри `.over(sid)`. Новый свип начинает новый сетап и вытесняет старый.
-
-| Состояние | Условие (в строке j) |
-|---|---|
-| S0 пул | последний подтверждённый свинг-хай `sh1[j−1]`, не пробитый ни одним high после подтверждения (`cum_max(high)` по группе свинга ≤ уровня) |
-| S1 свип | `high[j] > пул` и `close[j] < пул`. Хай свипа = running max(high) с бара свипа. Сетап **убит**, если `close` выше хая свипа; **просрочен** через 30 баров (D8/О12; было 15) |
-| S2 FVG | медвежий FVG, первая свеча которого (`i−2`) не раньше бара свипа; берётся последний. Середина — цена лимитки (D7) |
-| S3 CHoCH | **первое** закрытие ниже последнего подтверждённого свинг-лоу, образованного **после** свипнутого хая (О10). Если это первое закрытие произошло без FVG — сетап мёртв (порядок S2→S3 обязателен) |
-| S4 заявка | LIMIT на `fvg_mid`, SL = хай свипа + 0.2·ATR, TP = 3R. Отклоняется с причиной, если лимитка не пассивна (`mid ≤ close`, иначе GTX её отвергнет) или плечо `0.01·entry/R > 1.0` (О8) |
-
-Значение `*_state`: 0 нет сетапа, 1 свип, 2 свип+FVG, 3 CHoCH отклонён (`*_reject`: `not_passive` / `exposure` / `bad_risk`), 4 сигнал.
-
-**Допущения симулятора (О3: всегда худший сценарий).** LIMIT исполняется только при проходе цены (`high > entry` строго); на баре исполнения благоприятные движения не засчитываются, неблагоприятные — да. В одном баре приоритет SL > BE > TP. +1R на баре b → стоп на входе действует с бара b (возврат к входу в том же баре = BE). LIMIT отменяется: close выше хая свипа / цена дошла до TP / 10 баров. MARKET — по open следующего бара. Сделка без выхода за 192 бара закрывается по close (`max_hold`, ❓ не из утверждённых параметров). Комиссии: вход LIMIT — maker 0.02%, остальное — taker 0.05% (`config.LIVE_*_FEE_RATE`). **Проскальзывание стопа не моделируется** (оптимистичная сторона). Блокировка монеты держится с момента сигнала до выхода (неисполненная заявка — 10 баров).
-
-**Breakout.** `buildup[j−1]` и `close[j] > buildup_level[j−1]` и `close[j−1] ≤ уровня` (пересечение, О11) и `vol_ratio[j] > 2`. SL = `buildup_low3[j−1] − 0.2·ATR[j]`; вход MARKET по open следующего бара; R, TP и проверка плеча — по фактической цене входа.
-
-### 3.11. Результаты прогона 15m ДО О12 — старые дефолты: плечо 1.0, импульс FVG 1.5, срок сетапа 15 (2026-04-01 → 2026-10-08, BTCUSDT + ETHUSDT; полный отчёт — `out/stage2/report.md`)
-
-**Воронка SMC (потолок плеча 1.0, как утверждено):**
-
-| Монета | Сторона | Сетапов (свипов) | Дошли до FVG | CHoCH | Сигнал | Убиты закрытием выше хая свипа | Слом без FVG | Истекли (15 баров) | Отклонено по плечу |
-|---|---|---|---|---|---|---|---|---|---|
-| BTCUSDT | шорт | 274 | 33 | 6 | 0 | 172 | 18 | 78 | 6 |
-| BTCUSDT | лонг | 243 | 33 | 3 | 0 | 159 | 28 | 53 | 3 |
-| ETHUSDT | шорт | 308 | 39 | 3 | 1 | 183 | 28 | 94 | 2 |
-| ETHUSDT | лонг | 293 | 38 | 7 | 1 | 166 | 29 | 91 | 6 |
-
-**Итог: из 1118 свипов до заявки доходят 19 (1.7%), а при потолке плеча 1.0 — 2.** Стоп SMC в % от цены: медиана 0.27–0.94%, а потолок 1.0 требует стоп ≥ 1% (при риске 1%). Breakout: 3 сигнала за полгода, все 3 отклонены потолком.
-
-| Потолок плеча | SMC: сигналов / не исполнено / сделок / net R | Breakout: сигналов / сделок / net R |
-|---|---|---|
-| **1.0 (утверждено)** | 2 / 2 / 0 / — | 3 / 0 / — |
-| 2.0 | 11 / 7 / 4 / −0.36 | 3 / 2 / −1.30 |
-| 3.0 и выше (без потолка) | 12…19 / 8…15 / 4 / −0.36 | 3 / 3 / +1.44 |
-
-**Абляция воронки (диагностика, не оптимизация; потолок снят):**
-
-| Вариант | Свипов | Дошли до FVG | CHoCH = сигналов | Исполнено сделок | net R |
-|---|---|---|---|---|---|
-| базовый (как утверждено) | 1118 | 143 | 19 | 4 | −0.36 |
-| порог амплитуды свинга 1.0 / 0.5 ·ATR (D3) | 1135 / 1137 | 144 / 145 | 19 / 19 | 4 / 4 | −0.36 |
-| импульс FVG 1.0 / 0.5 ·ATR (было 1.5) | 1118 | 282 / 457 | 60 / 116 | 22 / 46 | −7.1 / −11.3 |
-| k = 3 (было 5, D10) | 1588 | 182 | 30 | 12 | −3.0 |
-| срок сетапа 30 баров (было 15, D8) | 1118 | 185 | 40 | 7 | +2.4 |
-| О10 снят | 1118 | 143 | 31 | 10 | −6.4 |
-
-**Выводы, которые можно делать, и которые нельзя.**
-- ✅ Автомат делает то, что описано: проверено ручными сценариями, зеркальностью лонг/шорт на 2 500 случайных барах, тестом обрезки R4, паритетом окна R8, мутациями кода (7 из 8 мутаций ловились сразу, 8-я — граница «лимитка ровно по рынку» — получила тест) и глазами на реальных свечах (`out/stage2/examples.html`).
-- ✅ Главные «горла» воронки: закрытие выше хая свипа (680 из 1118 сетапов, ≈61% — свип оказался пробоем), фильтр импульса FVG (13% свипов доходят до FVG), и невозможность исполнить лимитку (из 19 сигналов 15 так и не исполнены).
-- ❌ **Статистических выводов о прибыльности делать нельзя**: 4 сделки SMC и 3 Breakout за 6 месяцев — на такой выборке знак мат. ожидания ничего не значит. Числа net R в таблицах — иллюстрация механики, не результат стратегии.
-
-### 3.11.1. Результаты после О12 — дефолты: плечо 5.0, импульс FVG 1.0·ATR, срок сетапа 30 (тот же период и данные; `out/stage2/report.md`)
-
-**Воронка SMC:** из 1118 свипов до FVG доходят 334 (30%), до CHoCH — 105 (9%), заявок после проверки плеча — 99 (6 отклонено по плечу > 5.0). Из 94 заявок, не пропущенных блокировкой монеты (5 пропущено), исполнено 37 (остальные 57 не дошли до цены или отменены); все 37 завершены.
-
-| Монета | Сторона | Свипов | Дошли до FVG | CHoCH | Сигнал | Убиты закрытием выше хая | Слом без FVG | Истекли (30 баров) | Отклонено по плечу |
-|---|---|---|---|---|---|---|---|---|---|
-| BTCUSDT | шорт | 274 | 72 | 29 | 27 | 166 | 15 | 64 | 2 |
-| BTCUSDT | лонг | 243 | 77 | 21 | 20 | 152 | 26 | 44 | 1 |
-| ETHUSDT | шорт | 308 | 97 | 21 | 20 | 179 | 35 | 73 | 1 |
-| ETHUSDT | лонг | 293 | 88 | 34 | 32 | 161 | 30 | 68 | 2 |
-
-**Итоги пессимистичной симуляции (потолок 5.0, блокировка монеты включена):**
-
-| Стратегия | Сигналов | Пропущено блокировкой | Не исполнено | Сделок | TP / SL / BE / тайм-аут | net R | Ожидание R/сделку |
-|---|---|---|---|---|---|---|---|
-| smc_short | 47 | 4 | 26 | 17 | 1 / 11 / 3 / 2 | −7.96 | −0.47 (±0.29) |
-| smc_long | 52 | 1 | 31 | 20 | 4 / 6 / 8 / 2 | +7.68 | +0.38 (±0.34) |
-| **SMC всего** | 99 | 5 | 57 | **37** | 5 / 17 / 11 / 4 | **−0.28** | **−0.007 (±0.235)** |
-| breakout | 3 | 0 | 0 | 3 | 1 / 1 / 1 / 0 | +1.44 | +0.48 |
-
-(±) — стандартная ошибка среднего по сделкам (разброс ≈ 1.43 R на сделку). **Вывод: статистически неотличимо от нуля**; разница лонг/шорт (−0.47 против +0.38) — в пределах шума. Максимальная просадка SMC — 8.9 R. Решения о прибыльности принимать нельзя, пока Shadow не накопит сотни сделок.
-
-### 3.12. Оркестратор и Shadow Mode (Этап 3, код готов)
-
-```
- Binance /market/stream
-   ├─ kline_15m ─► SmcKlineFeed ─► FeatureEngine (add_features) ─► FeatureContext
-   └─ aggTrade + markPrice@1s ─► TickFeed ─────────────────────────────┐
-                                                                        │
- FeatureContext ─► Orchestrator ─► StrategySMC.detect / StrategyBreakout.detect (чистые функции)
-                      │   порядок: закрытие свечи → приёмники (сроки, отмены) → детекция → блокировка → маршрут
-                      ├─ CoinOwnershipLock  (занято → skipped_due_to_lock в журнал)
-                      ├─ Route(SHADOW) ─► VirtualTracker ◄── тики ───────┘   (в памяти + журнал JSONL)
-                      └─ Route(LIVE)   ─► LiveBarrierSink ─► LiveBarrier (Этап 4, разд. 3.14)
-```
-
-| Файл | Роль |
-|---|---|
-| `orchestrator/types.py` | `Signal` (проверяет себя при создании: SL по ту сторону входа, TP, формат геометрии), `Tick`, `FeatureContext`, `Event`; геометрия — единый формат разд. 3.3 |
-| `orchestrator/feature_engine.py` | свечи → `FeatureContext`; тот же `add_features`, что в бэктесте (R8) |
-| `orchestrator/strategies.py` | `StrategySMC.detect`, `StrategyBreakout.detect` → `tuple[Signal, ...]`: вызывают те же векторные детекторы и берут **последнюю строку**. Кортеж вместо `Signal \| None`: на одной свече SMC может дать и лонг, и шорт — тогда по D4 второй получает `skipped_due_to_lock` |
-| `orchestrator/lock.py` | `CoinOwnershipLock` (D4): первый владелец держит монету до закрытия сделки/отмены заявки; освобождение чужой блокировки или повторный захват — `LockError` |
-| `orchestrator/risk.py` | `RiskSizer`: объём = 1% эквити / R; плечо выше потолка → `SizingRejected` (не урезаем, О8) |
-| `orchestrator/tracker.py` | `VirtualTracker`: виртуальное исполнение по тикам (правила ниже), `summary()`, слушатели закрытия |
-| `orchestrator/core.py` | `Orchestrator`, `Route(mode, sink)`; область блокировки: **LIVE-стратегии делят одну, у каждой SHADOW-стратегии своя** (О14) |
-| `orchestrator/kline_feed.py` | `SmcKlineFeed`: история REST (300 свечей) после подписки на WS, только закрытые (R5), replay пропущенных свечей после обрыва, дыра в сетке → `DataError` |
-| `orchestrator/tick_feed.py`, `orchestrator/ws.py` | `TickFeed`; общий `ReconnectingStream` (переподключение только на сетевые сбои, `LIVE_WS_MAX_RECONNECTS` подряд → падение) |
-| `orchestrator/journal.py` | журнал событий: в памяти и JSONL (строгая сериализация без `default=str`) |
-| `orchestrator/live_route.py` | `LiveBarrierSink` — LIVE-приёмник (с 2026-10-09, разд. 3.14); раньше была заглушка с `ConfigError` |
-| `scripts/shadow_run.py` | точка входа Shadow Mode: `ShadowRun` (цикл, пульс, часовая сводка), `shadow_main` |
-
-**Виртуальное исполнение по тикам (О15).** `trade` (aggTrade): LIMIT исполняется, когда цена прошла уровень строго (касание не считается), по цене заявки (maker); MARKET — по первому тику после сигнала (taker), R, TP=3R и плечо считаются по факту; SL/TP/BE закрываются **по цене тика** (стоп-маркет со скольжением). `mark` (markPrice@1s): только перенос SL в безубыток при +1R (D11) — со следующего тика. Закрытие свечи: отмена заявки при `close` за хаем свипа (`invalidated`), через 10 свечей (`ttl`), тайм-аут позиции — 192 свечи. Цена дошла до TP до исполнения — отмена (`tp_before_fill`). MARKET, не исполненный до закрытия следующей свечи, означает мёртвый поток тиков — `TrackerError` (R1). Обрыв потока тиков помечает активные сделки `gap_affected`. Эквити виртуальный, 10 000 USDT, без реинвестирования.
-
-**Свежесть и replay.** Событие закрытия свечи должно быть обработано не позже 30 с после закрытия (часы биржи; смещение берётся из `/fapi/v1/time`, на этом хосте локальные часы уходят на минуту). Свечи, закрывшиеся за обрыв, отдаются вдогонку в правильном порядке: Оркестратор не торгует по ним (`skipped_stale`), но трекер получает закрытия и считает сроки верно.
-
-**Fail-Fast (R1).** В пакетах `orchestrator/`, `strategies/`, `features/` и в `shadow_run.py` нет подавления исключений (тест грепом: нет `except Exception`, голого `except:`, `suppress`). Ошибка стратегии, мусор в сообщении, повтор или пропуск свечи, дубль сигнала, нарушение протокола блокировки — исключение, процесс падает и перезапускается Docker.
-
-**Изоляция Shadow (D5).** Сервис `shadow-run` в `docker-compose.yml`, профиль `shadow`: обычный `docker compose up -d` его не трогает и наоборот. Нет `env_file` (контейнер не получает ключей API и профиль testnet из `.env`), `BINANCE_PROFILE=mainnet`, свой каталог данных `./data/shadow` (свои `.instance_lock`, `.ban_lock`, журнал `shadow_events.jsonl`), `read_only`, `cap_drop: ALL`, `no-new-privileges`, 512 МБ / 0.5 CPU, `restart: on-failure:20`, healthcheck по «пульсу» (`.shadow_heartbeat` свежее 120 с). Запуск на сервере — `deploy/shadow.sh up` (разд. 3.18); локально без БД: `BINANCE_PROFILE=mainnet python -m scripts.shadow_run` (без `DATABASE_URL` сделки пишутся только в JSONL). Монеты Shadow — `config.SHADOW_SYMBOLS` (разд. 3.16).
-
-**Проверено.** 69 тестов (`tests/orchestrator/`): блокировка и риск, 19 сценариев трекера по тикам (лонг/шорт, BE по mark, скольжение стопа, TTL, отмены, тайм-аут, MARKET, отказ по плечу), 16 сценариев оркестратора (область блокировки, освобождение, устаревшие свечи, порядок, Fail-Fast), **паритет live и бэктеста R8** (сигналы по окну 300 баров свеча за свечой совпадают с бэктестом по всей истории, 12 сигналов на двух сидах), фиды на локальном WS-сервере (подписки, replay после обрыва, мусор, исчерпание переподключений), сквозной сценарий с настоящими стратегиями и журналом. Живой дымовой прогон на mainnet 75 с: подключение `kline_15m` и тиков BTC/ETH, история 300×2 свечей, пульс. Живых сигналов за 75 с, как и ожидалось, не было (по бэктесту ≈2 сигнала SMC в неделю на монету).
-
-### 3.13. LiveBarrier и Algo API (Этап 4: код и тесты на фейковой бирже готовы, живой проверки на testnet нет)
-
-**Принцип (решение О18, 2026-10-09).** Защита позиции — условные ордера Algo Service (`/fapi/v1/algoOrder`): `STOP_MARKET` (SL) и `TAKE_PROFIT_MARKET` (TP) с **`quantity` + `reduceOnly=true`**, а не `closePosition=true`: срабатывая, они только уменьшают позицию и не могут её развернуть. Защита роли (`sl` / `be_sl` / `tp`) — это **сумма объёмов** её живых ордеров; она обязана покрывать объём позиции. `pump()` — «выравниватель»: не хватает — ставит **добавку на разницу**, поэтому частично исполненный LIMIT-вход защищён сразу, а не после полного исполнения. Перенос в безубыток: **сначала POST нового стопа на входе, затем DELETE старых** — позиция ни на мгновение не остаётся без стопа на бирже (R6). Намерение защиты лежит на диске и исполняется отдельным шагом `pump()`.
-
-```
- arm_protection(symbol, direction, entry, sl, tp | tp_r, be_r, ticket_id)   ← ДО входа, запись в LocalState (write-ahead)
-        │
- submit(entry)  ──fill──►  _book_trade: накапливает фактическую цену входа (от неё BE и TP по R)
-        │
- pump()  (≥ раз в секунду) ──► для каждой роли: Σ объёмов живых ордеров < позиции → POST добавки (quantity = разница, reduceOnly)
-        │                      mark price ≥ +1R (on_mark_price) → be_done=True на диск → POST be_sl на входе → DELETE старых sl
-        │                      исполнение раньше ALGO_UPDATE → буфер → GET algoOrder (actualOrderId) → иначе Safe Mode после окна
-        ▼
- ALGO_UPDATE / ORDER_TRADE_UPDATE ──► on_algo_update / on_order_update ──► учёт исполнения (Fill), снятие «брата», снятие защиты
-```
-
-| Что | Где | Поведение |
-|---|---|---|
-| Модель | `execution/state.py` | `LocalAlgoOrder` (clientAlgoId, algoId, роль `sl`/`tp`/`be_sl`, **`qty`**, `close_position=False` по умолчанию, статус PENDING→NEW→TRIGGERING→TRIGGERED→FINISHED/CANCELED/EXPIRED/REJECTED, `actual_order_id`, `replaces`), `Protection` (направление, вход, SL, TP или `tp_r`, `be_r`, `be_done`, **`be_failed`**, фактическое исполнение входа), `triggered_order_ids`. Файл состояния пишется версией 1, пока algo-данных нет (ML-контур не ломается), версией 2 — когда есть; читаются обе |
-| Событие | `execution/user_stream.py` | `AlgoUpdate` + строгий `parse_algo_update`: неизвестный статус, пустой `caid`, нечисловые поля → `DataError`. Набор подписки `config.USER_STREAM_EVENTS_WITH_ALGO` включается явно, ML-контур подписан как раньше |
-| Выставление | `LiveBarrier._try_place_algo` / `_place_algo` / `_post_algo` | Запись в `LocalState` **до** POST; `clientAlgoId` один на все повторы; сетевой сбой/5xx = «исход неизвестен» → `GET algoOrder`, повтор только после подтверждения «нет и запрос протух»; неясно → `OrderStatusUnknown`, Safe Mode. Объём добавки: `_missing_qty` — разница округляется до **шага лота** (`config.LIVE_QTY_STEP`), а не сравнивается с допуском: `0.1 + 0.2 ≠ 0.3` в float не рождает лишних ордеров |
-| Отказ биржи | `_protection_failed` | Позиция без стопа недопустима (R6): reduce-only MARKET по позиции сразу; Safe Mode — кроме «стоп уже за ценой» (-2021: обычный рыночный исход). Отказ ТЕЙКА тоже закрывает позицию (неподтверждённая защита = выход, а не молчание) |
-| Безубыток | `_cover_with_breakeven` | `be_done=True` пишется на диск до сети → POST `be_sl` на недостающий объём по цене входа, **округлённой до шага цены** (средняя цена частичных исполнений не лежит на сетке) → когда `be_sl` покрывает позицию, DELETE старых `sl`. Каждый шаг идемпотентен и выводится из состояния: упали между POST и DELETE (оба стопа на бирже, позиция защищена) или до POST — следующий `pump()` достроит. **Отказ нового стопа** (код ≠ -2021) при живом исходном: остаётся исходный стоп, `be_failed=True`, перенос больше не запрашивается, в лог CRITICAL, **Safe Mode и закрытие не включаются**. Отказ при отсутствии другого стопа → закрытие + Safe Mode. -2021 (цена вернулась к входу) → выход по рынку без Safe Mode (BE = выход здесь же) |
-| Чужие исполнения | `on_order_update`, `_foreign`, `_algo_fill` | Исполнение «свое», если id ордера в движке известен (`ai` из ALGO_UPDATE или `actualOrderId` из REST; помнится после завершения algo-ордера) или `c` совпал с clientAlgoId. Не опознано, но по монете есть свои algo-ордера/защита → буфер на `ALGO_UNEXPLAINED_GRACE_MS` (5 с), `pump()` ищет объяснение по REST; не нашёл → Safe Mode. Нет algo-контекста → как раньше, сразу Safe Mode |
-| Учёт | `_book_algo_trade` | Одна точка, дедупликация по (symbol, trade_id) общая с обычными исполнениями; синтетический тикет для `Fill`; запоминает **роль** сработавшего ордера (`pop_exit_role`: `sl`/`be_sl`/`tp`) — по ней приёмник определяет причину выхода; algo-исполнение, **увеличившее** позицию → Safe Mode |
-| События ALGO_UPDATE | `on_algo_update` | Статусы монотонны; эхо завершённых id игнорируется; несовпадение символа/стороны/типа → Safe Mode; `REJECTED` у нашего ордера → закрытие позиции; чужой algo-ордер → Safe Mode (только если у барьера есть свои algo-данные) |
-| Сверка | `execution/reconcile.py` | `reconcile(check_algo=None)`: algo включается, если в состоянии есть algo-ордера/защита. Сравнивает тип/сторону/триггер **и `closePosition`, объём, `reduceOnly`**; `POSITION_UNPROTECTED` считается **по объёму**: позиция больше суммы объёмов стопов на бирже → расхождение. `ALGO_MISMATCH`, `UNKNOWN_EXCHANGE_ALGO`, `ALGO_RESOLVED_OFFLINE`. `resync_all` после каждого переподключения потока опрашивает algo-ордера по REST |
-| Диспетчер | `scripts/live_run.py`, `scripts/smc_live_run.py` | `AlgoUpdate` передаётся барьеру (в `live_run.py` — единственное изменение файла боевого процесса; работающий процесс его не подхватывает до перезапуска) |
-
-**Проверено (60 тестов `tests/execution/test_algo.py`, фейковая биржа `fake_algo.py` по документации).** Разбор события; формат запросов «как на проводе» (`quantity`, `reduceOnly`, нет `closePosition`); запись на диск раньше POST; потерянный ответ; запрос, не дошедший до биржи; неизвестный исход → Safe Mode + закрытие; отказ -2021 → закрытие без Safe Mode; срабатывание стопа в трёх порядках событий; неопознанное исполнение → Safe Mode; чужой стоп; опоздавшее эхо; REJECTED; безубыток: порядок POST→DELETE на проводе (в момент POST старый стоп ещё жив), один раз, не для закрытой позиции, крэш до POST / между POST и DELETE / после DELETE (состояние прошлой версии) чинится после рестарта, отказ нового стопа оставляет исходный, отказ без другого стопа → закрытие + Safe Mode, стоп сработал во время переноса, округление цены до шага; **частичные исполнения входа (добавки на разницу), шум float**; **режим фейковой биржи `strict_reduce_sum`** (гипотеза «сумма reduceOnly-ордеров не может превышать позицию»): при нём TP+SL не помещаются → бот закрывает позицию и включает Safe Mode (а не молчит), перенос в BE отклоняется, исходный стоп остаётся; сверка по объёму. **Мутационная проверка: 22 намеренные поломки логики Этапа 4, приёмника и скрипта проверки — 21 поймана тестами** (первый прогон пропустил 7, на них дописаны тесты; осталась одна: условие `len(стопов) == 1` в скрипте дублируется проверкой цены стопа — поломка не меняет результат).
-
-**Не сделано и почему.**
-1. **Живая проверка на testnet (критерий Этапа 4)** — скрипт готов (разд. 3.15), запускает пользователь на отдельном аккаунте. Всё, что в разд. 4 помечено ❓, пока допущения.
-2. Окно между исполнением входа и первым `pump()` (≤ 1 с; реально — пока цикл исполнителя дойдёт до шага): `reduceOnly`-ордер нельзя поставить до появления позиции, поэтому стоп физически ставится после входа. Приёмник будит исполнитель сразу при принятии сигнала, `pump()` идёт не реже раза в секунду. Позиция без стопа в это время — **сознательно принятый остаток риска**, не ошибка; если стопа нет дольше — `reconcile` покажет `POSITION_UNPROTECTED`.
-3. Плечо аккаунта на бирже бот не выставляет (❓ О21).
-
-### 3.14. LIVE-приёмник оркестратора `LiveBarrierSink` (О20, код и тесты готовы)
-
-Файлы: `orchestrator/live_route.py` (приёмник, `LiveTrade`, `LiveTradeStore`), `scripts/smc_live_run.py` (точка входа и цикл), `execution/exchange_filters.py` (сверка фильтров биржи), правки `orchestrator/core.py` (`adopt_held`) и `orchestrator/tracker.py` (тип слушателя).
-
-```
- SmcKlineFeed ─► FeatureEngine ─► Orchestrator ─► StrategySMC / StrategyBreakout.detect ─► CoinOwnershipLock (одна блокировка на все LIVE)
-                                        │ submit(signal)                                    ▲ освобождает, когда сделка завершена
-                                        ▼                                                   │
-   LiveBarrierSink.submit (синхронно): Safe Mode? монета свободна? эквити свежий? RiskSizer (1%, плечо ≤ 5) → объём вниз до шага лота
-        → мин. объём и сумма → журнал `live_intent` (R7) → LiveTrade на диск → задание "start"
-   LiveBarrierSink.step (исполнитель): arm_protection → [без await] → barrier.submit(LIMIT GTX | MARKET) → барьер.pump() → …
-   TickFeed: markPrice@1s → barrier.on_mark_price (безубыток);  aggTrade → отмена LIMIT при «цена дошла до TP»
-   UserDataStream (events + ALGO_UPDATE) → barrier.on_order_update / on_account_update / on_algo_update
-```
-
-| Что | Поведение |
-|---|---|
-| Приём сигнала | Отказ — значение `Submission(False, причина)`: `safe_mode`, `symbol_busy`, `equity_unavailable` (эквити старше 120 с), `exposure` (плечо > 5.0, О8/О12), `bad_risk`, `below_min_size` (объём < minQty или сумма < MIN_NOTIONAL). Оркестратор пишет `skipped_risk` и снимает блокировку. Объём **вниз** до шага лота: риск никогда не больше 1% |
-| Порядок (R6/R7) | `live_intent` в журнал (геометрия, расчёт, эквити) → сделка на диск → `arm_protection` (на диск) → вход. Тикет входа известен заранее (`next_ticket_id`), без `await` между `arm_protection` и `submit`: быстрые исполнения MARKET не теряются |
-| Вход | LIMIT (SMC): цена на шаге цены, post-only GTX, срок жизни 10 баров от закрытия сигнальной свечи (`expire_due` барьера). MARKET (Breakout): тейк = 3R **от фактической цены исполнения**, стоп на рассчитанном уровне (фактический риск отличается от 1% на проскальзывание) |
-| Отмены (те же правила, что у `VirtualTracker`, R8) | закрытие свечи за `inval` (хай свипа); цена сделки дошла до TP до исполнения (`tp_before_fill`); TTL; не встал post-only (`expired`); таймаут позиции 192 свечи (`timeout`, закрытие reduce-only MARKET) |
-| Конечный автомат | `queued → entry → open → ending → закрыта`. Блокировка монеты снимается, только когда **позиции нет, ордер входа не жив и защита снята `pump()`** (иначе новая сделка по монете наткнулась бы на старую защиту) |
-| Итог сделки | `live_trade_closed`: `reason` = роль сработавшего algo-ордера (`sl`/`be`/`tp`) | принудительное (`timeout`) | `safe_mode_flatten` | `market_close`; `pnl_usdt` = cash-flow исполнений − комиссии биржи; `net_r` = pnl / (объём · |вход − SL|). Неисполненная: `live_trade_cancelled` с причиной |
-| Перезапуск | `recover()` возвращает сделки, у которых жива позиция/защита/ордер входа, и берёт блокировку монеты у Оркестратора (`adopt_held`); остальные → `live_trade_closed_offline` / `live_trade_cancelled_offline`. Позиция/защита без записи сделки (потерян `smc_live_trades.json`) → `ConfigError` при старте, торговли нет |
-| Охрана запуска `smc_live_run` | testnet по умолчанию (mainnet — `--allow-mainnet`); `TRADING_DATA_DIR` ≠ `data/` (там состояние ML-бота) — иначе `ConfigError` до сети; замок экземпляра; Safe Mode стоит → код 4; `config.LIVE_*` против `exchangeInfo` (расхождение → `ConfigError`); первичная сверка (чужие позиции/ордера → Safe Mode); fail-fast всех задач; при выходе позиции и их стопы **остаются на бирже** |
-
-**Проверено (23 теста `tests/orchestrator/test_live_route.py`, 8 — `test_smc_live_run.py`, весь путь Оркестратор→приёмник→LiveBarrier→REST на фейковой бирже):** журнал раньше ордера и защита на диске раньше входа (хук в момент POST); отказы как значения (Safe Mode, эквити, минимумы, плечо); шорт и лонг (зеркальная защита); жизненный цикл LIMIT → BE → закрытие по BE / TP / SL, причины и R; MARKET с проскальзыванием (TP от факта); отмены (`invalidated`, `tp_before_fill`, TTL), таймаут позиции, Safe Mode между приёмом и отправкой; частичное исполнение (защита по объёму); блокировка монеты не снимается, пока защита на бирже; перезапуск (сделка и блокировка возвращены, защита дожила до TP; закрытая «пока не было» запись); битый файл сделок; охранные условия запуска; диспетчер событий потока, синхронизация после подключения (после обрыва — полная сверка, расхождение → Safe Mode).
-
-**Не сделано (честно).** (а) Сервис в `docker-compose.yml` для `smc_live_run` не добавлен (ждёт результатов живой проверки). (б) Плечо аккаунта на бирже не выставляется (О21). (в) Живой прогон `smc_live_run` на testnet не делался: сигналы SMC редки (≈2 в неделю на монету), поэтому сквозная проверка исполнения — скрипт `test_algo_live.py`, а `smc_live_run` проверен на фейковой бирже. (г) Периодическая сверка отложена, пока живы ордера входа. (д) Данные стратегий берутся из профиля сети: на testnet цены нереальные (Shadow на mainnet и LIVE на testnet увидят разные свечи — сравнивать их напрямую нельзя).
-
-### 3.15. Скрипт живой проверки `scripts/test_algo_live.py` (О19, готов; запускает пользователь)
-
-Запуск (после подмены ключей в `.env` на отдельный чистый testnet-аккаунт):
-
-```bash
-python -m scripts.test_algo_live --confirm-separate-account            # основной сценарий + зонды
-python -m scripts.test_algo_live --confirm-separate-account --with-trigger --trigger-timeout 300   # + ожидание срабатывания настоящего стопа
-python -m scripts.test_algo_live --confirm-separate-account --cleanup   # только убрать остатки (позиция, ордера)
-```
-
-**Охрана.** Профиль обязан быть testnet (иначе `ConfigError`, обхода нет, проверяется и адрес REST); без `--confirm-separate-account` не стартует; в начале счёт должен быть чистым (ни позиций, ни обычных, ни условных ордеров) — иначе выход **до единого ордера** (аккаунт ML-бота с открытыми позициями так не пройдёт); состояние барьера и Safe Mode скрипта — в `out/algo_live/` (не `data/`); уборка идёт всегда (в `finally`), сначала штатно через барьер, затем напрямую через REST.
-
-**Что проверяет.** (1) `config.LIVE_PRICE_TICK / QTY_STEP / MIN_QTY / MIN_NOTIONAL` против `exchangeInfo`; (2) приватный поток с `events=…/ALGO_UPDATE` принят, ALGO_UPDATE приходит; (3) через `LiveBarrier`: `arm_protection` → MARKET-вход минимального объёма → `pump()` → на бирже ровно STOP_MARKET и TAKE_PROFIT_MARKET с `quantity`, `reduceOnly=true`, нужными триггерами (сверка с `openAlgoOrders`); (4) `reconcile` на настоящих ответах биржи (разбор `openAlgoOrders`, новые поля объёма) — чисто; (5) имитация переноса в безубыток (`on_mark_price` на +1R; уровень входа искусственно ниже рынка на 0.5%, иначе стоп «на входе» сработал бы сразу и проверялся бы -2021): по журналу запросов **POST нового стопа раньше DELETE старого**, в итоге один стоп на входе и тейк на месте, Safe Mode не включился; (6) зонды (INFO, решает человек): сумма reduceOnly-ордеров больше позиции, объём одного ордера больше позиции, `closePosition`-стоп и второй `closePosition`-стоп (-4130), «стоп уже за ценой», GET/DELETE неизвестного algo-ордера, reduceOnly без позиции, поток `markPrice@1s` на testnet; (7) счёт после уборки чист. С `--with-trigger`: вход с SL/TP в ±0.04% от рынка и ожидание срабатывания: исполнение порождённого ордера опознано как своё (**Safe Mode не включился**), позиция списана, парный ордер снят, записаны последовательность событий и `clientOrderId` порождённого ордера (❓ из разд. 4).
-
-**Результат.** Таблица PASS/FAIL/INFO/WARN в консоли + полный JSON `out/algo_live/report-<время>.json` (все запросы к бирже с кодами ответов, все события потока, факты зондов). Код выхода 0 — нет FAIL. **Пришлите вывод консоли или JSON — по нему я закрою ❓ в разд. 4 и решу судьбу О18.**
-
-Что покажет FAIL и что с ним делать: `breakeven_post_then_delete` = FAIL с отказом нового стопа при живом старом (код в `facts.breakeven_post_refused`) означает, что биржа не разрешает сумму reduceOnly-ордеров больше позиции — тогда схема «POST → DELETE» неприменима и нужен вариант без окна иначе (например, перенос частями) либо возврат к DELETE→POST с мерами из разд. 5. Бот при этом **безопасен**: остаётся исходный стоп, перенос отключается для сделки (`be_failed`).
-
-**Проверено (16 тестов `tests/execution/test_algo_live_script.py` на фейковой бирже):** счастливый путь и уборка; отказ биржи от суммы reduceOnly (скрипт показывает FAIL, код отказа сохранён, счёт убран); отказ нового стопа безубытка; сценарий trigger (настоящий стоп не «чужой»; без срабатывания — WARN, не PASS); охрана (счёт с позицией / algo-ордером → выход без ордеров; только testnet; подтверждение; чужая защёлка Safe Mode и state прошлого запуска не просачиваются); **скрипт сам ловит поломки проверяемого кода** (старый стоп остался на бирже после BE; барьер делает DELETE раньше POST); парсинг `exchangeInfo`.
-
-### 3.16. Scale Out и runner в `VirtualTracker`; пул монет Shadow (2026-10-10, Этап 3 дополнен)
-
-**Правила (решение пользователя).** Вместо «100% позиции на 3R»: **+1R — закрыть 50% исходного объёма и перенести SL в безубыток; +3R — закрыть ещё 40%; остаток 10% (runner) — трейлинг-стоп.** Реализация — `ScaleOutPlan` в `orchestrator/tracker.py`, параметры по умолчанию — `features/defaults.py` (`SCALE_OUT_LEVELS`, `RUNNER_TRAIL_MODE`, `TRAIL_ATR_MULT`, `TRAIL_WICK_BARS`). `LEGACY_PLAN` — прежняя схема (100% на 3R) для сравнения и старых тестов.
-
-| Что | Правило |
-|---|---|
-| Частичные закрытия | По **цене сделки** (aggTrade), исполнение по цене тика (со скольжением, как у стоп-маркета); на одном тике сначала проверяется стоп (худший сценарий), потом уровни. Гэп через оба уровня закрывает обе доли по цене гэпа |
-| Безубыток | Как раньше по D11 — mark price достигла +1R (`markPrice@1s`) → стоп на входе; **дополнительно** — сразу после первого частичного закрытия. Стоп двигается только в сторону прибыли |
-| Runner (10%) | После последнего уровня. Режим `atr` (по умолчанию): стоп = **лучшая цена −+ 3·ATR** последней закрытой свечи (ATR динамический, берётся с каждой закрытой свечи); режим `wick`: стоп за экстремумом последних 3 закрытых свечей. Стоп только подтягивается и **никогда не лежит дальше безубытка**; тейка у runner'а нет. Обновляется на закрытии свечи и действует со следующего тика (без заглядывания вперёд) |
-| Выход остатка | Сработал стоп (`sl` / `be` / `trail`) или `timeout` (192 свечи, по цене закрытия) |
-| Учёт | net R сделки = сумма net R закрытий; доля комиссии входа делится по долям; `exit_price` — средневзвешенная цена выходов; `exit_reason` — причина последнего закрытия. Сводка (`summary`) получила счётчики `trail` и `partials` |
-| Плановая цена TP в БД | цена последнего уровня плана (+3R) — условная цель, не ордер |
-
-**Пул монет (до 2026-10-11; сейчас другой — разд. 3.20).** `config.SHADOW_SYMBOLS = (BTCUSDT, ETHUSDT, DOGEUSDT, 1000PEPEUSDT)`. **Отступление от формулировки задачи:** добавлено в отдельную константу, а не в `config.SYMBOLS`, потому что `SYMBOLS` читают сборщики стакана/свечей (начали бы качать данные по новым монетам) и боевой ML-контур `live_run` (на старте требует `LIVE_QTY_STEP` для каждой монеты и сверяет позиции: перезапуск работающего бота с DOGE/PEPE в `SYMBOLS` упал бы или стал торговать ими по ML-модели, обученной на BTC/ETH). Shadow, Orchestrator, SmcKlineFeed и TickFeed используют `SHADOW_SYMBOLS`. **PEPE на фьючерсах называется `1000PEPEUSDT`** (контракт на 1000 PEPE; `PEPEUSDT` не существует) — проверено по публичному exchangeInfo.
-
-**Проверено.** 25 тестов `tests/orchestrator/test_scale_out.py` (валидация плана; +1R: 50% по цене тика, BE с того же тика, остаток открыт, затем выход по BE с итогом в плюсе; mark-BE не взводится дважды; стоп до уровней = полный убыток; +3R и runner 10%; гэп через оба уровня; ATR-трейлинг следует лучшей цене и только подтягивается; трейлинг не начинается до последнего уровня и не ослабляет безубыток; wick-режим; runner без данных свечи/ATR → `TrackerError`; нет заглядывания вперёд; таймаут runner'а; зеркало для лонга; MARKET по факту входа; план без runner'а; запись в рекордер каждого состояния и каждого закрытия, суммы долей/R/PnL сходятся; отмена; gap). Старые 19 тестов трекера идут на `LEGACY_PLAN` и проходят без изменений логики. Мутационная проверка: 15 поломок — 14 пойманы, одна эквивалентна (порядок «стоп → уровни» на одном тике не важен, т.к. стоп не ниже входа, а уровни ниже). Пайплайн признаков и детекторы отработали без ошибок на реальных публичных 15m-свечах всех четырёх монет (~41 день; сигналов SMC 12 / 4 / 14 / 10 по BTC / ETH / DOGE / 1000PEPE — **это проверка работоспособности, не вывод о прибыльности**).
-
-**Что не сделано.** Бэктест-симулятор `strategies/simulate.py` остаётся на схеме «100% на 3R»: выходы Shadow и бэктеста **теперь не сопоставимы** (R8 по выходам; сигналы по-прежнему общие) — О25.
-
-### 3.17. PostgreSQL и запись сделок (Этап 5, код готов и проверен на PostgreSQL 16)
-
-Пакет `persistence/`: `schema.py` (DDL, версионируемые миграции, SQL), `db.py` (пул asyncpg, ожидание БД, миграции, редактирование пароля в логах), `recorder.py` (интерфейс `TradeRecorder`, `NullRecorder`, `MemoryRecorder`, `RecordingEventLog`), `pg.py` (`PgRecorder`: очередь + писатель).
-
-```
- VirtualTracker ──trade()/close_leg()──┐
- Orchestrator ──snapshot()─────────────┼─► PgRecorder: asyncio.Queue (FIFO) ─► задача-писатель ─► PostgreSQL (одна транзакция на запись)
- Журнал событий ──RecordingEventLog────┘                                          ошибка писателя → check() в цикле → процесс падает (R1)
-```
-
-| Что | Решение |
-|---|---|
-| Драйвер | `asyncpg` (без ORM: схема маленькая, нужны JSONB/NUMERIC/upsert). Зависимость в `requirements.txt`, `COPY persistence` в Dockerfile |
-| Почему очередь | Трекер вызывается из обработчика тиков WebSocket (десятки сообщений в секунду): ждать сеть там нельзя. Порядок FIFO сохраняется: строка сделки раньше её закрытий и снапшота (внешние ключи) |
-| Что пишется | `trades` — upsert на каждое изменение (заявка → исполнение → частичное закрытие → BE/трейлинг → закрыта/отменена; реализованный R виден по ходу сделки); `trade_closes` — каждое закрытие; `trade_snapshots` — при приёме сигнала (свечи + геометрия + расчёт; записывается после строки сделки, до любого исполнения); `state_events` — все события журнала и переходы автомата SMC (S0→S1→…, только изменения) |
-| Fail-Fast (R1) | Ошибка записи (БД упала, нарушена схема, NaN в JSON, лишнее поле) убивает писателя; `ShadowRun.tick` зовёт `recorder.check()` каждую секунду → процесс падает → Docker перезапускает. Переполнение очереди (20 000) — тоже ошибка. Неверный `DATABASE_URL` — `ConfigError` до сети. Пароль не попадает в логи и исключения |
-| Миграции | `schema_migrations`; под `pg_advisory_xact_lock`; схема новее программы → ошибка (откат версии программы запрещён) |
-| Перезапуск | Состояние Shadow в памяти не восстанавливается (О17): при старте «висящие» сделки прошлого запуска (`pending_*`, `open`) помечаются `aborted` / `process_restart` — не попадают в статистику и не висят вечно открытыми |
-| Режим без БД | `DATABASE_URL` пуст — только JSONL-журнал (локальная разработка), в лог предупреждение |
-| Что НЕ защищено | Записи, лежавшие в очереди в момент жёсткого падения процесса (доли секунды); JSONL остаётся вторым источником. Для LIVE (R7: снапшот до ордера) нужен `await recorder.flush()` перед отправкой — не подключено (Этап 4 заморожен) |
-
-**Проверено.** 15 тестов `tests/persistence/test_pg.py`: 6 без БД (конвертация типов и отказы NaN/inf/неверных типов, формат строк трекера точно по схеме, преобразование событий журнала, DSN, неподключаемая БД не раскрывает пароль, согласованность SQL) и 9 **на настоящем PostgreSQL 16** (запускаются, если задан `TEST_DATABASE_URL` на БД `*_test`; схема public пересоздаётся — на боевую базу попасть не может): миграции и идемпотентность, отказ от схемы новее программы, **полный жизненный цикл сделки во всех четырёх таблицах** (типы NUMERIC/TIMESTAMPTZ/JSONB, 3 закрытия, суммы долей/R/PnL сходятся с трекером, снапшот со свечами и null-ATR прогрева, 8 переходов состояний), перезапуск (висящие → `aborted`, закрытые не тронуты), падение писателя через `check()`, невалидная строка убивает писателя, переполнение очереди, upsert без дублей и идемпотентность закрытий. 8 тестов `tests/orchestrator/test_recording.py` (снапшот после строки сделки, нет снапшота у пропущенных сигналов, автомат состояний пишет только изменения, `analyze` ≡ `detect`, цикл падает вместе с писателем, неверный DSN, запрет подавления ошибок).
-
-### 3.18. Деплой Shadow на VPS (Этап 5, проверен локально сквозным прогоном)
-
-**Состав.** `docker-compose.yml`: сервис `postgres` (образ `postgres:16-alpine`, профиль `shadow`, именованный том `pgdata`, порт **наружу не публикуется**, healthcheck `pg_isready`, 512 МБ) и `shadow-run` (профиль `shadow`, `depends_on: postgres: service_healthy`, `DATABASE_URL` из `${POSTGRES_PASSWORD}`, 768 МБ / 1 CPU; ключей API по-прежнему нет, `read_only`, `cap_drop: ALL`). Обычный `docker compose up -d` по-прежнему стартует только `live-run` (проверено `docker compose config`). Пароль БД — `POSTGRES_PASSWORD` в `.env.shadow` (создаётся на сервере случайным, `chmod 600`, в образ/архив/git не попадает).
-
-**Что делать (вам):**
-```bash
-python -m scripts.deploy_pack                              # локально: trading_shadow.tar.gz + .sha256 (БЕЗ .env и ключей)
-scp trading_shadow.tar.gz trading_shadow.tar.gz.sha256 user@server:~/
-ssh user@server
-  sha256sum -c trading_shadow.tar.gz.sha256
-  mkdir -p ~/trading && tar xzf trading_shadow.tar.gz -C ~/trading && cd ~/trading
-  chmod +x deploy/shadow.sh && ./deploy/shadow.sh up      # = docker compose --env-file .env.shadow up -d --build postgres shadow-run
-  ./deploy/shadow.sh status                               # затем: logs | stats | backup | psql | down
-```
-`deploy/shadow.sh`: проверяет Docker и compose v2, один раз генерирует пароль, собирает образ, стартует `postgres` + `shadow-run`, ждёт готовности и показывает лог; `stats` — сводка закрытых сделок из БД по стратегии/монете/причине выхода с суммой R; `backup` — `pg_dump | gzip` в `./backups`; `down` останавливает, **данные не удаляет** (в скрипте нет `down -v` и удаления томов). Нужен Docker на сервере и исходящий доступ к `fstream.binance.com`/`fapi.binance.com`.
-
-**`scripts/deploy_pack.py`** (переписан): список файлов берётся **из строк `COPY` в Dockerfile** (старый зашитый список разошёлся с Dockerfile — в архиве не было `features/strategies/orchestrator`, образ бы не собрался); цель `shadow` (по умолчанию) отказывается создавать архив, если в нём `.env`, `.env.shadow`, `*.pem`, `*.key`; `full` — прежнее поведение с `.env` (для `scripts/auto_deploy.py`, который использует `build_archive` по умолчанию как `full`); `.sh` приводится к LF, режим 0755; рядом пишется `.sha256`.
-
-**Проверено сквозным прогоном на этой машине (2026-10-10).** Архив `shadow` → распаковка в чистый каталог → `deploy/shadow.sh up`: образ собрался, postgres стал healthy, `shadow-run` применил миграцию 1 внутри контейнера, подключился к WS mainnet (**4 монеты**, история 15m по 300 свечей на каждую, смещение часов −167 мс), healthcheck стал healthy; `status`, `stats`, `backup` работают; «висящая» сделка, вставленная в БД, при `docker compose restart shadow-run` стала `aborted/process_restart`; пароль в логах отсутствует. Стенд полностью удалён (`down -v`, образ, каталог). 13 тестов `tests/test_deploy.py`: состав архива по Dockerfile и отсутствие секретов (в т.ч. подброшенные `.env`/`.pem` в копируемых каталогах → отказ), LF и права скрипта, контрольная сумма, `docker compose config` для обоих стеков, синтаксис скрипта (`sh -n`), в скрипте нет удаления данных, `SHADOW_SYMBOLS`/`SYMBOLS`.
-
-**Автодеплой одной командой (2026-10-10).** `scripts/auto_deploy.py` (paramiko; `tests/test_auto_deploy.py`, 5 тестов чистой логики) заменяет ручные scp/ssh: 9 шагов — архив `shadow` (без ключей) → SSH/SFTP → проверка/установка Docker и compose v2 → распаковка в `~/<remote-dir>` → `chmod 600 .env*` → `shadow.sh down` (только остановка, данные целы) → `shadow.sh up` → `pg_isready` + версия схемы `schema_migrations` = `SCHEMA_VERSION` → глубокая проверка: `postgres` и `shadow-run` в состоянии `running`, 200 строк лога без `Traceback/CRITICAL/FATAL/ConfigError`, и явный `FAIL: VPS IP blocked by Binance` при `HTTP 451/429/418`, `Handshake failed`, `rejected WebSocket connection`, `restricted location`. Любая ошибка команды на сервере прерывает скрипт (R1); локальный архив удаляется (кроме `--keep-archive`). Пароль лучше через `VPS_PASSWORD` или `--key`. **Живой прогон на реальном VPS не выполнялся** (❓): проверены только разбор логов и параметры; установка Docker — для Ubuntu/Debian (apt, затем get.docker.com).
-
-**Не проверено / на вас.** (а) Работа на вашем VPS: ОС, версия Docker, **доступность `fstream.binance.com` из региона дата-центра** (Binance блокирует часть стран/провайдеров ответом 451) — проверьте `./deploy/shadow.sh logs` после старта; (б) загрузка CPU/памяти под потоком aggTrade четырёх монет на слабом VPS (на этой машине контейнер работает штатно, замеров нагрузки не делал; лимит 1 CPU / 768 МБ); (в) автоматические бэкапы по расписанию и ротация — не настроены (только ручной `backup`); (г) TLS/доступ к БД снаружи не нужен и закрыт; для клиента Этапа 6 — SSH-туннель.
-
-### 3.19. FastAPI + Flet-клиент (Этап 6 ✅ принят пользователем 2026-10-10 на уровне кода; на вашем VPS и в бою не проверялось — см. «Не проверено» ниже)
-
-```
- PostgreSQL (shadow-run пишет)                                        ПК пользователя (Windows)
-        │ только чтение (default_transaction_read_only=on)
- api (FastAPI, контейнер на VPS) ── 0.0.0.0:8001 → 8000 в контейнере ──HTTP + X-API-Key──►  TradeAI-Monitor.exe (Flet)
-   REST  /api/info /api/stats /api/trades /api/trades/{id}/snapshot       ├─ Dashboard   ◄─ WS /ws/live_state
-   WS    /ws/live_state   (заголовок X-API-Key везде, кроме /api/health)  ├─ Statistics  ◄─ GET /api/stats
-                                                                          └─ History ──двойной клик──► отдельный процесс:
-                                                                               окно lightweight-charts (+свечи после сигнала
-                                                                               из публичного REST Binance, по желанию)
-```
-
-**Сервер (`api/`, образ `api/Dockerfile`: только fastapi + uvicorn + asyncpg, без кода стратегий и ключей биржи; пользователь не root).**
-
-| Файл | Роль |
-|---|---|
-| `api/main.py` | приложение, REST и WebSocket, пул asyncpg **только для чтения**, обработчики ошибок (БД недоступна → 503 `database_error`; нечитаемые данные → 500 `data_integrity`) |
-| `api/security.py` | ключ в заголовке `X-API-Key`, сравнение `hmac.compare_digest`, ограничение перебора: 10 неверных ключей с адреса за 60 с → 429 на всё окно (даже для верного ключа) |
-| `api/stats.py` | чистая статистика: Win Rate, Profit Factor, Net R, средний R ± ошибка, макс. просадка, рейтинг монет, кривая капитала, разбивки; предупреждение о малой выборке (< 200 сделок) |
-| `api/livestate.py` | состояние автомата S0..S4 по (монета, стратегия, сторона) из `state_events` (последний `setup_state` за 3 суток; нет событий = S0), открытые заявки/позиции, лента событий, «пульс» shadow-run; `LiveStateHub` — один фоновый опрос БД на процесс (раз в 2 с), рассылка клиентам при изменении и не реже чем раз в 10 с |
-| `api/reason.py` | текстовая причина входа из имени стратегии, стороны, `meta` и геометрии снапшота (SMC: свип → FVG → CHoCH → LIMIT; Breakout: поджатие → пробой → объём) |
-| `api/settings.py` | настройки из окружения; пустой/короткий (< 32) `API_KEY` или неверный `DATABASE_URL` — процесс не стартует (код 3), режима «без ключа» не существует |
-
-| Эндпоинт | Что отдаёт |
-|---|---|
-| `GET /api/health` | без ключа, только `{"status": "ok"\|"degraded"}` (healthcheck контейнера; 503, если БД недоступна) |
-| `GET /api/info` | версия схемы БД, монеты, счётчики сделок по статусам, пульс shadow-run |
-| `GET /api/stats?mode&coin&strategy&side&since` | статистика закрытых сделок **без `gap_affected`** (как `deploy/shadow.sh stats`); монеты без сделок присутствуют (в конце списка) |
-| `GET /api/trades?limit&offset&status&coin&strategy&side&mode` | страница сделок (новые сверху; `limit` ≤ 500; `total`; признак `has_snapshot`); фильтры повторяемые (`status=open&status=closed`) |
-| `GET /api/trades/{id}/snapshot` | сделка (+`plan` Scale Out), все закрытия, **сырые свечи и `geometry` из `trade_snapshots`**, `meta`, **текстовая причина входа** (`reason`), события сделки, путь автомата до сигнала (`setup_path`) |
-| `WS /ws/live_state` | сообщения `state` (полное состояние), `ping` (раз в 30 с без изменений), `error` (`database_unavailable` / `data_integrity`) |
-
-**Безопасность (требование пользователя «чтобы никто не скачал базу снаружи»).** (1) Все данные — только с `X-API-Key` (ключ создаёт `deploy/shadow.sh` в `.env.shadow`, 64 hex-символа, `chmod 600`; `./deploy/shadow.sh apikey` показывает его). Ключ **не** принимается в строке запроса (тест). (2) **С 2026-10-11 (решение пользователя) порт опубликован на `0.0.0.0:8001`** (`${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000`; на сервере порт 8000 занят другой программой, внутри контейнера API по-прежнему на 8000): клиент ходит напрямую по IP сервера, SSH-туннель не нужен. Цена: обычный HTTP — ключ `X-API-Key` идёт по сети открытым текстом (клиент предупреждает о нелокальном `http://`), единственные барьеры — ключ (64 hex) и троттлинг перебора (10 неверных за 60 с → 429); TLS нет. Вернуть «только с сервера»: `API_BIND=127.0.0.1` в `.env.shadow` + SSH-туннель (`-L 8000:127.0.0.1:8001`). Порт 8001 должен быть открыт в файрволе VPS/провайдера (❓ не проверено). (3) `/docs`, `/redoc`, `openapi.json` отключены. (4) Сессии БД read-only: даже ошибка в коде API не может изменить или удалить сделку (тест: `DELETE`/`UPDATE` отклоняются). (5) Контейнер: `read_only`, `cap_drop: ALL`, `no-new-privileges`, не root, 256 МБ/0.5 CPU, каталог `./data/shadow` смонтирован `:ro` (оттуда читается пульс), ключей биржи нет. (6) Не сделано: отдельная роль БД только с `SELECT` (сейчас — тот же пользователь `tradeai`, но с read-only сессией), TLS в самом API, ротация ключа без перезапуска.
-
-**Клиент (`client/`, на сервер не отправляется — `deploy_pack` исключает папку, тест это проверяет).**
-
-| Файл | Роль |
-|---|---|
-| `client/app.py` | точка входа; `multiprocessing.freeze_support()` первой строкой (иначе каждое окно графика в `.exe` запускало бы копию приложения); `--selftest-chart файл.png` — проверка окна графика |
-| `client/tradeai_client/api.py` | `ApiClient` (aiohttp, типизированные ошибки: auth/throttled/network/server…) и `LiveStateStream` (WebSocket с переподключением 1→15 с; при отказе по ключу **останавливается**, чтобы не исчерпать лимит попыток на сервере) |
-| `client/tradeai_client/chart_spec.py` | ответ `/snapshot` (+свечи после сигнала) → `spec`: чистый словарь (бары, невидимая сетка времени, маркеры входа/закрытий, зона FVG, линии SL/TP/вход/+1R/+3R, отрезки, панели текста). Без Flet и без графической библиотеки — тестируется отдельно, передаётся в процесс окна; подписи очищаются от кавычек/`\`/`$` (библиотека графика подставляет их в JS без экранирования) |
-| `client/tradeai_client/chart_window.py` | `apply_spec(chart, spec)` на `lightweight-charts-python`; окно — отдельный процесс (`multiprocessing`, spawn, не daemon); боковая панель «Причина входа» + «Результат» |
-| `client/tradeai_client/binance.py` | свечи после сигнала из публичного `GET /fapi/v1/klines` (только закрытые, без ключей) |
-| `client/tradeai_client/ui/` | `shell.py` (заголовок со статусом связи, вкладки, диалог настроек, открытие графика), `dashboard.py`, `stats_view.py`, `history_view.py`, `widgets.py` |
-| `client/tradeai_client/build_defaults.py` | дефолты сборки: `SERVER_URL = http://193.233.75.254:8001`, `API_KEY` (в репозитории пустой; `build_exe.ps1 -ApiKey …` подставляет его только на время сборки) |
-| `client/README.md`, `client/build_exe.ps1` | подключение (прямой доступ по IP), запуск, **сборка `.exe` через `flet pack`** (`-ServerUrl`, `-ApiKey`), диагностика |
-
-**Настройки клиента (с 2026-10-11, «запуск в один клик»).** `settings.json` лежит **рядом с `.exe`** (из исходников — в `client/`); старый `%APPDATA%\TradeAI Monitor\settings.json` от версии с туннелем **не читается** (в живой проверке он перебил адрес сборки на `127.0.0.1:8000` — убрано); если рядом с `.exe` писать нельзя — ошибка сохранения в интерфейсе. Порядок при запуске: файл → иначе дефолты из `build_defaults.py` → переменные `TRADEAI_API_URL`/`TRADEAI_API_KEY` поверх всего. Есть ключ (из файла или зашитый в сборку) — клиент подключается сразу, окно настроек не открывается; нет ключа — окно настроек, после «Проверить и сохранить» значения пишутся в `settings.json` и подхватываются при следующих запусках. Ключ, зашитый в `.exe`, и ключ в `settings.json` лежат открытым текстом — `.exe` не передавать посторонним. Тесты: `client/tests/test_settings_fmt.py` (путь рядом с `.exe`, дефолты, цикл «ввод → перезапуск», игнор старого файла в `%APPDATA%`, ошибка записи).
-
-**Что получил пользователь по пунктам задания.** Dashboard — карточки монет с `S2 · свип + FVG сформирован` отдельно для шорта и лонга (+ причина отказа для S3, открытая позиция, лента событий); Statistics — KPI, **рейтинг монет по Net R с отметкой лучшей**, кривая капитала, разбивки; History — таблица с фильтрами/страницами, двойной клик (и кнопка в строке) → окно графика: свечи снапшота, маркеры входа/каждого закрытия, горизонтальные линии SL/TP (+ план входа и уровни Scale Out), зона FVG прямоугольником, отрезок пула ликвидности, «свип»/«CHoCH», текст причины входа сбоку.
-
-**Отступления и интерпретации (✅ утверждены пользователем 2026-10-10 — О28–О32, разд. 6.1).** Главное: в снапшоте только свечи **до** сигнала, а вход/выход случаются позже — маркерам не на чем стоять. Клиент достраивает свечи после сигнала из публичного REST Binance (по умолчанию включено, опция в настройках); при недоступности Binance — график по снапшоту, маркеры на сетке времени, причина в панели.
-
-**Проверено.** 43 тестов `tests/api/` (22 без БД: настройки, защита и перебор, статистика, текст причины, разбор состояния; 21 на **настоящем PostgreSQL 16**: ключ на каждом эндпоинте, ключ в URL не принимается, троттлинг, read-only сессия, статистика/фильтры/пагинация, снапшот на данных, записанных настоящим кодом Оркестратор→трекер→`PgRecorder`, WebSocket (полное состояние, рассылка изменения, ошибка БД, отказ без ключа), **контракт с клиентом**: ключи ответов совпадают с `client/tests/fixtures/*.json`) и 49 тестов клиента (`client/tests`: настройки, форматирование, `chart_spec` на реальных ответах API — включая отказ на битых снапшотах, `ApiClient`/`LiveStateStream` против локального сервера — коды ответов, переподключение, остановка при неверном ключе, Binance, `apply_spec` на статическом графике, проводка интерфейса — двойной клик, выбор строки без пересборки). Собранный образ `api` запущен с `--read-only --cap-drop ALL`: `/api/health` 200, без ключа 401, с ключом данные, процесс не root. **Глазами:** клиент в браузерном режиме Flet на демо-БД (Dashboard, Statistics, History, диалог настроек: неверный ключ → красная подсказка, верный → подключение, файл настроек записан); график — в браузере (статический HTML) и **в настоящем окне pywebview** (снимок `chart.screenshot()`: свечи, FVG, SL/TP, маркеры, ось времени за последней свечой). **`.exe` собран `flet pack` (≈90 МБ), в нём окно графика работает (`--selftest-chart` → код 0, снимок идентичен запуску из исходников), приложение запускается и подключается по WebSocket.**
-
-**Не проверено / ограничения.** (а) Двойной клик по строке в Flet не удалось воспроизвести браузерной автоматизацией (синтетический double-click не доходит до Flutter); проводка обработчика проверена тестом, кнопка-свеча в строке (то же действие) кликом проверена — **двойной клик на реальном ПК проверьте сами**; (б) окно графика, открытое кликом из интерфейса, проверено по факту создания дочернего процесса, а не глазами на рабочем столе (визуально — самопроверкой и снимком); (в) на **вашем VPS** сервис `api` не запускался: `docker compose config` валиден, образ и контейнер проверены локально; (г) `flet pack` под Windows 10 без WebView2 Runtime окно графика не откроет (в Windows 11 он есть); (д) свечи после сигнала берутся с Binance — сравнение цен тиков Shadow и свечей Binance не делалось, маркеры входа/выхода ставятся по времени сделки в БД на свечу, содержащую это время; (е) `lightweight-charts` 2.1: `vertical_span` с двумя временами сломан в самой библиотеке (не используется), у перетаскиваемых таблиц `position` игнорируется (поэтому боковая панель — не перетаскиваемая, `inner_width=0.69`), и она несовместима с pandas 3 (зафиксировано `pandas<3`, тест на разрешение времени); (ж) Flet-клиент рисует кривую капитала столбцами из обычных контролов (пакет графиков Flet — отдельное расширение Flutter, которое `flet pack` не берёт).
-
-### 3.20. HTF Bias (H4) и боевой пул монет Shadow (2026-10-11, по заданию пользователя)
-
-**Что сделано.** Автомат SMC на M15 не начинает сетап **против структуры H4**: шорт при Bullish и лонг при Bearish запрещены, при Neutral разрешены обе стороны. Запрет стоит на переходе **S0 → S1** (свип): без свипа сетапа нет, состояние остаётся `0`, в `state_events` ничего не пишется. Уже начатый сетап при смене тренда H4 не отменяется (запрет только на входе в S1 — как в задании). Breakout Buildup **не фильтруется** (в задании речь о стейт-машине M15), но H4-контекст пишется и в его `meta` — справочно.
-
-```
- kline_4h (WS) + REST 300 свечей ─► SmcKlineFeed(4h, emit_latest_on_start) ─► FeatureEngine ─► HtfBias.update   (таблица bias на монету)
- kline_15m  ─► SmcKlineFeed(15m) ─► FeatureContext ─► HtfBias.attach (колонки htf_bias, htf_avail_ms) ─► Orchestrator ─► StrategySMC(htf_filter=True)
-```
-
-| Что | Решение |
-|---|---|
-| Определение тренда | **Структура свингов**, не EMA 50/200: Bullish = последний Swing High выше предыдущего **и** последний Swing Low выше предыдущего (HH+HL); Bearish = LH+LL; иначе Neutral (в т.ч. свингов меньше двух). Свинги — те же `features.smc.add_features` (k = 5, D2/D3), на H4. Причина отказа от EMA: рекурсивная EMA зависит от глубины истории (live 300 баров ≠ бэктест — нарушение R8, как у ATR по О7). Цена: свинг H4 подтверждается через 5 баров (20 ч), поэтому смена тренда видна с запаздыванием. **Мой выбор из двух предложенных вариантов — ждёт вашего подтверждения (О33).** |
-| Нет данных H4 | bias `null` → автомат **запрещает** сторону (fail-closed); нет H4-таблицы монеты или H4-фид отстал больше чем на 4 ч → `DataError`, процесс падает и Docker перезапускает (R1). Торговать вслепую без фильтра нельзя |
-| Без заглядывания в будущее | Bias H4-свечи с `open_time = T` виден M15-свече с `open_time >= T + 4h`, т.е. только после её **закрытия**; привязка по `open_time` M15 (а не по её закрытию) даёт запас 15 минут и убирает гонку двух WebSocket-событий (иначе live ≠ бэктест). Тесты: R4 (обрезка, 66 точек на 520 H4-барах), паритет окна 300/700 баров (R8), граница привязки до миллисекунды |
-| Один код для бэктеста и live (R8) | `features/htf.py` (`htf_bias_table`, `attach_htf_bias`, `side_allowed`), `SmcSetupParams(htf_filter=...)` в `strategies/smc_setups.py`. По умолчанию `htf_filter=False` — бэктест Этапа 2 (`simulate.py`, отчёты 3.11) идёт **без** H4 и не менялся; Shadow включает фильтр через `features/defaults.HTF_FILTER_ENABLED = True` |
-| Данные H4 | Бэклог и стрим берёт **не `collectors/`**, а тот же `SmcKlineFeed` (`orchestrator/kline_feed.py`, `interval="4h"`): история REST `/fapi/v1/klines` на старте и после каждого переподключения + `@kline_4h` на `/market/stream`; новый флаг `emit_latest_on_start` отдаёт состояние H4 сразу после старта (иначе первый bias пришёл бы через 4 часа). `collectors/` (загрузчик свечей на диск, сборщик стакана) обслуживает ML-контур по `config.SYMBOLS` и **не менялся** |
-| Оркестратор | `orchestrator/htf.py` (`HtfBias`: `update(ctx_H4)`, `attach(ctx_M15)`, журнал смены bias — событие `htf_bias` → `state_events`), `scripts/shadow_run.py`: H4-фид опрашивается раньше M15, затем `attach` → `Orchestrator.on_context`. `Orchestrator` не менялся |
-| Причина входа | В `meta` снапшота: `htf_interval`, `htf_bias` (+1/0/−1), `htf_label`. `api/reason.py`: заголовок «SMC Swing · шорт · SOLUSDT (H4: Bearish)», первая строка текста «0. Контекст старшего таймфрейма (H4: Bearish): шорт по тренду…», факт «Тренд H4 (HTF Bias)». Сделки до этой даты (без H4 в `meta`) отображаются как раньше. Клиент не менялся — читает готовый текст API |
-| Новый пул `config.SHADOW_SYMBOLS` (**с 2026-10-13 снова `BTCUSDT, ETHUSDT`, разд. 3.24; строка — история**) | `SOLUSDT, XRPUSDT, LTCUSDT, ZECUSDT, ADAUSDT, AVAXUSDT, DOTUSDT, LINKUSDT` (все — `TRADING/PERPETUAL` по публичному `exchangeInfo`, 2026-10-11). Дубль в `api/settings.py::DEFAULT_COINS` (образ API без `config.py`); тест сверяет их. **`config.SYMBOLS` (BTC, ETH) не менялся:** его читают сборщик стакана `depth-stream` (на сервере работает) и ML-бот `live_run` — «сборщик стакана принимает новые монеты» не проверялось и не требуется: Shadow берёт только публичные свечи/тики |
-| Рестарт со старым пулом | `PgRecorder.start` помечает все висящие сделки (`pending_*`, `open`) `aborted / process_restart` **независимо от монеты**; состояние Shadow в памяти не восстанавливается (О26). Тест на PostgreSQL 16: BTC/ETH/DOGE висят → `aborted`, новая SOL-сделка пишется нормально. История закрытых сделок BTC/ETH/DOGE/PEPE остаётся в БД; на Dashboard/в статистике показываются только монеты нового пула (старые монеты в рейтинге появятся, если в БД есть их сделки — ❓ не проверялось) |
-| Порт API | `docker-compose.yml` не менялся: `${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000`; тест `test_deploy` сверяет строку |
-
-**Проверено.** 28 новых тестов (весь набор **1339** зелёных на PostgreSQL 16, 1311 было): `tests/features/test_htf.py` (8: правила структуры, таблица истинности `side_allowed`, привязка без будущего, R4, паритет окна), `tests/strategies/test_smc_htf_filter.py` (8: шорт/лонг, fail-closed, фильтр режет только бар свипа, `свипы_с_фильтром == свипы_без & разрешено` на 3000 барах, R4 на 60 точках, нет колонки → `DataError`), `tests/orchestrator/test_htf.py` (10: присоединение, устаревание/пропажа H4, журнал смены bias, meta сигнала, цикл Shadow не открывает сделку против тренда и открывает по тренду, H4-фид молчит → падение, стартовый контекст H4), причина входа (1), PG-рестарт со сменой пула (1). Мутационная проверка: 14 поломок (убрать фильтр, перевернуть сторону, bias по close вместо open, снять проверку устаревания, не присоединять bias, не обновлять H4, и др.) — **все 14 пойманы**. **Живой прогон на mainnet 70 с** (`python -m scripts.shadow_run`, без БД): 3 WebSocket (`kline_15m`, `kline_4h`, тики), история 300×8 для M15 и H4, bias на старте: XRP, ZEC, ADA, AVAX, LINK — Bearish; SOL, LTC, DOT — Neutral; ошибок нет.
-
-**Не проверено / ограничения.** (а) Фильтр **не бэктестировался**: `simulate.py` его не знает, влияние на матожидание неизвестно — выводов не делать, копить статистику (разд. 3.11.1: даже без фильтра выборка статистически пуста); (б) нагрузка 8 монет (тики aggTrade+markPrice, три WS) на лимитах контейнера 768 МБ / 1 CPU — смотреть `docker stats` на VPS; (в) определение тренда (структура, а не EMA) — мой выбор, см. О33; (г) Neutral разрешает обе стороны — при частом Neutral фильтр слабый; (д) полный пул H4-истории — 300 свечей (~50 суток): у монет с короткой историей свингов может быть меньше — тогда Neutral.
-
-
-### 3.21. Мульти-стратегийный Shadow: 5 параллельных стратегий (2026-10-11, по заданию пользователя)
-
-**Зачем.** Параллельный форвард-тест нескольких вариаций логики на одном рынке. Решение пользователя 2026-10-11: утверждён HTF Bias по структуре свингов (О33 ✅), сняты лимиты ресурсов (сервер 6 ядер / 8 ГБ / 90 ГБ NVMe), «критическая уязвимость» — трекер не должен путать разнонаправленные позиции разных стратегий по одной монете.
-
-**Что было на самом деле (проверено по коду до правок).** Позиции и раньше были независимыми объектами (`signal_id` уникален, у каждой SHADOW-стратегии своя блокировка монеты — О14, `trade.sl/stop/плана` — поля самой сделки), но трекер хранил активные сделки списком по монете и **не мог запретить** две активные позиции одной стратегии на монете, БД не знала `strategy_id`, а план управления позицией был один на всех. Это исправлено; «коллизии состояний» как таковой, которая портила бы цифры, до этого не было — она стала бы возможной с пятью стратегиями и разными планами выхода.
-
-```
- kline_15m ─► SmcKlineFeed ─► FeatureEngine ─► [+htf_bias H4] ─► [+ms_obi, ms_delta] ─► Orchestrator ─► 5 × Strategy.detect/analyze (чистые функции)
- kline_4h  ─► SmcKlineFeed ─► HtfBias                              ▲                          │ у КАЖДОЙ стратегии своя блокировка монеты (О14)
- aggTrade ─► TickFeed ─► on_tick ─► VirtualTracker (ключ позиции = символ + strategy_id, план на стратегию)
-        └──────────────────────► MicroStructure (дельта ленты по свече)
- depth10@500ms (/public) ─► DepthFeed ─► MicroStructure (OBI топ-10 за последние 120 с свечи)
-```
-
-**Изоляция позиций (`orchestrator/tracker.py`).** Активные позиции — `dict[символ][strategy_id]`; составной ключ — строка `<символ>_<strategy_id>` (`SOLUSDT_SMC_Pro_Trend`, `Signal.position_key`). Вторая активная позиция под тем же ключом — `TrackerError` (R1: блокировка монеты Оркестратора её не пропускает, значит, нарушен протокол); под другим ключом той же монеты (в т.ч. противоположной стороны) — штатно: у каждой свой стоп, безубыток, уровни Scale Out, трейлинг, `gap_affected`, срок жизни и записи в БД. План управления позицией задаётся **на стратегию** (`VirtualTracker(plans={strategy_id: ScaleOutPlan})`, реестр `orchestrator/registry.py`). `strategy_id` — то же значение, что `Signal.strategy` и имя в `signal_id`.
-
-**БД — миграция v2 (`persistence/schema.py::_V2`).** Колонка `strategy_id` в `trades` (NOT NULL), `trade_snapshots` (NOT NULL), `state_events` (NULL только у системных событий `htf`). Старые данные сохранены: `strategy_id` = прежнее имя (`smc`, `breakout`) без переименования — история не смешивается с новыми стратегиями; висящие сделки (`pending_*`, `open`) перед созданием индекса помечаются `aborted/process_restart` (их всё равно пометил бы старт shadow-run). Добавлены индексы `(coin, strategy_id, status)`, `(strategy_id, signal_time)`, `state_events (coin, strategy_id, ts)` и **уникальный частичный индекс `trades_one_active_per_key (coin, strategy_id, mode) WHERE status IN (pending_limit, pending_market, open)`** — защита изоляции на уровне БД: вторая активная сделка под ключом убьёт писатель (R1). **Отступление от задания: не Alembic.** В проекте уже есть собственная версионируемая система миграций (`schema_migrations`, транзакция + `pg_advisory_xact_lock`, отказ при схеме новее программы; её проверяет `auto_deploy`), которая применяется при старте shadow-run; второй механизм (Alembic) дал бы два источника правды о версии схемы, лишнюю зависимость и конфликт с проверкой `SCHEMA_VERSION` — миграция v2 записана в штатном формате и применяется тем же способом (О34).
-
-**Пять стратегий (реестр `orchestrator/registry.py::SHADOW_STRATEGIES`).** Все работают на одних и тех же свечах M15 и одном фиде H4, у всех вход MARKET (кроме Pro_Trend — LIMIT на 50% FVG), решение на закрытой свече, детекторы — чистый векторный Polars без итераций (R2), без заглядывания в будущее (R3/R4), одна функция для бэктеста и live (R8).
-
-| strategy_id | Файл | Логика | Управление позицией |
-|---|---|---|---|
-| `SMC_Pro_Trend` (A) | `strategies/smc_setups.py` | Прежняя SMC (Sweep → FVG → CHoCH, LIMIT 50% FVG) с HTF-фильтром H4: только по тренду (шорт не при Bullish, лонг не при Bearish; Neutral разрешён) | Scale Out 50% +1R (+BE) / 40% +3R / 10% runner ATR×3 |
-| `SMC_Counter_Trend` (B) | `strategies/counter_trend.py` | Свип неснятого Swing-пула, закрытие обратно за пулом, **глубина (high − пул)/ATR[j−1] ≥ 1.5** (было 2.5, смягчено 2026-10-11), объём > 1.5 × SMA20 (было 2.5) (по предыдущим 20 барам), разворотная свеча, **строго против H4** (шорт только при Bullish, лонг — при Bearish; Neutral и null — запрет). SL = экстремум прокола + 0.2 ATR | скальп: 100% на +1R |
-| `OBI_Breakout` (C) | `strategies/obi_breakout.py` + `orchestrator/microstructure.py` | BOS: закрытие за последним подтверждённым Swing (событие пересечения), импульсная свеча (тело > 1.0 ATR[j−1]); подтверждение — OBI топ-10 (`depth10@500ms`, среднее за последние 120 с свечи) ≥ +0.25 / ≤ −0.25 **или** всплеск дельты ленты (aggTrade) ≥ 0.30 при объёме ≥ 1.5 SMA20. Откаты и свипы игнорируются | Scale Out по умолчанию |
-| `ICT_Killzones` (D) | `strategies/killzones.py` | Диапазон Азии 00:00–07:00 UTC (max/min за текущие сутки); ложный пробой (прокол + закрытие обратно, свеча по направлению разворота, уровень в эти сутки не пробивался) в London killzone 07:00–10:00 или New York killzone 12:00–15:00 UTC. SL за экстремум прокола + 0.2 ATR | Scale Out по умолчанию |
-| `VWAP_Reversion` (E) | `strategies/vwap_reversion.py` | Anchored VWAP с начала суток UTC (типичная цена, веса — объём), σ взвешенное по объёму; касание полосы ±3σ на этой или двух предыдущих свечах + разворотный паттерн (поглощение или pin-bar «звезда/молот») + закрытие внутри полосы; минимум 16 свечей суток. SL = экстремум окна касания + 0.2 ATR | 50% на +1R (+BE), 50% на +2R, без runner'а |
-
-Старая стратегия Breakout Buildup в боевой набор **не входит** (в задании пять): код и тесты остаются (`StrategyBreakout`, имя `breakout`), её можно вернуть добавлением в реестр. Старые сделки `smc`/`breakout` остаются в БД и клиенте под прежними именами.
-
-**Микроструктура (для C).** `orchestrator/microstructure.py`: `MicroAggregator` складывает события по свечам (ключ — время биржи); **лента** — те же сообщения `aggTrade`, что уже читает `TickFeed` (в `Tick` добавлены объём `qty` и сторона агрессора `buyer_maker`; лишнего соединения нет), **стакан** — новый `DepthFeed` (`<символ>@depth10@500ms`, публичный маршрут `config.WS_BASE_URL`, ~16 сообщений/с на 8 монет). К контексту M15 присоединяются колонки `ms_obi` и `ms_delta` — **только на последней строке** (у истории нет ни стакана, ни ленты). Данные свечи считаются полными, только если оба потока были подключены до её начала (допуск 10 с) и не обрывались; иначе значения `null` и подтверждения нет (fail-closed). Обрыв стакана/ленты — `mark_gap` (+ `gap_affected` у активных сделок через `TickFeed.on_gap`), упавший `DepthFeed` роняет цикл (R1). Формат сообщений проверен вживую на mainnet 2026-10-11: `depth10@500ms` на `/public/stream` — `e=depthUpdate`, `b`/`a` по 10 уровней, `T` ≈ `E`; `aggTrade` на `/market/stream` — `q` строкой, `m` bool.
-
-**Реестр и сборка (`scripts/shadow_run.py`).** `build_strategies(SHADOW_STRATEGIES)`, `plans_for(...)`, один `TickFeed`, один фид M15, один H4; `DepthFeed` поднимается, только если в наборе есть стратегия из `NEEDS_MICRO`. `docker-compose.yml`: у `shadow-run` **сняты лимиты `mem_limit: 768m` и `cpus: 1.0`** (по заданию), у `postgres` лимиты подняты 512 МБ/1 CPU → 2 ГБ/2 CPU, `api` не менялся (256 МБ/0.5 CPU; порт `${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000` не тронут).
-
-**API и клиент.** `strategy_id` во всех строках сделок и событий; фильтр `strategy=` теперь по `strategy_id`; `/api/info` отдаёт `strategies` (настроенные + замеченные в БД); `Dashboard` по-прежнему показывает автомат S0..S4 только для `SMC_Pro_Trend` (у остальных решение на одной свече — только сделки); причины входа (`api/reason.py`) написаны для всех пяти. Клиент (`client/`): фильтры стратегий и монет в History/Statistics обновлены (прежние монеты и имена остаются), подписи пяти стратегий. **`TradeAI-Monitor.exe` пересобирать не обязательно** для просмотра (старый .exe покажет новые сделки, но фильтры стратегий в нём — прежние «SMC Swing / Breakout»); для новых фильтров нужна пересборка `client/build_exe.ps1`.
-
-**Частота сигналов на реальной истории (проверка работоспособности, НЕ вывод о прибыльности)** — публичные 15m-свечи mainnet по реальному пулу из 8 монет, ~6 месяцев (2026-04-01 → 2026-10-11, по 18 598 баров; H4 собран из M15):
-
-| Стратегия | Сигналов за 6 мес. на 8 монет | Комментарий |
-|---|---|---|
-| A `SMC_Pro_Trend` | 303 | (≈ 38 на монету) |
-| B `SMC_Counter_Trend` (было 2.5 ATR / 2.5×объём; **сейчас 1.5 / 1.5 — на этих порогах ≈ 3 сигнала за 6 мес. на весь пул**, при 1.0 / 1.5 — 14) | **1** (при прежних порогах) | почти не срабатывало: за 6 мес. на BTC/ETH глубина единичного прокола не превышала 1.6–2.2 ATR; при 1.0 ATR / 1.5×объём — 14 сигналов (≈ 2 в месяц на весь пул) |
-| C `OBI_Breakout` | 701 только по ветке «дельта» (оценка по `taker_buy` свечей) | ветка OBI на истории не проверяема (стакана в истории нет); реальная частота в Shadow будет другой |
-| D `ICT_Killzones` | 179 | |
-| E `VWAP_Reversion` | 707 | самая частая |
-
-**Проверено.** 72 новых тестов: `tests/strategies/test_multi_strategies.py` (ручные сценарии по каждому условию каждой стратегии, зеркало лонг/шорт, **R4 обрезка** и **R8 паритет окна 300 баров** на случайных рядах, запрет итераций R2, проверка входа), `tests/orchestrator/test_multi_strategy.py` (противоположные позиции двух стратегий по одной монете независимы; тот же ключ — `TrackerError`, свободный ключ переиспользуется; планы по стратегии; пять стратегий на одном баре не блокируют друг друга; **сквозной прогон пяти настоящих детекторов на одном ряду**: окно 300 баров, тики, не больше одной активной позиции на ключ, `strategy_id` во всех записях; микроструктура: дельта, OBI, валидность, `DepthFeed` на локальном WebSocket с переподключением), `tests/persistence/test_pg.py` (**миграция v2 на настоящем PostgreSQL 16**: старые данные сохранены, `strategy_id` дозаполнен, висящая сделка `aborted`, `NOT NULL`, уникальный индекс одной активной позиции на ключ), `tests/api` (причины входа для всех пяти, список стратегий API = реестр), `tests/orchestrator/test_shadow_run.py` (цикл с микроструктурой, отсутствие лимитов в compose). Мутационная проверка: 21 намеренная поломка (отказ от проверки H4 / глубины / объёма / направления, снятие защиты от повторного пробоя уровня, подмена killzone и якоря VWAP, окна касания, подмена ключа позиции, общий план вместо плана стратегии, снятие проверки полноты микроструктуры, инверсия стороны агрессора, потеря strategy_id в снапшоте, обычный индекс вместо уникального, порча дозаполнения миграции) — 20 пойманы; 21-я эквивалентная (не меняет результат: максимум Азии по группе и бегущий совпадают на строках, где диапазон используется). Полный набор: **1411** зелёных в корне (на PostgreSQL 16) + **54** в клиенте.
-
-**Клиент.** `client/dist/TradeAI-Monitor.exe` пересобран 2026-10-11 (≈ 90 МБ, самотест окна графика → код 0) с новыми фильтрами стратегий и пулом монет; ключ API зашит в сборку (взят с сервера, в исходниках не остался — `build_defaults.py` с пустым `API_KEY`). Не передавать `.exe` посторонним. Старый `.exe` не сохранён (`flet pack` очищает `dist`).
-
-**Деплой (выполнен 2026-10-11 21:19 UTC).** `scripts.auto_deploy --host 193.233.75.254`: 9 шагов OK, схема БД v2 (миграция применена при старте shadow-run, сделок прошлого запуска помечено aborted: 0), `postgres`, `shadow-run`, `api` — `running/healthy`, `api` на `0.0.0.0:8001->8000`; `depth-stream` не затронут. В логе shadow-run: 8 монет, пять стратегий, подключены `kline_15m`, `kline_4h`, тики (`aggTrade` + `markPrice@1s`) и стакан `depth10@500ms`, история 300×8 для M15 и H4, bias H4 (SOL, LTC, DOT — Neutral; XRP, ZEC, ADA, AVAX, LINK — Bearish); на сервере пороги B = 1.5/1.5. Нагрузка сразу после старта: shadow-run ≈ 3.5% CPU / 53 МБ (лимита нет, доступно 7.75 ГБ), api 38 МБ, postgres 24 МБ.
-
-**Не проверено / ограничения.** (а) **B даже на смягчённых порогах 1.5 / 1.5 торгует редко** (≈ 3 сигнала за 6 мес. на весь пул по истории): выводов по ней придётся ждать долго; (б) C не бэктестируется на истории (нет стакана), ветка OBI проверена только на синтетике и формате живых сообщений; (в) сессии D — фиксированные часы UTC без перехода на летнее время (в зимние месяцы реальное открытие Лондона/Нью-Йорка на час позже); (г) у E цель «возврат к VWAP» выражена планом по R (+1R/+2R), а не ценой VWAP (тейк-ордер из цены сигнала трекер при MARKET-входе не использует); расстояние до VWAP в R пишется в `meta` (`target_vwap_r`) для анализа задним числом; (д) планы выхода B и E — стартовые допущения, не из утверждённых; (е) нагрузка пяти стратегий и потока стакана на VPS не измерялась под боем (смотреть `docker stats` после запуска); (ж) пять стратегий не бэктестировались, прибыльность неизвестна — ждать сотен сделок.
-
-### 3.22. Аналитический контур: MCP-сервер `mcp_server/` (AI Risk Manager, 2026-10-11, по заданию пользователя)
-
-**Принцип.** ИИ опирается только на математику и логи исполнения из PostgreSQL (никаких соцсетей). Сервер MCP (stdio) работает **на ПК пользователя**, в Cursor / Claude Desktop, и ходит в БД на VPS через SSH-туннель **только на чтение**; туннель с 2026-10-12 работает **по SSH-ключу без пароля и стартует сам** при входе в Windows (разд. «Туннель по ключам» ниже). На VPS не деплоится, `deploy_pack`/`.dockerignore` папку исключают, торговый контур и схема БД не менялись.
-
-```
- Cursor / Claude Desktop ──stdio (MCP)──► mcp_server/server.py ──asyncpg, read-only──► 127.0.0.1:15432 ══SSH-туннель══► postgres (контейнер на VPS)
-                                              │ queries.py (только SELECT, параметры $n) · analytics.py (чистая математика)
-                                              └ api/reason.py::build_reason  (текст причины входа; единый источник правды с клиентом)
-```
-
-| Файл | Роль |
-|---|---|
-| `mcp_server/server.py` | `FastMCP("tradeai-risk-analyst")`, три инструмента, валидация аргументов (`strategy_id` по `^[A-Za-z0-9_.-]{1,64}$`, числа — по диапазонам) |
-| `mcp_server/db.py` | `DATABASE_URL` из окружения → `mcp_server/.env` → корневой `.env` (читается **только** эта строка, ключи Binance не трогаются); ленивый пул asyncpg (сервер стартует и без туннеля); защита от записи; ошибки соединения → `DbError` с подсказкой и **без пароля** |
-| `mcp_server/queries.py`, `analytics.py` | SQL и чистая аналитика (метрики, просадка, разбивки) |
-| `mcp_server/tunnel.ps1` | SSH-туннель **по ключу** (`~/.ssh/id_ed25519`, `BatchMode`): при каждом (пере)подключении узнаёт IP контейнера `postgres` (`docker inspect`), пробрасывает `127.0.0.1:15432`, сам переподключается (10 с), один экземпляр (мьютекс), лог `tunnel.log`; на сервере ничего не пишет |
-| `mcp_server/tunnel-hidden.vbs`, `install_autostart.ps1` | запуск без окна консоли; задача Планировщика «TradeAI MCP Tunnel» (вход пользователя, без админа, `-Uninstall` убирает) |
-| `mcp_server/README.md` | доступ к БД, установка, конфигурация Cursor и Claude Desktop, примеры запросов, ошибки |
-
-| Инструмент | Результат |
-|---|---|
-| `get_strategies_overview(time_window_hours=168)` | по `strategy_id`: сделок, Win Rate, Profit Factor, Net R, средний R ± ошибка, лучшая/худшая монета, сколько сделок окна не вошло в статистику; итого; `sample_warning` при выборке < 200 |
-| `get_trade_details(strategy_id, limit=20)` | последние сделки (≤ 100) + `reason` (текст причины входа), `htf_bias`, сырой `signal_meta`, все `closes`; свечи не отдаются |
-| `analyze_drawdown_causes(strategy_id, worst_trades_limit=15)` | убытки (Net R < 0) против всех закрытых: макс. просадка в R с датами, профиль убытков (MFE/MAE), разбивки по HTF Bias, `with_trend`/`counter_trend`, стороне, монете, причине выхода, часу UTC (+ сессия для ICT, подтверждение для OBI), доля группы в общем убытке, худшие сделки с причиной |
-
-**Определения** те же, что в `api/stats.py` (О31): сделка = `status = 'closed'` и не `gap_affected`, режим `shadow`; Win Rate = доля Net R > 0; Profit Factor = прибыль R / модуль убытка R; Net R = `trades.r_multiple`.
-
-**Отступления от задания.** (1) **Поля `reason` в `trade_snapshots` нет** (там `candles`, `geometry`, `meta`). Текст причины строит `api/reason.py` из `meta` и геометрии; сервер импортирует эту функцию из репозитория (если `mcp_server/` скопирован отдельно — остаются `htf_bias` и сырой `signal_meta`). (2) **Библиотека:** официальный `mcp` закреплён `>=1.9,<2` (стабильный `mcp.server.fastmcp.FastMCP`; в 2.x он переименован в `MCPServer`, API другой) — осознанный выбор, не сторонний `fastmcp`. (3) Доступ к БД — только через SSH-туннель: порт `postgres` на VPS не публикуется (тест `test_deploy`), открывать 5432 в интернет не нужно.
-
-**Безопасность (только чтение, три независимых слоя).** (1) Сессия БД с `default_transaction_read_only = on` (Postgres сам отклоняет INSERT/UPDATE/DELETE/DDL); (2) `Database.fetch()` принимает один оператор `SELECT`/`WITH` без `;`; (3) запросы — готовые строки с параметрами, текст от LLM в SQL не подставляется. Таймаут запроса 25 с, пул ≤ 3 соединений. Для доступа нужны: SSH к VPS, право на `docker` под этим пользователем, `POSTGRES_PASSWORD` из `~/trading/.env.shadow`. Отдельной роли БД «только SELECT» нет (О32) — защита на пунктах выше.
-
-**Проверено.** 28 тестов `mcp_server/tests` (запуск: `mcp_server\.venv\Scripts\python.exe -m pytest mcp_server\tests`; интеграционные идут при `TEST_DATABASE_URL` на БД `*_test`): чистая аналитика; разбор `.env` и приоритет источников; пароль не раскрывается в ошибках; 8 вариантов записи/мульти-операторов отклоняются; все SQL проекта — одиночные SELECT; **на настоящем PostgreSQL 16** (схема из `persistence/schema.py` v1–v2, засеянные сделки): цифры сводки (окно, `gap_affected`, открытые), сделка с причиной/снапшотом/закрытиями, сделка без снапшота, разбивки просадки, неизвестная стратегия → список известных, **DELETE/UPDATE/DROP/INSERT отклоняются сессией БД**, недоступная БД → понятная ошибка без пароля, **восстановление после обрыва соединения** (`pg_terminate_backend`), **полный путь по протоколу MCP** (процесс сервера + клиент SDK: `list_tools`, `call_tool`, ошибка валидации). Мутации: выключение read-only → падает тест записи; снятие фильтра `gap_affected` → падают сводка и сквозной тест. Тесты деплоя после правки `deploy_pack` проходят.
-
-**Туннель по ключам и автозапуск (2026-10-12, по заданию пользователя).** (1) На ПК создан `~/.ssh/id_ed25519` (ed25519, без парольной фразы, комментарий `tradeai-mcp-tunnel@desktop-ok87v3k`); публичная часть добавлена в `/root/.ssh/authorized_keys` на VPS (до этого файла не было; существующие ключи не затрагивались), права `700`/`600`, проверено `ssh -o BatchMode=yes root@193.233.75.254 "echo OK"` → `OK` без пароля. (2) `tunnel.ps1` переписан: ключ, `BatchMode`, повторное определение IP контейнера при каждом подключении, автопереподключение, мьютекс, лог; `tunnel-hidden.vbs` и `install_autostart.ps1` (задача «TradeAI MCP Tunnel», триггер — вход пользователя). (3) Проверено: задача запущена, туннель поднялся, MCP-инструмент прочитал живую БД; `ssh` убит → через ~12 с туннель поднялся сам и MCP снова читает; вторая копия завершилась сразу. **Отступление от задания:** туннель к контейнеру (`15432 → <IP контейнера>:5432`), а не `15432:127.0.0.1:5432`: порт `postgres` на VPS не публикуется (тест `test_deploy`), правка боевого compose не делалась; серверные контейнеры не перезапускались, `auto_deploy` не запускался (виртуальные позиции целы). (4) **Безопасность:** ключ без парольной фразы на ПК = вход `root` на VPS (нельзя копировать/коммитить); пароль `root` ранее фигурировал в чате — **пользователь меняет его сам** (`passwd` на сервере), от пароля теперь ничего не зависит. Не проверено: автозапуск после **реальной перезагрузки/выхода из Windows** (задача зарегистрирована и срабатывает при ручном запуске; сам триггер входа не наблюдался). Логин по паролю на сервере не отключался (`PasswordAuthentication` не менялся).
-
-**Не проверено / ограничения.** (а) **На вашем VPS проверено 2026-10-11/12:** подключение к боевой БД и чтение инструментами работают (сделок в БД на тот момент 0, содержательные ответы — после накопления данных); конфигурации клиентов в самих клиентах не открывались; (б) конфигурации Cursor и Claude Desktop составлены по документации клиентов, в самих клиентах здесь не открывались; (в) закрытых сделок пока немного — ответы идут с `sample_warning`, выводов о прибыльности делать нельзя; (г) группы разбивок менее ~20 сделок — шум; (д) пароль БД лежит открытым текстом в `mcp_server/.env` (или `env` блока MCP-конфига) на ПК; (е) сделки до 2026-10-11 без `htf_label` попадают в группу `unknown`.
-
-### 3.23. Боевой модуль исполнения Live Execution Engine (2026-10-12; доработан 2026-10-13 по решениям пользователя; код и тесты готовы, **ВЫКЛЮЧЕН**, на сервер не деплоился)
-
-**Статус.** Код интегрирован, но скрыт за флагом `TRADE_MODE` (`config.py`, значения `shadow` | `live`, **по умолчанию `shadow`**). Пока `TRADE_MODE=shadow`, `scripts/shadow_run.py` не импортирует ни `orchestrator/live_engine.py`, ни `exchange/` (тест запускает процесс и проверяет `sys.modules`). Деплой не выполнялся, `docker-compose.yml` не менялся (у `shadow-run` по-прежнему нет `env_file` и ключей API — внутри контейнера боевой режим включить физически нечем), `Dockerfile` получил строку `COPY exchange ./exchange` (при следующем деплое файлы приедут в образ и останутся неактивными).
-
-```
- Orchestrator ─► Route(SHADOW) ─► LiveMirrorSink.submit
-                                     ├─► VirtualTracker.submit        ВСЕГДА, как раньше (Shadow-статистика не зависит от live)
-                                     └─► (принят трекером И стратегия ∈ APPROVED_STRATEGIES) ─► LiveExecutionEngine.enqueue
- LiveExecutionEngine.execute(signal):
-   1 Safe Mode?      2 суточный PnL с биржи (/fapi/v1/income с 00:00 UTC) ─► LiveRiskManager.update_daily_pnl
-   3 баланс ≥ маржи  4 LiveRiskManager.evaluate ─► LiveOrderPlan | LiveRejected(reason)      (резервирует монету)
-   5 MARKET: mark price биржи в пределах 1% от цены сигнала (иначе `price_deviation`)
-   6 состояние на диск (write-ahead) + журнал `live_intent` + flush БД (R7)      7 ISOLATED + плечо (один раз на монету)
-   8 вход MARKET | LIMIT (GTX если LIVE_POST_ONLY)   9 после исполнения: SL на весь объём + TAKE_PROFIT_MARKET на КАЖДЫЙ уровень Scale Out
- on_tick (те же тики, что у Shadow) / on_bar_closed / poll() раз в секунду - сопровождение ПЛАНОМ СТРАТЕГИИ (ScaleOutPlan из `plans_for`):
-   уровни исполняет биржа ─► безубыток (стоп на вход: POST нового, затем DELETE старого) и размер стопа = остаток ─► трейлинг runner'а по
-   закрытой свече (ATR / тени) ─► тайм-аут 192 свечи ─► позиция исчезла: снять оставшиеся algo-ордера, освободить монету
- recover() при старте: файл состояния + сверка с биржей (позиции, ордера входа, algo-ордера); чужая позиция со стопом - подтягивается
-```
-
-| Файл | Роль |
-|---|---|
-| `exchange/binance_live.py` | `BinanceLiveClient`: `get_balance`, `get_position_amt`, `realized_pnl_since`, `set_leverage`, `set_margin_type`, `market_order`, `limit_order`, `stop_loss`, `take_profit`, `cancel_order`, `get_order`, `cancel_algo_order`, `get_algo_order`. **Транспорт — `execution.rest.SignedRest`** (HMAC-SHA256, `X-MBX-APIKEY`, поправка часов -1021, типизированные ошибки): `ccxt` и `binance-futures-connector` в зависимостях нет, второй копии подписи в проекте не создавалось. Ключи — `BINANCE_API_KEY` / `BINANCE_API_SECRET` из окружения (`.env` подгружает `config.py`; секрет не попадает в `repr`). Без повторов (сетевой сбой = «исход неизвестен», решает движок). **Строгая локальная проверка до отправки:** цена на сетке `tickSize`, объём на сетке `stepSize`, `minQty`, `MIN_NOTIONAL` (для reduce-only не требуется), сторона `BUY`/`SELL`; нет фильтров символа — `ConfigError`. Детерминированные client id `<tb><роль>_<sha1(signal_id)[:20]>` |
-| `orchestrator/live_risk.py` | `LiveRiskManager` — единственные ворота между сигналом и биржей (правила ниже); `LiveOrderPlan` / `LiveRejected` |
-| `orchestrator/live_engine.py` | `LiveExecutionEngine` (исполнитель: вход, Scale Out, безубыток, трейлинг, тайм-аут, очередь + опрос), `LiveTrade` / `LiveStateStore` (состояние на диске), `recover` (сверка с биржей), `LiveMirrorSink` (приёмник маршрута), `build_live_engine` (сборка с охранными проверками) |
-| `config.py` | `TRADE_MODE`, `APPROVED_STRATEGIES`, `LIVE_MARGIN_USDT`, `LIVE_LEVERAGE`, `LIVE_DAILY_LOSS_LIMIT_USDT`, `LIVE_LIQ_SAFETY`, `LIVE_PNL_MAX_AGE_S`, `LIVE_MAX_HOLD_BARS` (192), `LIVE_MAX_ENTRY_DEVIATION` (1%), `LIVE_STATE_NAME`, `LIVE_ALLOW_MAINNET`; **`USE_TESTNET`** → `LIVE_REST_URL` = `https://testnet.binancefuture.com` (только адрес клиента ордеров; `REST_BASE_URL` и данные Shadow остаются mainnet); проверяются в `config.validate()` |
-| `scripts/test_live_order.py` | принудительная тестовая сделка на testnet (минуя риск-менеджер и сигналы): ~10 USDT по `1000PEPEUSDT`, SL + TP, безубыток, закрытие; проверяет форматы `/fapi/v1/algoOrder`, баланс, positionRisk, openAlgoOrders, income (разд. «Скрипт проверки» ниже) |
-| `scripts/shadow_run.py` | единственные правки: при `TRADE_MODE=live` лениво собирает движок и оборачивает трекер в `LiveMirrorSink`; `ShadowRun.tick` зовёт `live.check()` (упавший исполнитель роняет процесс, R1) |
-
-**Правила Live Risk Manager (все жёсткие).**
-
-| # | Правило | Реализация |
-|---|---|---|
-| 1 | **Фильтр стратегий** | `APPROVED_STRATEGIES` (по умолчанию `SMC_Pro_Trend`; env — через запятую). Неодобренные сигналы в движок не уходят вообще (`LiveMirrorSink`), но **Shadow-трекер получает их как прежде**; менеджер страхует вторым `strategy_not_approved`. Неизвестное имя в списке — `ConfigError` при сборке |
-| 2 | **Фиксированный объём** | позиция = `LIVE_MARGIN_USDT × LIVE_LEVERAGE` в USDT (10 × 10 = 100 USDT), объём **вниз** до шага лота; маржа изолированная (`ISOLATED`): потеря ограничена маржой сделки, а не счётом. Риск сделки = объём × \|вход − SL\| (плавает, в отличие от Shadow-«1% депозита») |
-| 3 | **Суточный лимит убытка** | результат **счёта** с 00:00 UTC = `REALIZED_PNL + COMMISSION + FUNDING_FEE` по журналу биржи `/fapi/v1/income` (все стратегии и любые сделки счёта; учитывает и закрытия стопом на бирже, пока бот был выключен). Убыток **≥** `LIVE_DAILY_LOSS_LIMIT_USDT` (50) → блокировка новых входов **до 00:00 UTC следующих суток**; защёлка пишется в файл (`.live_risk_state.json` в каталоге данных) — рестарт процесса её не снимает. Нет свежего PnL (> 120 с или ни разу не получен) → новых сделок нет (fail-closed). Лимит достигнут → неисполненные лимитки отменяются |
-| 4 | **Стоп ближе ликвидации** | расстояние до SL < `LIVE_LIQ_SAFETY / плечо` (0.8 / 10 = 8%) от входа, иначе `sl_too_far`: при более дальнем стопе позицию ликвидирует раньше, чем он сработает |
-| 5 | **Одна позиция на монету** | One-Way Mode склеивает противоположные позиции разных стратегий в одну чистую; монета резервируется с одобрения до закрытия/отмены (`symbol_busy`) |
-| 6 | Минимумы биржи | `below_min_size` (объём < `minQty` или сумма < `MIN_NOTIONAL`); `bad_risk` (после округления SL совпал со входом) |
-| 7 | **План выхода обязан делиться на сетке лота** | доли Scale Out (50% / 40% / runner 10%) переводятся в объёмы вниз до шага лота, остаток уходит в runner; если какая-то часть < `minQty` или её доля отличается от плана больше чем на 2% позиции — отказ `plan_not_representable` (торговать «по другой математике» нельзя). Для 100 USDT на BTC (0.001 лота) это означает отказ, на SOL/XRP/PEPE — норма. Ту же проверку проходит и частичное исполнение LIMIT: не делится — позиция закрывается по рынку без Safe Mode |
-
-**Выход = Shadow (решение пользователя 2026-10-13: «в live нельзя торговать по другой математике»).** План берётся из реестра стратегий (`orchestrator/registry.plans_for`: `SMC_Pro_Trend` — Scale Out 50% на +1R / 40% на +3R / runner 10%; `SMC_Counter_Trend` — 100% на +1R; `VWAP_Reversion` — 50% на +1R и 50% на +2R) и применяется той же математикой, что `VirtualTracker`: R = |фактическая цена входа − SL| (MARKET — по факту исполнения, LIMIT — по цене лимитки); уровни — от фактической цены; **безубыток** — стоп на вход, когда mark price (те же тики, что у Shadow) коснулась +1R **или** исполнен первый уровень; стоп только в сторону прибыли; **runner** — трейлинг по закрытой свече (`atr`: лучшая цена с входа ∓ 3·ATR, лучшая цена — по тикам сделок; `wick`: тени последних N свечей), вступает в силу со следующего опроса; **тайм-аут** 192 свечи — закрытие по рынку. Уровни — биржевые `TAKE_PROFIT_MARKET` на свою долю, SL — на весь объём (после каждого исполнения уровня заменяется стопом на остаток: POST нового, затем DELETE старого — окна без стопа нет). Причины закрытий называются как в Shadow: `scale_1r`, `scale_3r`, `tp`, `sl`, `be`, `trail`, `timeout`.
-
-**Защита позиции и аварийные пути.** Позиция без подтверждённого стопа недопустима (R6): SL и TP-уровни ставятся сразу после исполнения входа (`quantity` + `reduceOnly`, решение О18); идентификаторы ордеров записываются на диск ДО выставления. Не поставился любой из ордеров, цена исполнилась уже за стопом (гэп) или уровень не по ту сторону входа → **Safe Mode** (замок `data/.safe_mode`, снимается только вручную) → отмена остатка входа → reduce-only рыночное закрытие по фактической позиции → снятие защитных ордеров → `LiveExecutionError`, процесс падает. Частичное исполнение LIMIT: остаток отменяется сразу, план делится на ИСПОЛНЕННЫЙ объём. Исход отправки неизвестен (сеть/5xx) → `GET` по тому же client id: вход — нашёлся/нет ордера (повторной отправки вслепую нет); замена стопа — не дошла → прежний стоп остаётся, повтор следующим опросом. «Стоп уже за ценой» при переносе (`-2021`: безубыток/трейлинг на цене или за ценой) — не авария: выход по рынку с причиной `be`/`trail`, Safe Mode не включается. Отказ биржи на вход (`-2019` и т.п.) — обычный исход (`live_entry_rejected`); ошибки ключа/подписи/прав (`-1022/-2014/-2015/-1002`) — Safe Mode + падение. Позиция исчезла → оставшиеся algo-ордера снимаются (опасны для следующей сделки по монете); не снимается и не терминален → падение. Позиция противоположного знака → Safe Mode + падение. **MARKET-вход отклоняется (`price_deviation`), если mark price биржи ушла от цены сигнала больше чем на 1%** (R и уровни плана были бы уже не теми).
-
-**Состояние и перезапуск (решение пользователя 2026-10-13: «не терять контроль над позицией»).** Файл `live_engine_state.json` (каталог данных; атомарная запись, JSON версии 1; пишется только при изменении): запись сделки (план, фактический вход, R, остаток, действующий стоп и его id, уровни с флагами «исполнен», безубыток, лучшая цена, счётчик свечей, свечи для трейлинга по теням). **Write-ahead:** сделка и id входа — на диске до первого запроса на ордер (флаг `entry_sent` — до отправки), id стопа и уровней — до их выставления, новый стоп (и старый в списке на снятие) — до DELETE старого. `recover()` при старте (`build_live_engine`): (1) сделки из файла возвращаются, монета резервируется в менеджере риска; (2) ордер входа — спросить биржу по client id (исполнился → защита; ждёт → ждать; биржа не знает → `entry_not_found`; не отправлялся → `never_sent`); (3) открытая позиция — проверить, что защитные ордера на месте (нет → выставить с теми же id), принять всё, что сработало за время простоя (уровни → частичные закрытия в журнал, безубыток, размер стопа, стоп сработал → сделка закрыта с причиной, парные ордера сняты), и сопровождать дальше без новых ордеров; (4) монета без записи сделки: позиция **со стопом на бирже** подтягивается (`live_adopted`: цена входа из positionRisk, SL и TAKE_PROFIT_MARKET-ордера как есть, дальше безубыток/уровни/трейлинг); позиция **без стопа** — Safe Mode и остановка (чужую позицию не закрываем, решает оператор); наши висячие algo-ордера (префикс `tb`) без позиции — снимаются. Битый файл состояния или неверная версия — `DataError`, старта нет.
-
-**События журнала** (JSONL + `state_events` через `RecordingEventLog`): `live_intent` (план, баланс, суточный PnL, геометрия, meta — **до** первого ордера и после `flush()` БД), `live_rejected` (`reason`), `live_daily_limit`, `live_entry_placed` / `_filled` / `_rejected` / `_not_placed`, `live_protected`, `live_partial_close` (`scale_1r` / `scale_3r` / `tp`), `live_be_armed`, `live_trail_moved`, `live_closed` (`sl` / `be` / `trail` / `tp` / `timeout` / `plan_not_representable` / `unknown`), `live_trade_cancelled` (`ttl` / `invalidated` / `tp_before_fill` / `risk_blocked` / `entry_not_found` / `never_sent` / …), `live_emergency`, `live_recovered`, `live_adopted`, `live_orphan_algo_cancelled`, `live_position_changed`.
-
-**Охрана включения (всё сразу).** (а) `TRADE_MODE=live`; (б) ключи в окружении; (в) на mainnet — `LIVE_ALLOW_MAINNET=true` (иначе `ConfigError`); (г) `APPROVED_STRATEGIES` ⊆ запущенные стратегии; (д) Safe Mode не включён; (е) фильтры биржи загружены для всех монет пула; (ж) позиция без стопа и без записи — остановка. Любое нарушение — `ConfigError` / `LiveExecutionError` ДО первого нового ордера. На mainnet подтверждение — `LIVE_ALLOW_MAINNET=true`; **с `USE_TESTNET=true` ордера идут на testnet без этого подтверждения** (данные Shadow при этом остаются mainnet — см. ограничение 5).
-
-**Ограничения (честно).**
-1. **Дублирование с `LiveBarrier` (Этап 4, заморожен)** остаётся: два исполнителя в проекте. Теперь у нового есть состояние на диске, сверка при старте, Scale Out, безубыток и трейлинг; чего нет, а у `LiveBarrier` есть: приватный поток `ALGO_UPDATE` (движок опрашивает REST раз в секунду, поэтому уровни и стоп замечаются с задержкой до ~1 с), динамические добавки защиты на частичные исполнения (здесь частичный LIMIT: остаток отменяется, план делится на исполненный объём), периодическая полная сверка `reconcile` (здесь сверка — при старте и через опрос позиции/ордеров каждую секунду).
-2. **Отличия от Shadow — только физические:** (а) цены уровней и стопов округляются до шага цены, доли — до шага лота (отказ `plan_not_representable`, если не делится); (б) уровни и стоп срабатывают на бирже по её цене, а не по тику Shadow (время/цена исполнения чуть иные); (в) **«немедленный стоп»**: безубыток/трейлинг, рассчитанный по закрытой свече НА цене или ЗА ценой (биржа ответила бы `-2021`), движок закрывает сразу рынком (причина `be`/`trail`), а Shadow проверит стоп только на следующем тике, и цена к тому времени может отскочить; в тесте паритета это 3 траектории из 176; (г) лучшая цена для трейлинга и mark price для безубытка идут из тех же тиков (`on_tick`), что у Shadow; после перезапуска лучшая цена восстанавливается из файла состояния с точностью до последнего сохранения (≤ 1 с).
-3. **❓ Не проверено на живой бирже** (разд. 4): принимает ли Algo Service **SL на весь объём и TP-уровни одновременно** (сумма reduceOnly ≫ позиции; гипотеза О18 — при отказе сработает аварийный путь: закрытие + Safe Mode, не молчание) и **третий стоп при переносе в безубыток**; путь и поля `/fapi/v3/balance`, `openAlgoOrders`, `/fapi/v1/income`, `premiumIndex`; код отказа отмены неизвестного algo-ордера (движок решает по `GET algoOrder`, а не по коду). Всё это закрывает `scripts/test_live_order.py` на testnet.
-4. Открытая позиция при срабатывании суточного лимита **не закрывается** — **утверждено пользователем 2026-10-13** (О42): новые сделки не открываем, лимитки снимаем, открытые позиции сопровождаются своими SL/TP-уровнями до конца.
-5. **Testnet и данные Shadow.** Shadow считает сигналы по ценам mainnet; при `USE_TESTNET=true` ордера идут на testnet, где цены другие. Защита `price_deviation` (1%) отклонит большинство MARKET-сигналов, а безубыток/трейлинг по тикам mainnet к позиции на testnet неприменимы. Поэтому testnet нужен для проверки **механики и форматов** (скрипт `test_live_order.py`), а не для проверки стратегий; результаты Shadow и live на testnet сравнивать нельзя.
-6. Отмена «цена дошла до TP до исполнения» работает по закрытию свечи (не по тику, как у `VirtualTracker`); сигнал исполняется из очереди с задержкой до `poll_interval_s` (1 с).
-7. PnL считается по всему счёту: ручные сделки и другие боты на том же аккаунте тоже входят в суточный лимит (консервативно). Лимит — по реализованному результату, нереализованный убыток открытых позиций ограничен стопами.
-8. Для маленьких объёмов на дорогих монетах план не делится (BTC по 100 USDT: шаг 0.001 → 0.001 BTC; 10% = 0.0001 невозможно) — такие сигналы отклоняются; пул Shadow (SOL, XRP, LTC, ZEC, ADA, AVAX, DOT, LINK) в основном проходит, проверка — по фильтрам биржи при старте (`plan_not_representable` в журнале).
-
-**Скрипт проверки `scripts/test_live_order.py` (запускает пользователь; на сервер не нужен).** `USE_TESTNET=true` + ключи ОТДЕЛЬНОГО testnet-аккаунта в окружении/.env, затем `python -m scripts.test_live_order [--symbol 1000PEPEUSDT] [--notional 10] [--sl-pct 2] [--tp-pct 3]`. Охрана без обхода: без `USE_TESTNET` или при адресе не testnet — `ConfigError` (код 3) до сети; если по монете уже есть позиция/algo-ордера — выход без единого ордера (чужую позицию не трогает). Шаги: время/подпись → фильтры → баланс → mark price → ISOLATED + плечо → MARKET-вход (≈10 USDT, не меньше минимума) → positionRisk (объём, entryPrice) → **SL и TP одновременно** (quantity + reduceOnly; проверка гипотезы О18) → `GET algoOrder` и `openAlgoOrders` → **безубыток: третий стоп при живых SL и TP, затем отмена старого** → зонд «стоп, который сработал бы сразу» (код отказа) → закрытие reduce-only, снятие ордеров (всегда, в `finally`), проверка «позиция 0, algo-ордеров нет» → `income` и баланс. Результат: таблица PASS/FAIL/INFO + `out/live_order_test/report-<время>.json` (все запросы и ответы биржи). Код выхода 0 — нет FAIL. **Пришлите вывод или JSON — по нему закрою ❓ из ограничения 3.**
-
-**Проверено.** Первый этап (2026-10-12): `tests/exchange/test_binance_live.py` (локальный HTTP-сервер проверяет HMAC-подпись как биржа; payload «на проводе» для MARKET / LIMIT / reduce-only / SL / TP в Algo Service / отмен / статуса; формат чисел; отказ ДО сети при цене/объёме не на сетке; баланс, плечо, `marginType`, `income` с пагинацией), `test_live_risk.py`, `test_live_engine.py`. **Доработка 2026-10-13 (+37 тестов; всего на боевой контур 118):**
-- **`tests/orchestrator/test_live_parity.py` — паритет выхода с Shadow:** 176 случайных траекторий цены (4 плана × лонг/шорт × 22 траектории, сетка 0.25, гэпы, тайм-аут 12 свечей на части) подаются настоящему `VirtualTracker` и движку на имитации биржи с движущейся ценой; сравнено **304 закрытия: причина, доля, цена — совпадают точно** (`scale_1r` 90, `scale_3r` 41, `tp` 55, `sl` 56, `be` 21, `trail` 35, `timeout` 6); 3 траектории закончились «немедленным стопом» (физическое отличие, разд. ограничения 2в) — предыдущие закрытия в них сравнены строго. Отдельный тест: безубыток только по mark price.
-- **`test_live_recovery.py` (19):** безубыток — новый стоп раньше снятия старого; размер стопа после уровня; `-2021` при переносе → рыночный выход без Safe Mode; состояние на диске раньше ордера входа и раньше защитных ордеров; круговая запись; битый файл; **перезапуск посреди Scale Out** (ни одного нового ордера, продолжение до выхода по безубытку), уровень и стоп, сработавшие **пока бота не было**, защита, не выставленная до падения, ожидающий лимит, вход, неизвестный бирже, неотправленный вход; позиция без записи **со стопом подтягивается и сопровождается**, без стопа — Safe Mode без закрытия, висячие `tb…` ордера снимаются, чужие — нет.
-- `test_live_risk.py`: деление плана на сетке лота (`plan_not_representable`), планы по стратегиям из реестра; `test_live_engine.py`: три защитных ордера вместо двух, отклонение цены MARKET, частичное исполнение (делится / не делится), `USE_TESTNET`; `tests/exchange`: `get_position` (entryPrice), `get_mark_price`, `get_open_algo_orders`, адрес testnet только у клиента ордеров (отдельный процесс).
-- **`tests/test_live_order_script.py` (7):** скрипт на имитации биржи: счастливый путь (ордера, порядок безубытка), охрана (не testnet / адрес / уже есть позиция), отказ биржи на TP при живом SL (уборка и отчёт), сквозной `main_async` с JSON, код выхода 3 из командной строки. Нашёл и исправил ошибку: уборка закрывала бы чужую позицию на монете.
-- Мутационная проверка 2026-10-13: 24 намеренные поломки логики выхода и состояния (безубыток после первого уровня, знак ATR-трейлинга, лучшая цена, порог mark price, уровни от цены сигнала вместо факта, размер стопа после уровня, тайм-аут, снятие старого стопа, выставление защиты после рестарта, запись состояния до ордера, реакция на `-2021`, проверка отклонения цены, адопция чужой позиции, отмены лимитки, деление плана на сетке лота, «стоп только к прибыли», и др.) — первый прогон пропустил 3 (знак ATR-трейлинга — маскировался допуском «немедленного стопа», теперь допуск проверяет стоп самого Shadow; неиспользуемый параметр `force_sync` — удалён; защита «стоп только к прибыли» — дописан тест); остался один эквивалентный (дублирующая проверка «стоп только к прибыли» в `_trail`, та же проверка стоит в `_apply_stop`). Полный набор тестов — разд. 7.1.
-
-### 3.24. Git, возврат к макро-крипте, сброс БД, подготовка к MT5 через MetaApi (2026-10-13, по заданию пользователя)
-
-**Стратегическое решение пользователя.** Боевой контур Binance заморожен (`TRADE_MODE=shadow`); система переводится на макро-активы и традиционные рынки (Forex, металлы). Шаги этой записи — подготовка; сами стратегии для Forex/металлов не писались.
-
-| Что | Статус | Детали |
-|---|---|---|
-| **Git** | ✅ | В корне не было ни `.git`, ни `.gitignore`. Создан `.gitignore` (`.env`, `.env.*` кроме `*.example`, `*.pem`, `*.key`, `id_rsa*`/`id_ed25519*`, `settings.json`, `__pycache__/`, `.venv/` и `**/.venv/`, `data/`, `logs/`, `out/`, `backups/`, `*.log`, `*.jsonl`, `*.db`, `*.tar.gz`, `client/build`, `client/dist`). `git init -b main`, коммит **`269da62` «Backup before MT5 migration and DB reset»**: 257 файлов. Проверено: `.env` и `mcp_server/.env` не в индексе (в коммите только `.env.example`, `.env.shadow.example`, `mcp_server/.env.example`), поиск по индексу строк `KEY/SECRET/PASSWORD/TOKEN = значение` и 64-символьных hex — секретов нет (`client/.../build_defaults.py: API_KEY = ""`). Это точка возврата. Коммиты делаются локально, удалённого репозитория нет (`git push` не настроен) |
-| **Пул Shadow → BTC/ETH** | ✅ код и тесты, ⏳ деплой | `config.SHADOW_SYMBOLS = ("BTCUSDT", "ETHUSDT")` (было 8 альткоинов, разд. 3.20); дубль `api/settings.py::DEFAULT_COINS` приведён к тому же (его сверяет `tests/api/test_pure.py`), тест `tests/test_deploy.py` обновлён. Сборщики не затронуты: `depth-stream` и ML-контур читают `config.SYMBOLS` (тоже BTC/ETH, не менялся), Shadow, `MicroAggregator`, `DepthFeed`, `SmcKlineFeed`, `TickFeed`, `HtfBias` берут `SHADOW_SYMBOLS` (меньше монет — меньше нагрузка). Клиент `client/tradeai_client/fmt.py::COINS` содержит и BTC/ETH, и прежние альткоины (для просмотра истории) — **не менялся, `.exe` пересобирать не нужно**; Dashboard показывает монеты из `/api/info` (= пул API) |
-| **Сброс БД** | ✅ **выполнен 2026-10-13** (после того как пользователь разрешил действие; первая попытка была отклонена системой прав) | `scripts/reset_db.py`: `TRUNCATE trades, trade_closes, trade_snapshots, state_events RESTART IDENTITY CASCADE` в одной транзакции, схема и `schema_migrations` не трогаются; DSN — `--dsn` > `DATABASE_URL` > `mcp_server/.env` (туннель `127.0.0.1:15432`) > корневой `.env`; без `--yes` только показывает счётчики; после `TRUNCATE` проверяет, что все четыре таблицы пусты; пароль в вывод не попадает. Сухой прогон показал **6 сделок, 10 закрытий, 6 снапшотов, 124 события** (альткоины). Первая попытка с `--yes` была отклонена системой прав Claude Code; после разрешения пользователя запуск удалил 6 / 10 / 6 / 124 строк, все четыре таблицы пусты. Перед сбросом `shadow-run` на сервере был остановлен (`docker compose stop shadow-run`) |
-| **Деплой** | ✅ выполнен 2026-10-13 (после очистки) | `python -m scripts.auto_deploy --host 193.233.75.254 --key ~/.ssh/id_ed25519`: 9 шагов OK, схема БД v2, `postgres` / `shadow-run` / `api` — running/healthy, `depth-stream` не тронут. Лог: `Shadow Mode: ('BTCUSDT', 'ETHUSDT')`, пять стратегий, история 4h и 15m по 300 свечей, HTF bias BTC — Neutral, ETH — Bearish. **Замечание:** сразу после старта (06:41–06:43 UTC) `fstream.binance.com/market/stream` с VPS несколько раз не подключался (`NetworkError`), по Fail-Fast процесс дважды перезапустился (RestartCount 4); с 06:43:51 все WS подключены и стабильно работают (healthy ≥ 3 мин). Причина сбоя — ❓ не выяснена (похоже на временную сетевую проблему VPS/Binance); следить за `./deploy/shadow.sh logs` |
-| **MT5 через MetaApi** | ✅ скелет → ✅ клиент (разд. 3.25), ⛔ живая связь не проверена (повреждён токен) | см. ниже |
-
-**Архитектурное решение (О52): MT5 — через облачный шлюз MetaApi, а не через пакет `MetaTrader5`.** Библиотека `MetaTrader5` — Windows-only (общается с локальным терминалом через DLL), а VPS — Linux. MetaApi держит терминал MT5 у себя и отдаёт REST/WebSocket; в код подключается `pip install metaapi-cloud-sdk` (`metaapi-cloud-sdk>=29.1,<30` добавлен в `requirements.txt`; `pip install --dry-run` в окружении проекта прошёл без конфликтов с `aiohttp`/`polars`/`asyncpg`; образ Docker станет тяжелее — SDK тянет `python-socketio`, `requests` и др.; версии 29.1.1 по `pip index` на 2026-10-13). Реальное подключение и имена методов SDK ❓ не проверялись (нет токена).
-
-`exchange/mt5_metaapi.py` с 2026-10-13 — уже **не заглушка**, а полноценный асинхронный клиент (разд. 3.25).
-
-
-### 3.25. Клиент MetaApi (MT5) — реализация и особенности интеграции (2026-10-13, по заданию пользователя)
-
-**Статус.** Код и тесты на имитации SDK готовы. Первый запуск `scripts/test_mt5_connection` остановился на повреждённом токене (см. «Результат проверки»); после замены токена **пользователь подтвердил связь**: `CONNECTED`, баланс $100 000, спред EURUSD 0.1 пипса. Исполнение — разд. 3.26. Ордера ни разу не отправлялись; торговые методы проверены только на имитации.
-
-| Файл | Роль |
-|---|---|
-| `exchange/mt5_metaapi.py` | `MetaApiLiveClient` (RPC-соединение SDK `metaapi-cloud-sdk` 29.1.x), `MetaApiCredentials`, датаклассы `ConnectionState`, `AccountInfo`, `Quote`, `MetaApiPosition`, `MetaApiOrder`, ошибки `MetaApiError`, `MetaApiTradeError` |
-| `scripts/test_mt5_connection.py` | Проверка связи, **только чтение** (ордеров не шлёт): состояние подключения, баланс и Equity, Bid/Ask по `BTCUSD` и `EURUSD` (если точного имени у брокера нет — берёт символ с таким префиксом, напр. `BTCUSDm`), число позиций и ордеров. Коды выхода: 0 успех, 3 конфигурация, 1 сбой связи, 5 подключено, но котировок нет |
-| `tests/exchange/test_mt5_metaapi.py` | 21 тест: ключи и повреждённый токен, перевод исключений SDK, payload'ы торговых вызовов, порядок этапов подключения, закрытие SDK при неудаче |
-
-**Методы клиента.** Подключение: `connect(timeout_s)`, `close()`, `async with`, `connection_state()`, `refresh_connection_state()`. Чтение: `get_account_info()`, `get_balance()` (в формате `Balance` Binance-клиента: wallet = balance, available = free margin, unrealized = equity − balance), `get_price(symbol)` → `Quote(bid, ask)`, `get_positions()`, `get_position(symbol)` (нетто в лотах со знаком), `get_symbols()`, `get_orders()`, `get_order(id)`. Торговля: `market_order(symbol, side, qty, client_id, sl, tp)`, `limit_order(..., price, expires_at)`, `stop_loss(position_id, price)`, `take_profit(position_id, price)`, `close_position(position_id, lots=None)`, `cancel_order(order_id)`. Спецификации: `load_symbols`, `round_lots`, `round_price`.
-
-**Подключение (`connect`)** — каждый этап ограничен таймаутом (по умолчанию 120 с), таймаут = `MetaApiError`, а не продолжение вслепую (R1): `MetaApi(token)` → `get_account(id)` → `deploy()` (если аккаунт не DEPLOYED/DEPLOYING) → `wait_deployed` → **`wait_connected`** (терминал в облаке связан с БРОКЕРОМ: `connection_status == CONNECTED`) → `get_rpc_connection().connect()` → **`wait_synchronized`**. При неудаче SDK закрывается (фоновые соединения не остаются). Выбран **RPC**-режим (запрос-ответ), а не потоковый: нет локального зеркала терминала, источник правды — терминал; цена — каждый запрос идёт по сети, подписки на котировки не держатся.
-
-**Исключения SDK → типы проекта** (`MetaApiLiveClient._call`; чужие исключения, то есть ошибки кода, не глотаются): `TradeException` → `MetaApiTradeError` (с `numeric_code` / `string_code` MT5, например 10018 `TRADE_RETCODE_MARKET_CLOSED`); `UnauthorizedException` / `ForbiddenException` → `ConfigError` (код выхода 3); `TimeoutException`, `NotConnectedException`, `NotSynchronizedException`, прочие `ApiException` → `MetaApiError`. Сетевой сбой **после** отправки ордера — исход неизвестен: сверять по `client_id` через `get_positions` / `get_orders`, повторно вслепую не слать.
-
-**Особенности MetaApi/MT5, которые нельзя терять при подключении к `LiveExecutionEngine`:**
-1. **Объём в лотах**, не в монетах; параметр называется `qty` (как у Binance), но это лоты. После `load_symbols` клиент до отправки проверяет сетку `volumeStep` и диапазон `minVolume..maxVolume` (иначе `ConfigError`); `round_lots` округляет вниз.
-2. **SL/TP — поля позиции**, а не отдельные условные ордера: нет Algo Service и `reduceOnly`; перенос стопа (`stop_loss`) — атомарная модификация позиции, окна без стопа нет. Чтобы не сбросить второй уровень, `stop_loss`/`take_profit` читают позицию и всегда передают **оба** уровня (❓ поведение `POSITION_MODIFY` при одном заданном уровне не проверено). Частичные тейки Scale Out — `close_position(position_id, lots=...)` (рыночное закрытие, а не биржевой ордер: тейк не «стоит на бирже»).
-3. **Нет post-only**, нет mark price (стопы/вход считаются по Bid/Ask своей стороны), нет фандинга (есть своп и спред).
-4. **Торговые часы:** выходные и дневная пауза — брокер отклоняет ордера (`MARKET_CLOSED`); `get_price` вне сессии вернёт последнюю котировку, но торговать по ней нельзя.
-5. **Минимальная дистанция стопа** (`stopsLevel`) и шаг цены (`tickSize`, `digits`) у брокера свои; неверные значения отклоняет брокер.
-6. **Netting/hedging:** режим счёта задаёт брокер (`marginMode` в `get_account_info`); при hedging по символу может быть несколько позиций — методы работают с `position_id`, а `get_position(symbol)` возвращает нетто.
-7. **Имена символов** у брокера могут иметь суффиксы (`BTCUSDm`, `EURUSD.r`) — скрипт проверки умеет искать по префиксу, боевой код должен ходить через явную таблицу соответствия.
-8. **Деньги — в валюте депозита** (USD/EUR), не USDT; `Balance.asset` = валюта счёта. Риск-менеджер (маржа × плечо, суточный лимит в USDT) под MT5 нужно переписать: там лоты и `contractSize`.
-9. **Токен MetaApi** — JWT (~2.5 КБ), только печатный ASCII; клиент отвергает токен с посторонним символом **до сети** (`ConfigError`, в сообщении только позиция символа, не сам токен). Секрет не попадает в `repr`, логи и исключения; в вывод скрипта проверки логин счёта маскируется (`***123`).
-10. Зависимость `metaapi-cloud-sdk>=29.1,<30` тянет `python-socketio 4.x`, `httpx`, `requests` и др.; SDK импортируется лениво (модуль грузится без него). SDK создаёт фоновые задачи — клиент обязан вызывать `close()` (скрипт делает в `finally`). `metaapi-cloud-sdk` ставится в `.venv` проекта и попадает в образ Docker через `requirements.txt` (образ тяжелее; на сервере MetaApi пока не используется).
-
-**Результат проверки связи (2026-10-13).** `python -m scripts.test_mt5_connection` → код выхода **3**. Первый запуск упал в `httpx` с `UnicodeEncodeError: 'ascii' codec can't encode character '\ub354' in position 1129` при построении заголовка с токеном: в `METAAPI_TOKEN` (2584 символа) на позиции 1129 стоит посторонний символ U+B354 («더»), вставленный при копировании; `METAAPI_ACCOUNT_ID` корректен (формат UUID, 36 символов, без не-ASCII), BOM и кавычек в `.env` нет. Токен восстанавливать нельзя (неизвестно, какой символ заменён) — нужно **заново скопировать токен** с https://app.metaapi.cloud/token (и проверить, что он вставляется целиком одной строкой). Клиент теперь отказывает на таком токене сразу и внятно. До повторного запуска **не подтверждены**: развёртывание аккаунта, связь с брокером, баланс/Equity, котировки, спецификации символов, исполнение ордеров.
-
-**Что делать после замены токена:** `python -m scripts.test_mt5_connection` (при необходимости `--symbol EURUSD XAUUSD --timeout 240`); после зелёного прогона — отдельный скрипт «пробной сделки» на демо-счёте минимального лота (по аналогии с `scripts/test_live_order.py`) для проверки исполнения, SL/TP, частичного закрытия и поведения `modify_position`. Стратегии для Forex/металлов и адаптация риск-менеджера под лоты — отдельные этапы.
-
-### 3.26. Исполнение MT5: разграничение рынков, маппинг символов, расчёт лотов, торговые методы (2026-10-13, по заданию пользователя; локально, на сервер не деплоилось)
-
-**Утверждённая архитектура разграничения рынков (О57).**
-
-| Рынок | Инструменты | Исполнение |
-|---|---|---|
-| Крипта | `BTCUSDT`, `ETHUSDT` | `BinanceLiveClient` (разд. 3.23), когда будет включён Live |
-| Традиционные активы | `EURUSD`, `XAUUSD`, `XAGUSD`, `BRN` (нефть Brent), `US500` | `MetaApiLiveClient` через MetaApi → MT5 (разд. 3.25–3.26) |
-
-**Файлы.** `exchange/symbol_mapper.py` (маппер и спецификации), `exchange/mt5_risk.py` (лоты), `exchange/mt5_metaapi.py` (торговые методы, коды возврата), тесты `tests/exchange/test_symbol_mapper.py` (34), `test_mt5_risk.py` (15), `test_mt5_metaapi.py` (44). Скрипты и сервер не менялись; в `LiveExecutionEngine` MT5 **не подключён** (он по-прежнему про Binance: USDT, reduceOnly, Algo Service).
-
-**1. Маппинг символов (`SymbolMapper`).** Порядок: явное переопределение (`overrides` или env `MT5_SYMBOL_MAP="BRN=UKOIL,US500=US500.cash"`, обязано существовать у брокера, проверку класса актива не проходит — решение человека) → точное имя → то же без учёта регистра → базовое имя + суффикс брокера (`EURUSDm`, `EURUSD.ecn`, `XAUUSD#`: суффикс начинается с небуквенного знака или состоит из ≤5 строчных букв; заглавная буква — другой инструмент, `EURUSDT` не принимается) → следующий псевдоним (`BRN` → `UKOIL`, `BRENT`, `XBRUSD`, `UKBRENT`; `XAUUSD` → `GOLD`; `US500` → `SPX500`, `SP500`; ❓ таблица `DEFAULT_ALIASES` — предположение о типичных именах). Несколько равноправных кандидатов — `ConfigError` «неоднозначно» (выбирать молча нельзя); не найден — `ConfigError` (Fail-Fast). **Проверка класса актива** (`ASSET_HINTS`, по полю `path` спецификации): `Forex\…` для шестибуквенных пар, `Metals\…` для XAU/XAG, `Indexes\…` для US500, `Commodities/Energy…` для BRN; сегменты `Stock` / `ETF` отвергаются всегда; нет `path` — кандидат не принимается. Не прошёл — берётся следующий кандидат. Причина: **у реального брокера `BRN` — акция Barnwell Industries, `GOLD` — акция Barrick Gold, `WTI` — акция W&T Offshore, `SPXL` и др. — ETF** (проверено живьём 2026-10-13); имя ордера на «BRN» открыло бы позицию в акции по $0.9 вместо нефти. Символ с `tradeMode = SYMBOL_TRADE_MODE_DISABLED` — `ConfigError`.
-
-**Кеш спецификации (`Mt5SymbolSpec`):** `contractSize`, `minVolume`, `maxVolume`, `volumeStep`, `tickSize`, `digits`, `point`, `stopsLevel`, `freezeLevel`, `fillingModes`, `tradeMode`, валюты прибыли и маржи, `path`, `description`. Строгий разбор: нет поля, ≤ 0, `minVolume > maxVolume` — `ConfigError`. **Отступление от задания:** в спецификации MetaApi **нет** полей `tradeTickSize` / `tradeTickValue` (это поля MT5 API терминала): размер тика — `tickSize`; стоимость тика в валюте счёта приходит с котировкой — `lossTickValue` / `profitTickValue` у `get_symbol_price` (`Quote.loss_tick_value`). Расчёт лота использует именно её.
-
-**2. Калькулятор лотов (`exchange/mt5_risk.py::size_position`).**
-
-```
-loss_per_lot = SL_distance / tickSize * lossTickValue          # потеря на 1 лот в валюте счёта (контракт уже внутри tickValue)
-loss_per_lot = SL_distance * contractSize * quote_to_account   # запасной путь, если стоимость тика неизвестна
-lots         = floor_to_volumeStep( equity * 1% / loss_per_lot )
-```
-
-| Правило | Реакция |
-|---|---|
-| Лот округляется **только вниз** до `volumeStep` (Decimal; риск ≤ 1% всегда) | — |
-| Лот < `minVolume` | `below_min_size` (в деталях: нужный риск для минимального лота) |
-| Лот > `maxVolume` | `exposure` (`above_max_volume`; объём молча не урезается, ср. О8) |
-| Требуемая маржа > свободная маржа × `max_margin_use` (по умолчанию 1.0) | `exposure` (`margin`). Маржа на лот — из `calculate_margin` терминала (точно) либо грубо контракт × цена / плечо (верно для Forex, для CFD ❓ неверно) |
-| SL не по ту сторону входа / нулевое расстояние | `bad_risk` |
-| SL ближе `stopsLevel × point` | `stop_too_close` (дополнение к списку причин из задания) |
-| Нет Equity / нет стоимости тика и курса / нет источника маржи | `equity_unavailable` / `ConfigError` |
-
-Проверено на примерах: EURUSD, SL 20 пипсов, риск $1 000 → **5.00 лота** (пример из задания); XAUUSD (100 унций), SL $10 → 1.00 лот, SL $12.5 → 0.80; USDJPY (стоимость тика в USD, не в иенах) → 5.00; US500 (контракт 1, лот 0.1) → 40.0; шаги 0.01 / 0.1 / 1 — всегда вниз; зеркальность BUY/SELL.
-
-**На реальном брокере (read-only прогон 2026-10-13, счёт USD $100 000, плечо 1:100, hedging):** EURUSD контракт 100 000, лот 0.01…500 (шаг 0.01), тик 0.00001, исполнение только FOK; XAUUSD контракт 100, лот 0.01…100, FOK + IOC; XAGUSD контракт 5 000, `lossTickValue` 5.0; пример: BUY XAUUSD, SL $8.34 → 1.19 лота, риск $992.5, маржа $4 962. **`BRN`: подходящего символа нет** (есть только акция Barnwell; нефтяных символов `UKOIL`/`USOIL`/`XBRUSD`/`XTIUSD`/`BRENT`/`WTIUSD`… у брокера нет). **`US500` (и `US30`, `USTEC`, `DE40`, `UK100`, `US500M`) существуют, но `tradeMode = DISABLED` — торговля индексами у этого брокера/демо-счёта запрещена.** То есть из пяти утверждённых инструментов этим брокером сейчас торгуются три: EURUSD, XAUUSD, XAGUSD. Нужен другой брокер/демо-сервер либо решение пользователя.
-
-**3. Торговые методы `MetaApiLiveClient`.**
-- `market_order(symbol, side, volume, sl, tp, client_id=)`: стопы уходят в том же запросе, что и вход (R6). Режим исполнения выбирается по `fillingModes` спецификации: **FOK → IOC → RETURN** (FOK — всё или ничего, объём плана Scale Out не дробится); BOC не используется. Ответ 10030 `INVALID_FILL` (запрос заведомо не исполнен) — пробуется следующий допустимый режим, прочие ошибки без повторов; спецификация не загружена — опция не передаётся, выбирает MetaApi. Ответ `DONE_PARTIAL` (10010) помечен `partial=True`.
-- `limit_order(symbol, side, volume, price, sl, tp, client_id=, expires_at=)`: `BUY_LIMIT`/`SELL_LIMIT`, срок жизни `ORDER_TIME_SPECIFIED`.
-- `modify_position(position_id, sl=None, tp=None)`: безубыток и трейлинг; клиент читает позицию и **всегда передаёт оба уровня** (неуказанный не сбрасывается); проверяет, что SL < TP для BUY и TP < SL для SELL; ответ `NO_CHANGES` (10025) — успех. `stop_loss` / `take_profit` — обёртки.
-- `close_position(position_id, volume=None)`: полное закрытие или частичное (Scale Out); объём больше позиции, не на сетке `volumeStep` или с остатком меньше `minVolume` — `ConfigError` до отправки; объём равный позиции — полное закрытие.
-- `get_positions()`, `get_balance()` (wallet = balance, available = free margin, unrealized = equity − balance), `get_account_info()`, `get_price()`, `calculate_margin()`, `get_symbol_specification()` (кеширует спецификацию — по ней идут проверки сетки цены/объёма), `cancel_order()`.
-- Перед отправкой: цена/SL/TP — на сетке `tickSize` (если спецификация загружена), объём — на сетке `volumeStep` и в `[min, max]`.
-
-**Коды возврата MT5 → `MetaApiTradeError`.** Таблица `RETCODES` (10004 REQUOTE, 10006, 10007, 10011–10046 …) даёт каждому коду имя, пояснение по-русски и два признака: `retryable` (запрос заведомо не исполнен, повтор позже имеет смысл: реквота 10004, рынок закрыт 10018, цены изменились 10020, нет котировок 10021, слишком часто 10024, нет связи 10031) и `outcome_unknown` (ордер мог дойти до брокера: таймаут 10012, ошибка 10011, нет связи 10031, изменение ордера 10023 и **любой неизвестный код** — перед повтором сверять по `clientId` через `get_positions`/`get_orders`). Успех: 0, 10008 PLACED, 10009 DONE, 10010 DONE_PARTIAL, 10025 NO_CHANGES; любой другой код в «успешном» ответе тоже ошибка. Сообщение содержит код, имя и пояснение: `… [10013 TRADE_RETCODE_INVALID: неправильный запрос (параметры ордера)]`; 10030 — `INVALID_FILL`, 10019 — `NO_MONEY`, 10016 — `INVALID_STOPS`, 10018 — `MARKET_CLOSED`.
-
-**Не сделано / ❓.** (а) Ни одного ордера на брокер не отправлено — формат торговых вызовов проверен на имитации SDK и по моделям SDK; нужна «пробная сделка» минимального лота на демо (отдельный скрипт, по аналогии с `scripts/test_live_order.py`). (б) Поведение `POSITION_MODIFY` при одном заданном уровне не проверено (поэтому всегда оба). (в) Подключение MT5-исполнителя к `LiveExecutionEngine`/`LiveRiskManager` (маржа × плечо, суточный лимит, тайм-аут и план выхода в лотах), стратегии для Forex/металлов и торговые часы — отдельные этапы. (г) Таблица псевдонимов и подсказки класса актива — предположения, подтверждены только на этом брокере для EURUSD, XAUUSD, XAGUSD. (д) Режим счёта — hedging: возможны встречные позиции по символу; логика «одна позиция на монету» (`CoinOwnershipLock`) для MT5 не проверена.
-
-### 3.27. Мульти-биржевой боевой контур: маршрутизатор, торговые сессии Forex, сквозной риск (2026-10-13, вариант А утверждён пользователем; локально, на сервер не деплоилось, контур по-прежнему выключен: `TRADE_MODE=shadow`)
-
-**Решение (О62, вариант А).** Боевой контур мульти-биржевой: Binance Futures — `BTCUSDT`, `ETHUSDT`; MT5 через MetaApi — `EURUSD`, `XAUUSD`, `XAGUSD`. `BRN` и `US500` исключены (у текущего брокера недоступны, разд. 3.26). Наборы задаются `config.LIVE_BINANCE_SYMBOLS` / `config.LIVE_MT5_SYMBOLS` (не пересекаются, проверяет `config.validate()`).
-
-```
- Orchestrator ─► LiveMirrorSink ─► LiveExecutionEngine.execute(signal)
-                                      │ Safe Mode? ─► router.reject_unsupported(symbol) ─► `unsupported_symbol` (журнал live_rejected, ни одного запроса)
-                                      ├─ BTCUSDT, ETHUSDT ──► прежний путь Binance (риск-менеджер, USDT-размер, Algo-защита, Scale Out; разд. 3.23)
-                                      └─ EURUSD, XAUUSD, XAGUSD ─► _execute_mt5:
-                                            refresh_pnl (ОБА счёта) ─► risk.gate (одобрение · общий суточный лимит · свежий PnL всех площадок · монета свободна)
-                                            ─► risk.reserve ─► router.prepare_mt5 (имя брокера · торговые часы · лоты) ─► live_intent + flush (R7)
-                                            ─► router.send_mt5 (ордер со стопом в одном запросе) ─► poll(): сверка с брокером ─► release
-```
-
-**Файлы.** `exchange/router.py` (`ExecutionRouter`, `Venue`, `RouteRejected`, `Mt5Prepared`, `Mt5Tracked`, `Mt5Event`, `Mt5UnprotectedPosition`, `build_router`); правки `orchestrator/live_engine.py` (параметр `router`, `_execute_mt5`, агрегированный `refresh_pnl`, сопровождение/восстановление MT5), `orchestrator/live_risk.py` (площадки, `gate`, `reserve`), `exchange/mt5_metaapi.py` (`MarketClosedError`, `ensure_entry_allowed`, `realized_pnl_since`), `exchange/symbol_mapper.py` (`allow_disabled`), `config.py` (`LIVE_BINANCE_SYMBOLS`, `LIVE_MT5_SYMBOLS`, `LIVE_MT5_ACCOUNT_CURRENCIES`, `LIVE_ENABLE_MT5`); тесты `tests/exchange/test_router.py` (38), `tests/exchange/fake_mt5.py` (имитация RPC MT5 с состоянием), `tests/orchestrator/test_live_multivenue.py` (25), расширен `test_live_risk.py` (+8). Мутационная проверка новой логики: 14 поломок — 14 пойманы.
-
-**Маршрутизация (`ExecutionRouter`).** `venue_of(symbol)` → `Binance` / `MT5` / `None`; `reject_unsupported` → `RouteRejected("unsupported_symbol")` для любого другого символа (в т.ч. нижний регистр, `DOGEUSDT`, `US500`, `BRN`) и для символов неподключённой площадки (`why`). MT5-вход — два шага, между которыми движок пишет намерение (R7): `prepare_mt5` (сеть только на чтение) и `send_mt5`. `prepare_mt5`: внутренний символ → имя брокера и спецификация через `SymbolMapper` (символ не загружен — `ConfigError`, Fail-Fast) → **свежая** спецификация и проверка `tradeMode` → счёт (Equity, свободная маржа) → котировка (Bid/Ask, `lossTickValue`) → маржа 1 лота у терминала брокера (`calculate_margin`) → `mt5_risk.size_position` (1% Equity, округление вниз по `volumeStep`, отказы `below_min_size` / `exposure` / `bad_risk` / `stop_too_close`) → MARKET: цена брокера (Ask для BUY / Bid для SELL) не дальше `LIVE_MAX_ENTRY_DEVIATION` (1%) от цены сигнала (`price_deviation`); LIMIT: цена и SL/TP на сетке тика, срок жизни `limit_ttl_ms` (по умолчанию 10 свечей M15). `send_mt5`: ордер **со стопом и тейком сигнала в одном запросе** (R6), `clientId` из `signal_id` (то же правило, что у Binance). Отказ брокера — значение `broker_rejected` (код MT5, имя, `broker_reason`, `retryable`); **неизвестный исход** (таймаут 10012, обрыв, неизвестный код) — исключение, повторять вслепую нельзя (R1), резерв монеты при этом снимается.
-
-**Торговые сессии Forex (`market_closed`).** Два независимых источника, оба — обычный отказ сигнала:
-1. **До отправки:** при каждом сигнале запрашивается свежая спецификация; `tradeMode != SYMBOL_TRADE_MODE_FULL` (CLOSEONLY, LONGONLY, SHORTONLY, DISABLED) → `RouteRejected("market_closed", {trade_mode})`, ордер не отправляется. Для автоматических входов «ограничено» = «закрыто»; закрытие и модификация существующих позиций режимом не блокируются.
-2. **После отправки:** ответ брокера `10018 TRADE_RETCODE_MARKET_CLOSED` → `MarketClosedError` (подкласс `MetaApiTradeError`, `retryable=True`) → `RouteRejected("market_closed", {code: 10018})`. Резерв монеты снимается, Safe Mode **не включается**, процесс **не падает**, следующий сигнал после открытия рынка проходит без перезапуска (тесты).
-3. **Старт вне сессии:** `build_router` грузит спецификации с `allow_disabled=True` — символ в режиме DISABLED не роняет процесс (в отличие от разового `SymbolMapper.load` с `ConfigError` по умолчанию, разд. 3.26), а каждый вход по нему получает `market_closed`.
-Остальные коды MT5 остаются отказами/ошибками по таблице `RETCODES` (разд. 3.26); сессионные паузы по расписанию не моделируются — решает брокер.
-
-**Сквозной риск-менеджмент (`LiveRiskManager`).** Суточный лимит $50 (`LIVE_DAILY_LOSS_LIMIT_USDT`) считается по **сумме** площадок: `Total Daily PnL = Binance PnL + MT5 PnL` (реализованный результат с 00:00 UTC: Binance — `REALIZED_PNL + COMMISSION + FUNDING_FEE`; MT5 — `profit + commission + swap` сделок BUY/SELL, комиссий, сборов и процентов, **без** DEAL_TYPE_BALANCE/CREDIT/BONUS, то есть пополнения не считаются прибылью; история с флагом `synchronizing` — ошибка, неполную сумму принимать нельзя; MT5 в USD, сложение 1:1, счёт в другой валюте отвергается при старте). Правила:
-- суммарный убыток **≥ $50** → **одна** защёлка (файл `.live_risk_state.json`, рестарт её не снимает, до 00:00 UTC следующих суток) блокирует новые входы на **обеих** площадках; в защёлке — разбивка `pnl_by_venue`; убыток одной площадки в одиночку ≥ $50 тоже блокирует обе; прибыль одной площадки гасит убыток другой (−60 Binance + 25 MT5 = −35: торговля идёт);
-- результат **каждой** площадки обязан быть свежим (`LIVE_PNL_MAX_AGE_S` = 120 с), иначе новых входов нет **нигде** (`pnl_unavailable`, `stale_venues`): без слагаемого суммы нет (fail-closed); пока одна из площадок ни разу не сообщила результат, `daily_pnl = None` и блокировка по сумме не принимается;
-- при срабатывании снимаются неисполненные входы на обеих площадках (Binance — `risk_blocked`, MT5 — `cancel_pending_mt5`), **открытые позиции не закрываются** (О42: у них стоп на бирже/у брокера);
-- старые однобиржевые вызовы (`update_daily_pnl`, `venues` по умолчанию `("binance",)`) работают как раньше; общие ворота вынесены в `gate(signal, now)` (одобрение стратегии → блокировка → свежий PnL всех площадок → монета свободна), `evaluate` для Binance использует их же; MT5 после `gate` берёт `reserve(symbol, signal_id)`.
-
-**Сопровождение и восстановление MT5.** Источник правды — брокер (файла состояния для MT5 нет). `poll_mt5` раз в опрос сверяет живые MT5-сделки с позициями и отложенными ордерами по `clientId`: лимитка исполнена → `live_entry_filled`; ордер исчез без позиции → `live_trade_cancelled`; позиция исчезла (сработал SL/TP брокера) → `live_closed` (`sl_or_tp_at_broker`), монета освобождается. `recover_mt5` при старте подхватывает позиции на MT5-символах и наши отложенные ордера (префикс `clientId`), занимая монету; **позиция без стопа → `Mt5UnprotectedPosition` → Safe Mode + `LiveExecutionError`** (чужую не закрываем); две позиции по символу — ошибка.
-
-**Включение.** `config.LIVE_ENABLE_MT5` (env `LIVE_ENABLE_MT5=true`, по умолчанию выключено): `build_live_engine` строит `build_router(...)` — при выключенном флаге маршрутизатор Binance-only (символы MT5 → `unsupported_symbol`), ключи MetaApi не нужны. Включение требует `METAAPI_TOKEN` / `METAAPI_ACCOUNT_ID`, успешного подключения, загрузки спецификаций `EURUSD`/`XAUUSD`/`XAGUSD` и долларового счёта, иначе `ConfigError` до первого ордера. `docker-compose.yml`, `Dockerfile` (кроме уже существующего `COPY exchange`), схема БД и торговое поведение при `TRADE_MODE=shadow` не менялись.
-
-**Не сделано / ❓ (честно).**
-1. ~~Управление MT5-позицией после входа не реализовано~~ — **реализовано позже в тот же день, разд. 3.28** (Scale Out / безубыток / трейлинг / тайм-аут как у Shadow, тест паритета).
-2. ~~Данных для Forex/металлов в Shadow нет~~ — **фиды готовы, разд. 3.28** (свечи M15, производные H4, тики из MetaApi); стратегии те же пять.
-3. Ни одного ордера на MT5 не отправлялось; формат торговых вызовов проверен на имитации SDK (разд. 3.26). Состояние MT5-сделок не пишется на диск (write-ahead как у Binance нет): между `prepare` и ответом брокера процесс может упасть — при рестарте ордер найдётся у брокера и будет подхвачен как `adopted`.
-4. Суточный результат MT5 — реализованный (нереализованный убыток открытых позиций ограничен стопами); комиссии по истории сделок брокера, своп — по факту начисления.
-5. Режим hedging на счёте допускает встречные позиции по символу; контур держит одну сделку на символ (`LiveRiskManager.busy`), чужие ручные позиции по MT5-символу при старте подхватываются как `adopted`.
-
-### 3.28. Сопровождение MT5-позиций планом Shadow, данные Forex/металлов для Shadow, пул из 5 символов (2026-10-13, по заданию пользователя)
-
-**Статус.** Код и тесты готовы; боевой контур по-прежнему ВЫКЛЮЧЕН (`TRADE_MODE=shadow`); ордера на MT5 не отправлялись ни разу (всё проверено на имитации RPC). Деплой Shadow: выполнен 2026-10-13 20:55 UTC (auto_deploy, 9 шагов OK, схема БД v2; shadow-run, api, postgres healthy; Shadow пока по BTC/ETH: ключей MetaApi на сервере нет, MT5-символы пропущены предупреждением; в логе первого запуска auto_deploy на Windows упал вывод кодировки cp1251 — перезапуск с -X utf8; depth-stream не тронут).
-
-#### Сопровождение открытой MT5-позиции (`exchange/mt5_exit.py`, склейка — `ExecutionRouter`, журнал — `LiveExecutionEngine`)
-
-Математика та же, что у `VirtualTracker` (`ScaleOutPlan` стратегии из `plans_for`, R8); отличие физическое: у MT5 нет отдельных ордеров на частичные тейки, поэтому уровни исполняет бот.
-
-| Что | Как |
-|---|---|
-| Исходные данные | R = \|фактическая цена входа (позиция у брокера) − SL\|; уровни = вход ∓ r·R, от ФАКТИЧЕСКОЙ цены входа (MARKET — по факту, LIMIT — по цене заявки), цены на сетке `tickSize`. Тики до первого опроса брокера не теряются (проигрываются при создании состояния) |
-| **Scale Out** | цена сделки (те же тики, что у Shadow) дошла до уровня → `close_position(position_id, volume)`; доли плана (50% / 40% / runner 10% и т. п.) переводятся в лоты **вниз до `volumeStep`** той же `split_levels`, что у Binance; остаток — runner. План на лотах брокера не делится (например 0.01 лота) → отказ сигнала `plan_not_representable` ДО отправки ордера |
-| **Безубыток** | mark price (тот же поток) коснулась +1R **или** исполнен первый уровень → `modify_position(position_id, sl=вход, tp=…)`; стоп только к прибыли; один раз |
-| **Трейлинг runner'а** | после последнего уровня: по закрытой свече `atr` (лучшая цена ∓ 3·ATR) или `wick` (экстремум последних N свечей) → `modify_position(sl=…)`; стоп только подтягивается и не лежит дальше безубытка; вступает в силу со следующего опроса |
-| **Тайм-аут** | 192 свечи после входа → `close_position` остатка по рынку (причина `timeout`) |
-| Брокерский TP | у плана БЕЗ runner'а — цена последнего уровня (брокер закроет остаток, даже если бот выключен); у плана с runner'ом TP нет (иначе брокер закрыл бы и runner). Выравнивается по фактической цене входа после открытия |
-| «Стоп уже за ценой» | `modify_position` отвергнут `10016 INVALID_STOPS` (безубыток/трейлинг на цене или за ней) → выход по рынку с причиной `be`/`trail`, без Safe Mode (аналог -2021 у Binance) |
-| **Закрытый рынок (retcode 10018)** | команда (частичное закрытие, перенос стопа, тайм-аут) **не теряется**: состояние не продвигается, в журнал один раз пишется `live_mt5_deferred`, на следующих опросах она повторяется, при успехе — `live_mt5_replayed`. **Safe Mode не включается**, процесс не падает |
-| Неизвестный исход (таймаут 10012 и т. п.) | выполненные уровни выводятся из ЛОТОВ брокера (`lots <= остаток после уровня k`), объём закрытия = «лоты сейчас − остаток после уровня» — повтор не закроет лишнего; тест «ордер дошёл, ответ потерян» |
-| Любая другая ошибка брокера | исключение (R1): процесс падает, Docker перезапускает |
-| Состояние и рестарт | `live_mt5_state.json` (`config.LIVE_MT5_STATE_NAME`; атомарная запись; пишется сразу после отправки ордера); источник правды по объёму — брокер. `recover_mt5`: наша сделка возвращается под управление (по `clientId`), `live_recovered`; чужая позиция подхватывается **без управления** (SL/TP брокера, `live_adopted`, `managed=false`); запись без позиции/ордера → `live_closed_offline`; позиция без стопа → Safe Mode + `LiveExecutionError` |
-| События журнала | `live_protected`, `live_partial_close` (`scale_1r` / `scale_3r` / `tp`), `live_be_armed`, `live_trail_moved`, `live_closed` (`sl` / `be` / `trail` / `tp` / `timeout`), `live_mt5_deferred`, `live_mt5_replayed`, `live_closed_offline` |
-
-**Тест паритета** (`tests/exchange/test_mt5_exit.py`): одна случайная траектория цены подаётся и настоящему `VirtualTracker`, и `ExecutionRouter` с настоящим `MetaApiLiveClient` поверх имитации RPC, где цена движется (стоп и брокерский TP срабатывают при пересечении, перенос стопа за ценой — отказ 10016). 4 плана × лонг/шорт × 22 траектории = **176 траекторий**: причина, доля исходного объёма и цена каждого закрытия **совпадают точно**; допустимое физическое отличие одно — «немедленный стоп» (на таких траекториях предыдущие закрытия сравниваются строго). Тест не пустой: встречаются `sl`, `be`, `trail`, `timeout`, `tp`, `scale_1r`, `scale_3r`, много-ножные сделки. Мутационная проверка (5 поломок: допуск уровня, множитель ATR, безубыток после первого уровня, тайм-аут +1, цена безубытка) — 5/5 пойманы. Ещё 11 сценариев: масштабирование лотами, брокерский TP, отложенный и повторённый уровень/безубыток/тайм-аут при 10018, неизвестный исход без двойного закрытия, 10016, тики до первого опроса, рестарт посреди Scale Out и «закрыта, пока бота не было», чужая позиция без управления, отказ `plan_not_representable`, непроглоченная ошибка брокера.
-
-#### Пул Shadow и данные Forex/металлов
-
-`config.SHADOW_SYMBOLS = ("BTCUSDT", "ETHUSDT", "EURUSD", "XAUUSD", "XAGUSD")` (дубль в `api/settings.py::DEFAULT_COINS`). **Проверка фидов показала: прежние `SmcKlineFeed` / `TickFeed` / `DepthFeed` для Forex и металлов НЕ работают** — они подключены к Binance WebSocket/REST (`fstream.binance.com`), где нет `EURUSD` / `XAUUSD` / `XAGUSD` (`kline_15m` и `aggTrade` отдают только крипто-контракты). Поэтому добавлен `orchestrator/mt5_feeds.py`:
-
-| Что | Как |
-|---|---|
-| `Mt5KlineFeed` (M15) | история (REST рыночных данных MetaApi, `MetaApiLiveClient.get_candles`, постранично по 1000 назад) и новые закрытые свечи опросом раз в 5 с; свеча закрыта при `open + interval + 3 с <= сейчас` (формирующаяся не берётся, R5); контракт `poll()` как у `SmcKlineFeed` (по контексту на свечу, подряд) |
-| **Выходные и паузы** | пайплайн признаков и Оркестратор требуют непрерывную сетку, а у MT5 свечи без тиков нет → дыры между известными закрытыми свечами заполняются **плоскими свечами** (open = high = low = close = прошлый close, объём 0), «назад», когда пришла следующая реальная свеча: пока рынок закрыт, контекстов нет, при открытии они приходят подряд (replay). Контексты плоских свечей и **20 свечей после дыры ≥ 4 свечей** помечаются «опоздавшими» (`received = закрытие + 1 ч`) → Оркестратор пишет `skipped_stale` и **не торгует** (ATR и средний объём после выходных занижены плоскими свечами); трекер и сроки позиций получают закрытия как обычно |
-| H4 для HTF-фильтра | **производный из M15** того же хранилища (границы UTC 00/04/08/12/16/20), а не от брокера: у брокера H4 привязан к серверному времени, а гарантия «H4 не отстаёт от M15» (`HtfBias.attach`) выполнима, только если обе шкалы из одних данных; `Mt5HtfView.poll()` снимает снимок хранилища, M15-фид обрабатывает ТОТ ЖЕ снимок (иначе новая свеча между опросами дала бы M15 без своего H4 → `DataError`); неполные корзины не отдаются |
-| `Mt5TickFeed` | котировка раз в секунду → два тика (trade и mark) по середине bid/ask. **Грубее настоящей ленты:** лимитные заявки Shadow исполняются по проходу цены середины; объёма и стороны агрессора нет (`OBI_Breakout` по этим символам сигналов не даёт: `ms_*` = null, fail-closed; лента в микроструктуру идёт только для крипты) |
-| Сбои MetaApi | временные (таймаут, терминал не подключён) повторяются до 20 раз подряд (на тиках — с отметкой `gap_affected` у активных сделок), затем исключение и перезапуск Docker (R1): падение MT5-источника не должно мгновенно ронять и крипто-часть без повторов |
-| Сборка в `shadow_run.py` | Binance-фиды — по крипто-символам, MT5-фиды — по MT5-символам, `MultiFeed` склеивает; MT5 включается **только если в окружении есть `METAAPI_TOKEN` и `METAAPI_ACCOUNT_ID`**, иначе предупреждение в лог и работа по крипте (так деплой без ключей не ломает сбор по BTC/ETH). Ошибка подключения при заданных ключах — исключение. Shadow использует у MetaApi только данные (тест запрещает торговые вызовы в `mt5_feeds.py` и `shadow_run.py`) |
-| Compose | у `shadow-run` добавлены **необязательные** `METAAPI_TOKEN` / `METAAPI_ACCOUNT_ID` / `MT5_SYMBOL_MAP` (из `.env.shadow`, по умолчанию пусто). Ключи в архив, образ и git не попадают — **их нужно вписать на сервере вручную** (лучше токен только на чтение рыночных данных, без торговых прав) |
-
-Тесты фидов (`tests/orchestrator/test_mt5_feeds.py`, 8): производный H4 только из полных корзин; **сквозной прогон через выходные** — фиды → HtfBias → микроструктура → Оркестратор с ПЯТЬЮ настоящими стратегиями (без исключений, `HtfBias.attach` не видит отставший H4, плоские и разогревочные свечи помечены опоздавшими, контекстов в закрытый рынок нет, при открытии backlog подряд); формирующаяся свеча не используется, свеча не по сетке — `DataError`; повторы и fail-fast при сбоях MetaApi; тики; `MultiFeed`; запрет торговых вызовов в данных Shadow.
-
-**Статус паритета.** Выход MT5 = выход Shadow (тест паритета), выход Binance = выход Shadow (разд. 3.23, 176 траекторий). Остающиеся физические отличия: цены уровней/стопов округляются до сетки брокера, уровни MT5 исполняются ботом с задержкой опроса (≤ ~1 с) по цене брокера, «немедленный стоп».
-
-**Не проверено / ограничения (честно).**
-1. **Ни один запрос к MetaApi из этого кода живьём не выполнялся:** `get_historical_candles` (формат времени `time` — UTC по документации; час границы H4 у брокера мы не используем), `modify_position` с одним заданным уровнем (клиент всегда передаёт оба), `close_position_partially`, режим `hedging` — всё на имитации.
-2. **На сервере ключей MetaApi нет** (я их не копировал): пока вы не впишете `METAAPI_TOKEN` и `METAAPI_ACCOUNT_ID` в `~/trading/.env.shadow` и не пересоздадите `shadow-run`, Forex/металлы в Shadow **не участвуют**, работает крипта.
-3. Выход MT5 у брокера срабатывает по стопу брокера (бар/тик брокера), а Shadow-трекер — по тику середины: возможны расхождения в долях пункта; причина закрытия, когда позиция исчезла у брокера, определяется по последней цене (`vanished_reason`) — не по истории сделок брокера.
-4. Плоские свечи занижают ATR первые ~14 свечей после выходных — на них торговли нет (опоздавшие), но признаки H4 (структура свингов) после выходных считаются с плоскими свечами в окне.
-5. Сессии и праздничные дыры: заполнение «назад» не отличает закрытый рынок от запоздавших данных MetaApi (последнее отловит только следующая реальная свеча).
-6. Адаптация риск-менеджера Binance-контура (USDT/плечо) не менялась; MT5 считает лоты по 1% Equity (разд. 3.26). Ключ `config.LIVE_STATE_NAME` определён в `config.py` дважды (строки ~164 и ~223, второе значение `live_state.json` перекрывает первое) — найдено попутно, не менялось.
+`pytest` в корне: **1713** тестов (на 2026-10-13 — 1679 прошли, 34 пропущены: PostgreSQL-тесты без `TEST_DATABASE_URL` на БД `*_test`): `tests/api` 45, `backtester` 248, `exchange` 176, `execution` 374, `features` 31, `orchestrator` 284, `persistence` 19, `pipeline` 260, `strategies` 110 + корневые 166. Клиент: 54 (`client/.venv`, `client/tests`), MCP: 28 (`mcp_server/.venv`). Запуск: `.venv\Scripts\python.exe -m pytest tests` (≈7 минут).
 
 ---
 
-## 4. Проверенные внешние факты
+## 4. Внешние факты
 
-| Факт | Статус | Источник |
+| Факт | Статус |
+|---|---|
+| С 2025-12-09 условные ордера USDⓈ-M идут через Algo Service (`POST/DELETE/GET /fapi/v1/algoOrder`, событие `ALGO_UPDATE`); `closePosition=true` несовместим с `quantity`+`reduceOnly`; изменить условный ордер нельзя (отмена + новый) | ✅ документация Binance (New/Cancel/Query Algo Order) |
+| Свечи: `wss://fstream.binance.com/market/stream` (`kline_*`, `aggTrade`, `markPrice@1s`); стакан `depth10@500ms` — `/public/stream`; свечей в `/public` нет | ✅ вживую, mainnet |
+| `PEPE` на фьючерсах — `1000PEPEUSDT` | ✅ публичный exchangeInfo |
+| Формат `ALGO_UPDATE`, `clientOrderId` порождённого ордера, `events=…` для приватного потока, `openAlgoOrders`, код отказа отмены неизвестного ордера, приём суммы reduceOnly больше позиции, работа Algo API на testnet | ❓ не проверено (нужен прогон `test_live_order.py` на testnet) |
+| Binance Futures не отдаёт `EURUSD/XAUUSD/XAGUSD` | ✅ по подписке фидов; данные для них — только MetaApi |
+| MetaApi `get_historical_candles(symbol, timeframe, start_time, limit ≤ 1000)`; поле `time` — UTC | ⚠️ по docstring SDK; живьём не проверено |
+| MetaApi: связь с демо-счётом, баланс, котировки, спецификации EURUSD/XAUUSD/XAGUSD | ✅ read-only, проверено пользователем и скриптами 2026-10-13 |
+| `lightweight-charts` 2.1 несовместим с pandas 3 (ось времени ломается) → `pandas<3`; маркеры за последней свечой не рисуются без ряда данных; окно в `.exe` работает (Windows 11) | ✅ воспроизведено |
+| Flet 1.0.4, `flet pack` (PyInstaller) собирает `.exe` ≈ 90 МБ | ✅ |
+| Доступность `fstream.binance.com` с IP VPS | ✅ работает (shadow-run подключён); разовый сбой при старте 2026-10-13 не выяснен |
+
+---
+
+## 5. Риски и где нужно внимание
+
+| Риск | Что делать |
+|---|---|
+| **Forex/металлы в Shadow не участвуют**: на сервере нет ключей MetaApi | Вписать `METAAPI_TOKEN`/`METAAPI_ACCOUNT_ID` в `.env.shadow` на сервере, `./deploy/shadow.sh up` |
+| API открыт наружу по HTTP: ключ идёт открытым текстом (читать данные может любой, перехвативший ключ; писать в БД API не может) | Вернуть `API_BIND=127.0.0.1` + SSH-туннель или поставить TLS-прокси; при подозрении — сменить `API_KEY` |
+| Приватный ключ `~/.ssh/id_ed25519` без парольной фразы = вход `root` на VPS; пароль `root` когда-то фигурировал в чате | Не копировать ключ; сменить пароль `root` (`passwd`); при потере ПК удалить ключ из `authorized_keys` |
+| `TradeAI-Monitor.exe` содержит ключ API; фильтры монет без EURUSD/XAUUSD/XAGUSD | Не передавать `.exe`; пересобрать после обновления списка монет |
+| Боевой контур (Binance и MT5) ни разу не работал на живой бирже; два исполнителя Binance (`LiveBarrier` заморожен и новый движок) | Не включать `TRADE_MODE=live`; сначала `scripts/test_live_order.py` на testnet и пробная сделка MT5 на демо; решение о mainnet — за пользователем |
+| Дефект конфигурации: `config.LIVE_STATE_NAME` определён дважды (стр. ~165 и ~225), действует `live_state.json` — то же имя, что у состояния ML-бота (`data/live_state.json`) | Исправить до включения боевого контура (в Shadow-контейнере каталог данных отдельный, коллизии нет) |
+| Выборка мала: закрытых сделок единицы; выводов о прибыльности делать нельзя; выходы Shadow (Scale Out) и бэктеста («100% на 3R») не сопоставимы (О25) | Копить статистику (сотни сделок), не подгонять параметры по знаку прибыли |
+| `SMC_Counter_Trend` почти не торгует даже на порогах 1.5/1.5 (≈ 3 сигнала за 6 мес. на 8 монет по истории); `OBI_Breakout` по MT5 сигналов не даёт | Пороги — `CounterTrendParams`; решение пользователя |
+| Виртуальные позиции теряются при рестарте контейнера (`aborted`), частые рестарты смещают статистику | Следить за числом `aborted` (`shadow.sh stats`) |
+| Допущения Shadow оптимистичны для лимиток (очередь не учтена); тики теряются при обрыве WS; у MT5 тики — середина bid/ask | Сделки с обрывом помечены `gap_affected` |
+| Плоские свечи на выходных занижают ATR/объём; H4-структура после выходных считается с плоскими свечами | Сигналы на плоских и 20 следующих свечах пропускаются; H4 — допущение |
+| Бэкапы БД только ручные; алертов о падении `shadow-run` нет (только `restart: on-failure:20`) | `shadow.sh backup` по расписанию (cron) — на стороне пользователя |
+| Расхождение локального `main` с `origin/main` (+4 / −2) | Разобрать перед `push` |
+| На сервере есть чужие контейнеры (`ai_civ-*`, порт 8000) | Деплой трогает только `postgres`, `shadow-run`, `api` |
+
+---
+
+## 6. Утверждённые решения
+
+### 6.1. Базовые (D1–D12, 2026-10-08, пользователь)
+
+| ID | Решение |
+|---|---|
+| D1 | Polars — сигналы и геометрия; жизненный цикл ордера — асинхронные обработчики |
+| D2 | Свинг: `left_max < cand >= right_max` |
+| D3 | Амплитуда свинга > 1.5·ATR (ATR с бара перед кандидатом) |
+| D4 | Coin Ownership Lock; отказ → `skipped_due_to_lock` |
+| D5 | Shadow — отдельный контейнер без ключей биржи |
+| D6 | SMC симметрично: шорт и лонг |
+| D7 | LIMIT от 50% FVG |
+| D8 | Сетап от свипа до CHoCH — 30 свечей (было 15, О12); лимитка — 10 свечей |
+| D9 | Breakout: фикс 3R (в Shadow — Scale Out) |
+| D10 | k = 5, риск 1% депозита |
+| D11 | Безубыток при касании mark price +1R |
+| D12 | Корень проекта `D:\softs\Trading` |
+
+### 6.2. Остальные решения (кратко)
+
+| ID | Решение | Кем |
 |---|---|---|
-| С 2025-12-09 условные ордера USDⓈ-M (STOP_MARKET, TAKE_PROFIT_MARKET, STOP, TAKE_PROFIT, TRAILING_STOP_MARKET) переведены в Algo Service: `POST/DELETE /fapi/v1/algoOrder`, событие `ALGO_UPDATE` | ✅ | https://developers.binance.com/docs/derivatives |
-| Старый адрес для STOP_MARKET возвращает ошибку -4120 | ✅ | https://github.com/nautechsystems/nautilus_trader/issues/3287 |
-| Несработавшие условные ордера изменять нельзя (только отмена + новый) | ✅ | https://developers.binance.com/docs/derivatives |
-| TRAILING_STOP_MARKET: callbackRate 0.1–10 (%) | ✅ | https://nautilustrader.io/docs/core-nightly/nautilus_binance/futures/http/models/struct.BinanceFuturesAlgoOrder.html |
-| lightweight-charts-python: виджеты для PyQt, wx, Streamlit, Jupyter; Flet не поддерживается; Chart = отдельное окно pywebview | ✅ | https://pypi.org/project/lightweight-charts/1.0.12 |
-| Официальный flet-webview на Windows | ⚠️ неясно | https://docs.flet.dev/webview |
-| Сторонний flet-webview-all заявляет Windows 10 1809+ (WebView2) | ❓ не тестировался | https://pypi.org/project/flet-webview-all/ |
-| `POST /fapi/v1/algoOrder`: обязательные `algoType=CONDITIONAL`, `symbol`, `side`, `type`, `timestamp`; для `STOP_MARKET`/`TAKE_PROFIT_MARKET`: `triggerPrice`, `closePosition=true` (несовместим с `quantity` и `reduceOnly`) или `quantity`+`reduceOnly`; `workingType` по умолчанию `CONTRACT_PRICE`; `clientAlgoId` — `^[\.A-Z\:/a-z0-9_-]{1,36}$`, уникален среди открытых; ответ: `algoId`, `clientAlgoId`, `algoStatus` (NEW) и др.; вес: 1 в лимите ордеров (10 с и 1 мин), 0 в IP-лимите | ✅ сверено со страницей New Algo Order | https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order |
-| `DELETE /fapi/v1/algoOrder`: нужен `algoId` **или** `clientAlgoId` (символ не нужен); ответ `{algoId, clientAlgoId, code:"200", msg:"success"}`; в документации нет кодов ошибок | ✅ сверено | https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Cancel-Algo-Order |
-| `GET /fapi/v1/algoOrder`: `algoId` или `clientAlgoId`; ответ содержит `algoStatus`, `actualOrderId` (id ордера в движке, пусто до срабатывания), `actualPrice`, `actualQty`; CANCELED/EXPIRED без исполнений старше 3 суток не находятся | ✅ сверено | https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Query-Algo-Order |
-| `ALGO_UPDATE`: объект `o` с полями `caid`, `aid`, `at`, `o`, `s`, `S`, `ps`, `q`, `X`, `ai`, `ap`, `aq`, `act`, `tp`, `p`, `wt`, `cp`, `R`, `tt`, `rm`; статусы NEW → TRIGGERING → TRIGGERED → FINISHED, а также CANCELED, REJECTED, EXPIRED; `ai`/`ap`/`aq` заполнены только после срабатывания; приходит при создании и каждой смене статуса | ⚠️ по сводке документации (страница события не открывается без JS, 8 МБ llms-full.txt не читал); формат разбора строгий, неизвестный статус → `DataError` | https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Algo-Order-Update |
-| `closePosition`-ордер получает статус EXPIRED, когда позиция по символу закрыта («system canceled»); что происходит с `quantity`+`reduceOnly`-ордерами (наша схема) при закрытии позиции — снимаются биржей или остаются — ❓ не проверено (бот снимает «брата» сам, `EXPIRED` обрабатывается) | ⚠️ по той же сводке / ❓ | то же; скрипт с `--with-trigger` покажет |
-| Какой `clientOrderId` (`c`) получает ордер, порождённый срабатыванием algo-ордера, в `ORDER_TRADE_UPDATE` | ❓ в документации не описан → опознание по `ai`; совпадение `c` с `clientAlgoId` проверяется как дополнительное | — |
-| Можно ли подписать приватный поток на `ALGO_UPDATE` параметром `events` в URL; путь и параметры `GET /fapi/v1/openAlgoOrders`; коды отказа GET/DELETE для неизвестного algo-ордера; ограничение «один closePosition-стоп и один тейк на направление» (-4130) в Algo Service; шаги цены BTCUSDT 0.1 / ETHUSDT 0.01 | ❓ не проверено (нужен testnet, О19) | — |
-| algoOrder работает на testnet | ❓ не проверено | — (проверит `scripts/test_algo_live.py`, разд. 3.15) |
-| **Биржа принимает сумму объёмов reduceOnly-ордеров БОЛЬШЕ позиции** (SL + TP = 2×, при переносе в BE ещё be_sl = 3×; объём одного ордера больше позиции) | ❓ не проверено — **главная гипотеза схемы О18**; код безопасен при любом ответе (разд. 3.13) | зонд скрипта `probe_reduce_only_sum_over_position` / `probe_reduce_only_qty_above_position` |
-| `GET /fapi/v1/exchangeInfo` (публичный): `filters[]` с `PRICE_FILTER.tickSize`, `LOT_SIZE.stepSize/minQty`, `MIN_NOTIONAL.notional`; значения `config.LIVE_PRICE_TICK / QTY_STEP / MIN_QTY / MIN_NOTIONAL` сделаны по памяти | ❓ формат из памяти, значения не сверены (на testnet могут отличаться); разбор строгий, расхождение → `ConfigError` | `execution/exchange_filters.py`, скрипт `exchange_filters` |
-| `GET /fapi/v1/premiumIndex?symbol=` отдаёт `markPrice` (используется скриптом проверки) | ❓ из памяти | скрипт |
-| На mainnet публичные `/fapi/v1/klines` 15m и 1h с 2026-04-01 отдаются без разрывов (по 18 288 и 4 572 бара на BTCUSDT и ETHUSDT) | ✅ проверено загрузкой и `validate_candles` | `out/stage2/report.md` |
-| Mark price приходит из WS-потока `<symbol>@markPrice@1s` (не из стакана); сообщение `e=markPriceUpdate`, поля `p` (mark), `E`, `T` | ✅ проверено вживую на mainnet 2026-10-08 (8 сообщений за 8 с на BTCUSDT); на testnet ❓ | проба WS в сессии |
-| Маршруты mainnet: `wss://fstream.binance.com/market/stream` отдаёт `kline_15m`, `aggTrade` (~50 сообщений/с на BTCUSDT), `markPrice@1s`; `/public/stream` отдаёт `bookTicker`/depth, но не свечи | ✅ проверено вживую 2026-10-08 | проба WS в сессии |
-| Синтаксис Polars: в установленной версии 1.44.2 параметр называется `min_samples` (на нём работают `rolling_max/min`) | ✅ проверено запуском тестов | `.venv`, `features/smc.py` |
-| `rolling_mean` в Polars 1.44.2 при замере (98 точек, значения разных порядков) совпал на полной и обрезанной истории; гарантии в документации ❓ не искал | ⚠️ SMA всё равно собрана сложением сдвигов — гарантия по построению | замер в этой сессии |
-| Сборка .exe с pywebview через Flet | ❓ нужен прототип | — |
-| `wss://fstream.binance.com/public/stream?streams=<sym>@depth10@500ms`: `e=depthUpdate`, `b`/`a` по 10 уровней `[цена, объём]` строками, `T` отличается от `E` на 1–3 мс (≈ 2 сообщения/с на монету); `/market/stream` `<sym>@aggTrade`: `q` — строка, `m` — bool (`True` — покупатель мейкер, агрессор продал) | ✅ проверено вживую на mainnet 2026-10-11 | запрос в сессии |
-| На USDⓈ-M Futures PEPE называется `1000PEPEUSDT` (TRADING, PERPETUAL, tick 0.0000001, шаг лота 1, MIN_NOTIONAL 5); `DOGEUSDT` — TRADING (tick 0.00001); `PEPEUSDT` как фьючерса нет | ✅ публичный `GET /fapi/v1/exchangeInfo`, 2026-10-10 | запрос в сессии |
-| `docker compose up <сервисы с профилем>` включает профиль сервиса, названного явно (отдельный `--profile` не нужен); `docker compose ps --format '{{.Health}}'` работает | ✅ проверено запуском | сквозной прогон, 2026-10-10 |
-| asyncpg 0.32 + PostgreSQL 16: `NUMERIC` ← `Decimal`, `JSONB` ← строка с `::jsonb`, `TIMESTAMPTZ` ← aware `datetime`, `pg_advisory_xact_lock`, upsert `ON CONFLICT` | ✅ проверено 9 интеграционными тестами | `tests/persistence/test_pg.py` |
-| Live Execution Engine (разд. 3.23): `GET /fapi/v1/premiumIndex?symbol=` (`markPrice`), `GET /fapi/v1/openAlgoOrders?symbol=` (список с `clientAlgoId`, `orderType`, `triggerPrice`, `quantity`, `reduceOnly`), поля `actualPrice` / `actualQty` у сработавшего algo-ордера, поведение биржи при **трёх** одновременных reduceOnly-ордерах (SL на весь объём + два TP-уровня + третий стоп при переносе), `-2021` для стопа «на цене или за ценой», `https://testnet.binancefuture.com` для Algo Service | ❓ из памяти/сводки документации; на живой бирже не проверялись, клиент разбирает ответы строго (`DataError`) | `tests/exchange`, `scripts/test_live_order.py` (проверит на testnet) |
-| Live Execution Engine (разд. 3.23): `/fapi/v3/balance` (поля `asset`, `balance`, `availableBalance`, `crossUnPnl`), `/fapi/v1/income` (`incomeType` = `REALIZED_PNL` / `COMMISSION` / `FUNDING_FEE`, `income`, `time`; до 1000 записей на страницу), `POST /fapi/v1/marginType` (-4046 «уже установлено»), `POST /fapi/v1/leverage` (ответ с `leverage`), `GET/DELETE /fapi/v1/order` по `origClientOrderId` (-2011/-2013 — «неизвестный ордер») | ❓ формы из памяти, на живой бирже не проверялись; клиент разбирает ответы строго (иначе `DataError`), проверка — только на имитации | `tests/exchange/test_binance_live.py`; нужен прогон на testnet |
-| MetaApi `MetatraderAccount.get_historical_candles(symbol, timeframe, start_time, limit<=1000)`: свечи грузятся назад от `start_time`; тайм-фреймы MT5 `15m`, `4h` и др.; поле `time` — UTC (есть отдельное `brokerTime`) | ⚠️ по docstring SDK 29.1 и документации; живым запросом НЕ проверено (токена нет на этой стороне запроса); формат разбирается строго, плохое время — `MetaApiError` | `exchange/mt5_metaapi.py::get_candles`, `orchestrator/mt5_feeds.py` |
-| Binance Futures WebSocket/REST отдают `EURUSD` / `XAUUSD` / `XAGUSD` | ❌ нет: `kline_15m` и `aggTrade` только для контрактов Binance (проверено по коду и логике подписки; фиды Shadow для MT5-символов — отдельные, разд. 3.28) | — |
-| Доступность `wss://fstream.binance.com` / `fapi.binance.com` с IP вашего VPS (гео-блокировки Binance) | ❓ не проверено: зависит от региона дата-центра; проверяется логом `shadow-run` после старта | — |
-
-| Flet 1.0.4: `ft.run(main)`, вкладки `Tabs(content=Column([TabBar, TabBarView]))`, `page.show_dialog`/`pop_dialog`, `Dropdown.on_select`, `GestureDetector.on_double_tap`; `flet pack` работает (PyInstaller 6.22) и собирает `.exe` ≈90 МБ; аргумент PyInstaller передаётся как `"--pyinstaller-build-args=--collect-all=lightweight_charts"` (без `=` парсер отвечает ошибкой) | ✅ проверено сборкой и запуском | `client/pack.log`, `client/dist/TradeAI-Monitor.exe` |
-| `lightweight-charts` 2.1 + **pandas 3**: время хранится в микросекундах, библиотека делит int64 на 10⁹ → ось времени = 1970 год, `Value is null`, свечи не рисуются. С pandas 2.3.3 работает; в клиенте время приводится к `datetime64[ns]` и зафиксировано `pandas<3` | ✅ воспроизведено в браузере и в окне pywebview | `client/tests/test_chart_window.py` |
-| `lightweight-charts` 2.1: маркеры и рисунки (`box`) за последней свечой не отображаются — нужен ряд данных на нужной сетке времени (клиент добавляет невидимую линию); `vertical_span(t1, t2)` ссылается на несуществующий `calculateTrendLine` (не использовать); у `draggable=True` таблиц параметр `position` игнорируется; текст ячеек/подписей подставляется в JS без экранирования | ✅ проверено на статическом HTML и в окне | `client/tradeai_client/chart_window.py` |
-| Окно `lightweight-charts` в собранном `.exe` (pywebview + WebView2 + multiprocessing spawn) открывается и рендерит график (`--selftest-chart` → 0) | ✅ Windows 11 на этой машине; Windows 10 без WebView2 Runtime ❓ | `TradeAI-Monitor.exe --selftest-chart` |
-| Публичный `GET https://fapi.binance.com/fapi/v1/klines?symbol=1000PEPEUSDT&interval=15m` отвечает 200 с этой машины (формат `[openTime, o, h, l, c, v, closeTime, …]`) | ✅ 2026-10-10; из других регионов ❓ | запрос в сессии |
-| Starlette: закрытие WebSocket до `accept()` отдаёт клиенту отказ рукопожатия (HTTP 403), aiohttp видит его как `WSServerHandshakeError` | ✅ проверено тестами | `tests/api/test_api_db.py`, `client/tests/test_api_client.py` |
+| О1–О7 | ATR[i−1] период 14; mark price из `@markPrice@1s`; пессимистичный бэктест (SL раньше TP/BE в одной свече); BE и для Breakout; буфер SL 0.2·ATR; «лои между хаями» — мягко (после старейшего хая); ATR = SMA (R8) | Пользователь |
+| О8, О12 | Плечо > потолка → сделка отклоняется (не урезается); потолок 5.0, импульс FVG 1.0·ATR, срок сетапа 30; цель — набирать статистику в Shadow | Пользователь |
+| О9 | История 15m/1h с 2026-04-01 (mainnet) | Пользователь |
+| О10, О11, О13 | CHoCH — по первому закрытию ниже лоя, образованного после свипа; Breakout — событие пересечения уровня; допущения симулятора (`max_hold` 192 и др.) | Пользователь |
+| О14, О15, О17 | Блокировка монеты: у каждой SHADOW-стратегии своя; исполнение лимитки по строгому проходу цены; состояние Shadow в памяти | Пользователь |
+| О18, О19 | Защита `quantity`+`reduceOnly`; безубыток «POST нового → DELETE старого»; живая проверка Algo API — на отдельном testnet-аккаунте силами пользователя (вывод не получен, О19 закрыт как отложенный) | Пользователь |
+| О23–О26 | Пул `SHADOW_SYMBOLS` отдельно от `SYMBOLS` (не ломать ML-контур); Scale Out 50/40/10, трейлинг 3·ATR; `simulate.py` остаётся на 3R; рестарт без восстановления позиций | Пользователь |
+| О28–О32 | Свечи после сигнала для графика достраивает клиент из публичного Binance; живое состояние из БД; определения метрик (3.5); без отдельной роли БД | Пользователь |
+| О29 ✏️ | API напрямую по IP `:8001` вместо SSH-туннеля (2026-10-11) | Пользователь |
+| О33 | HTF Bias — по структуре свингов | Пользователь |
+| О34 | Миграции — собственные, без Alembic | Пользователь |
+| О35 | `SMC_Counter_Trend`: глубина ≥ 1.5·ATR, объём > 1.5·SMA20 | Пользователь |
+| О36–О38 | Определения стратегий C/D/E (3.2), планы выхода B и E, Breakout вне боевого набора | Пользователь |
+| О39 | Лимиты `shadow-run` сняты, `postgres` — 2 ГБ / 2 CPU | Пользователь |
+| О42 | Суточный лимит 50 USDT: новые входы блокируются, лимитки снимаются, открытые позиции не закрываются | Пользователь |
+| О43, О45 | Выход live = выход Shadow; состояние на диске + сверка при старте | Пользователь |
+| О48 | `USE_TESTNET` меняет только адрес клиента ордеров; «10 USDT» в `test_live_order.py` — нотионал (❓ уточнить, если имелась в виду маржа) | Пользователь / Claude |
+| О52–О54 | MT5 через MetaApi (пакет `MetaTrader5` — только Windows); пул Shadow BTC/ETH (13.10), БД очищена `reset_db --yes` | Пользователь |
+| О57, О62, О63 | Разграничение рынков; вариант А (BRN и US500 исключены); закрытый рынок — отказ `market_closed`, не авария | Пользователь |
+| О64 | Сквозной суточный лимит по сумме площадок (fail-closed по свежести, счёт MT5 только в USD/USDT/USDC) | Пользователь + Claude |
+| О67, О68 | Сопровождение MT5 по плану Shadow; пул Shadow = BTC, ETH, EURUSD, XAUUSD, XAGUSD | Пользователь |
+| О40, О41, О44, О46, О47, О49–О51, О55, О56, О58–О60, О66, О69–О71 | **Выборы Claude, ждут вашего подтверждения:** поверх `SignedRest` (не ccxt); нотионал = маржа × плечо; `plan_not_representable` и отказ MARKET при уходе mark price > 1%; «немедленный стоп» — выход рынком; чужая позиция со стопом подтягивается; Git без `push`; RPC-режим SDK; лот по `lossTickValue`; проверка класса актива по `path`; FOK→IOC→RETURN; `LIVE_ENABLE_MT5` выключен; H4 для Forex производный из M15 и плоские свечи; тики MT5 — середина bid/ask; MT5-фиды включаются только при наличии ключей | Claude |
 
 ---
 
-## 5. Известные риски
+## 7. Этапы
 
-| Риск | Мера |
+| # | Этап | Статус |
+|---|---|---|
+| 0 | Карта интеграции с существующим кодом | ✅ |
+| 1 | Модуль признаков `features/` (R4 — тест обрезки) | ✅ |
+| 2 | Детекторы SMC/Breakout + бэктест (3.12) | ✅ (геометрия подтверждена пользователем) |
+| 3 | Оркестратор, VirtualTracker, блокировка монеты, Shadow | ✅ |
+| 4 | LiveBarrier + Algo API | ⏸ заморожен 2026-10-10 (живой проверки нет) |
+| 5 | PostgreSQL + запись + деплой Shadow на VPS | ✅ |
+| 6 | FastAPI + Flet-клиент + `.exe` | ✅ (на уровне кода; практика ❓) |
+| 7 | Мульти-стратегийный Shadow (5 стратегий, `strategy_id`, миграция v2) | ✅ задеплоено 2026-10-11 |
+| 8 | MCP-сервер ИИ-аналитика + SSH-туннель | ✅ |
+| 9 | Боевой модуль Binance (`TRADE_MODE`, риск-менеджер, выход = Shadow) | ✅ код и тесты; выключен; живой проверки нет |
+| 10 | Git, пул BTC/ETH, сброс БД, клиент MetaApi | ✅ |
+| 11–13 | MT5: маппер, лоты, торговые методы, `ExecutionRouter`, `market_closed`, сквозной лимит | ✅ код и тесты; ордера не отправлялись; выключен |
+| 14 | Сопровождение MT5 по плану Shadow + данные Forex/металлов, пул из 5 символов | ✅ код, тесты, деплой 2026-10-13; ⏳ ключи MetaApi на сервере |
+
+**Текущее состояние (2026-10-14):** Shadow собирает статистику по BTC/ETH; MT5-символы ждут ключей на сервере. **Ближайшие шаги:** (1) вписать ключи MetaApi; (2) копить сделки (сотни) и смотреть `shadow.sh stats` / клиент / MCP; (3) пересобрать `.exe` с новыми монетами; (4) разобрать `main` с `origin`; (5) до любых боевых шагов — testnet-прогон `test_live_order.py` и пробная сделка MT5 на демо; исправить дубль `LIVE_STATE_NAME`.
+
+---
+
+## 8. Журнал решений (ключевые, по датам)
+
+| Дата | Решение |
 |---|---|
-| Бесконечный цикл рестартов при баге | Счётчик рестартов → Safe Mode |
-| Падение shadow-стратегии роняет live | Отдельный контейнер для shadow |
-| Две стратегии на одной монете в One-Way Mode | «Владелец монеты» + reduceOnly с объёмом |
-| Окно без стопа при переносе в безубыток | **Устранено 2026-10-09 (О18):** защита — `quantity` + `reduceOnly`, перенос «POST нового → DELETE старого»; в момент DELETE на бирже уже два стопа. Остаточные риски: (а) ❓ биржа может не принять сумму reduceOnly-ордеров больше позиции — тогда перенос отклоняется, **остаётся исходный стоп** (`be_failed`), Safe Mode не включается, стратегия работает без BE (в лог CRITICAL); (б) падение между POST и DELETE — оба стопа на бирже, `pump()` после рестарта снимает старый; (в) если «стоп на входе» уже за ценой (-2021) — выход по рынку |
-| Состояние algo-ордеров не совпадает с биржей после падения | `reconcile(check_algo=True)`: чужие/пропавшие/сработавшие algo-ордера и позиция без стопа → Safe Mode; `resync_all` после каждого переподключения потока опрашивает статусы по REST |
-| Непроверенные детали Algo Service (О19): подписка на `ALGO_UPDATE`, `c` порождённого ордера, коды отказов, `openAlgoOrders` | Код не полагается на непроверенное: опознание по `ai`, неизвестный код отказа → разбор по запросу статуса или fail-closed; живая проверка на testnet обязательна до боя |
-| Биржевой SL/TP (algo-ордер) исполняется под чужим id → `LiveBarrier._foreign` включает Safe Mode | Этап 4: учитывать algo-ордера как свои (`clientAlgoId`, `ALGO_UPDATE`), тест на testnet «стоп сработал — Safe Mode не включился, позиция закрыта в `LocalState`» |
-| Окно между исполнением входа и первым `pump()` (≤ ~1 с): `reduceOnly` нельзя поставить до появления позиции | Принятый остаток риска. Исполнитель приёмника будится сразу при приёме сигнала, `pump()` не реже раза в секунду; частичные исполнения защищаются добавками; `reconcile` ловит `POSITION_UNPROTECTED` по объёму |
-| LIVE SMC на testnet видит нереальные цены testnet, Shadow — реальный рынок mainnet | Сравнивать их напрямую нельзя; LIVE на testnet проверяет механику (ордера, стопы, события), не результаты стратегии |
-| БД Shadow недоступна / писатель упал | Fail-Fast: процесс падает (R1), Docker перезапускает (`restart: on-failure:20`); `postgres` — `unless-stopped`, `depends_on: service_healthy`. Длительная (> ~20 быстрых перезапусков) недоступность БД оставит `shadow-run` остановленным — `./deploy/shadow.sh up` поднимет снова |
-| Открытые виртуальные позиции теряются при перезапуске (О17) | В БД помечаются `aborted` и в статистику не входят; частые перезапуски смещают статистику к коротким сделкам — следить за числом `aborted` (`stats`). Восстановление из БД теперь возможно, но не сделано (О26) |
-| Scale Out: параметры runner'а (ATR×3, режим `atr`) — стартовые допущения, не из утверждённых | Не подгонять по знаку прибыли; сравнивать режимы на данных из БД (`trade_closes` хранит каждую часть) |
-| Выходы Shadow (Scale Out) и бэктеста `simulate.py` («100% на 3R») не сопоставимы | О25: обновить симулятор под `ScaleOutPlan` до сверки Shadow с бэктестом |
-| Малая выборка: даже после О12 за 6 месяцев 99 сигналов SMC и 3 Breakout (37 исполненных сделок SMC) — выводов о прибыльности делать нельзя | Копить данные в Shadow Mode (Этап 3); не подгонять параметры под знак прибыли |
-| Shadow: LIMIT исполняется по проходу цены, очередь в стакане не учтена (оптимистично); тики теряются при обрыве WS; состояние в памяти (О15, О17) | Сделки с обрывом помечены `gap_affected` и не входят в сумму R; сравнить Shadow с бэктестом на тех же барах до решений о LIVE |
-| Shadow и ML-контур живут на разных профилях (mainnet и testnet) и в разных каталогах данных | Так задумано (D5): общие только образ и код; `live_run.py` не затрагивается |
-| `HISTORY_START` изменён глобально: docker-сервис klines для 1m и `funding_downloader` при пустой папке начнут с 2026-04-01 | Осознанно (6 месяцев); у 1m лежит синтетика за 2026-10-02…04, поэтому докачка 1m продолжит с 2026-10-04 и оставит дыру апрель–октябрь — перед ML-обучением на 1m это нужно разобрать |
-| Завышенные результаты бэктеста | Вход MARKET по открытию следующего бара; при SL и TP в одной свече считается SL; лимитка исполнена только при проходе на 1 тик |
-
-| Live Execution Engine ещё не проверен на живой бирже (форматы ответов, гипотеза «SL на весь объём + TP-уровни + третий стоп принимаются», код `-2021`); два исполнителя в проекте (`LiveBarrier` заморожен) | ВЫКЛЮЧЕН флагом `TRADE_MODE=shadow`; сначала `scripts/test_live_order.py` на testnet, затем решение о mainnet; состояние на диске + сверка при старте реализованы (О45 ✅); при отказе биржи от схемы ордеров — аварийный путь (закрытие + Safe Mode), а не молчание |
-| Боевой выход отличается от Shadow физически: округление до шагов цены/лота, срабатывание на бирже, «немедленный стоп» по закрытой свече | Тест паритета (176 траекторий, 304 закрытия совпали точно); отличия перечислены в разд. 3.23, ограничение 2; не подгонять боевые параметры отдельно от Shadow |
-| Включение live на mainnet по ошибке | Нужны одновременно `TRADE_MODE=live`, ключи, `LIVE_ALLOW_MAINNET=true`; в контейнере `shadow-run` ключей нет; `deploy_pack` ключей не пакует; `ConfigError` до первого ордера |
-| Суточный лимит убытка видит только реализованный результат счёта (включая чужие сделки) | Нереализованный убыток ограничен биржевыми стопами и правилом «стоп ближе ликвидации»; открытые позиции лимит не закрывает (О42) |
-
-| MT5-позиции ведёт бот (уровни Scale Out исполняются рыночным частичным закрытием, а не ордером на бирже): при падении бота между опросами уровень не исполнится до рестарта; SL (и TP последнего уровня без runner'а) стоят у брокера всегда | `recover_mt5` возвращает управление, выводя выполненные уровни из лотов брокера; бот держится Docker'ом; стоп брокера защищает позицию независимо от бота |
-| Данные Forex/металлов для Shadow зависят от MetaApi (облако третьей стороны, токен на сервере) | Shadow берёт только данные (тест запрещает торговые вызовы); токен вписывается вручную, лучше read-only; нет ключей — MT5-символы пропускаются, крипта работает; временные сбои повторяются, затем падение и перезапуск |
-| Плоские свечи на выходных искажают ATR/объём после открытия рынка | Контексты плоских свечей и 20 свечей после дыры — «опоздавшие» (сигналы пропускаются); H4-структура после выходных считается с плоскими свечами (допущение) |
-| Стратегия B (контртренд) торгует редко даже на смягчённых порогах 1.5 / 1.5 (≈ 3 сигнала за 6 мес. на 8 монетах) | Показано в разд. 3.21; пороги (`CounterTrendParams`) выставляются одной строкой — решение пользователя; не подгонять по знаку прибыли |
-| OBI_Breakout: данные микроструктуры могут быть неполными (старт процесса посреди свечи, обрыв стакана/ленты, гонка двух WebSocket-соединений) | Неполная свеча даёт `null` и сигнала нет (fail-closed); обрыв помечает активные сделки `gap_affected`; при гонке дельта слегка занижена, порог и знак устойчивы |
-| Пять стратегий и стакан на одном процессе без лимитов контейнера | Fail-Fast и перезапуск Docker сохранены; `docker stats` после запуска; лимит можно вернуть в compose |
-| Миграция БД v2 при старте shadow-run помечает висящие сделки `aborted` | Это то же, что делает любой перезапуск (О17, О26); данные закрытых сделок не меняются; `strategy_id` старых строк = прежнее имя |
-| API мониторинга доступен снаружи → чужой получит статистику и снапшоты | `X-API-Key` на всё, троттлинг перебора, read-only БД, `/docs` выключен. **С 2026-10-11 порт открыт наружу (`0.0.0.0:8001`, решение пользователя)** — без TLS ключ идёт по сети открытым текстом: любой на пути (провайдер, публичный Wi-Fi) может его перехватить и читать статистику/снапшоты (записывать в БД API не может). Смягчение: вернуть `API_BIND=127.0.0.1` + туннель, либо поставить TLS-прокси; ключ можно сменить в `.env.shadow` и пересоздать контейнер `api`. Ключ также лежит открытым текстом в `settings.json` рядом с `.exe` и (если зашит) внутри `.exe` |
-| Приватный ключ `~/.ssh/id_ed25519` без парольной фразы на ПК даёт вход `root` на VPS (MCP-туннель) | Файл не копировать и не коммитить; при потере ПК — удалить строку `tradeai-mcp-tunnel@…` из `/root/.ssh/authorized_keys`; по желанию — ограничить ключ (`from="<ваш IP>"`) или завести отдельного пользователя с правом только на `docker inspect` |
-| Рассинхрон формы ответов API и клиента | Клиент тестируется на снимках ответов (`client/tests/fixtures`), корневой тест `test_client_fixtures_match_the_api_contract` сверяет их ключи с живым API |
-| Двойной клик в Flet не проверен на реальном ПК (автоматизация браузера его не воспроизводит) | Кнопка-свеча в каждой строке выполняет то же действие; проводка обработчика покрыта тестом; проверить вручную |
-| Свечи после сигнала берутся с Binance, а не из БД: могут быть недоступны (регион) или чуть расходиться с тиками Shadow | Опция отключается; при сбое график строится по снапшоту с пояснением; свечи не влияют на статистику. Постоянное решение — сохранять свечи сделки в БД (О28) |
-| Обновление Flet/lightweight-charts/pandas ломает клиент (API Flet меняется между минорными версиями, lightweight-charts не дружит с pandas 3) | Версии зафиксированы в `client/requirements.txt`; тесты `chart_window` ловят разрешение времени pandas |
-
----
-
-## 6. Решения на утверждение
-
-Статусы: ⏳ ожидает · ✅ утверждено · ❌ отклонено · ✏️ изменено
-
-| ID | Вопрос | Рекомендация Claude | Статус |
-|---|---|---|---|
-| D1 | Граница «векторы / события» | Признаки и сетапы — Polars; ордера — обработчики событий | ✅ Polars отвечает строго за сигналы и геометрию; жизненный цикл ордера — асинхронные хендлеры Python |
-| D2 | Равные хаи при определении свинга | Слева строго больше, справа больше или равно | ✅ `left_max < cand >= right_max` (двойные вершины не теряются) |
-| D3 | Амплитуда свинга для фильтра ATR | Хай минус минимум лоу в окне `[i−k, i+k]`; ATR с прошлого бара | ✅ (хай кандидата − минимум лоу окна) > **1.5 × ATR**, ATR с предыдущего закрытого бара. X = 1.5. Привязка «предыдущего бара» — см. О1 |
-| D4 | Конфликт стратегий на одной монете | «Владелец монеты», остальные сигналы блокируются и логируются | ✅ Coin Ownership Lock: кто первый вошёл, тот управляет стейтом монеты; остальные сигналы → лог `skipped_due_to_lock` |
-| D5 | Где запускать shadow-стратегии | Отдельный контейнер, тот же код | ✅ Отдельный Docker-контейнер обязателен (падение тестовой стратегии не роняет live) |
-| D6 | SMC: только шорт или + зеркальный лонг | — (решает пользователь) | ✅ Симметрично: Bearish (шорт) и Bullish (лонг) |
-| D7 | Цена лимитки в FVG | — (ближняя / середина / дальняя граница) | ✅ Вход от 50% (середины) FVG |
-| D8 | Время жизни сетапа и лимитки (в барах) | Например 20 и 10, проверить на истории | ✅ Сетап (от свипа до CHoCH) — ~~15~~ **30 баров** (О12, 2026-10-08); неисполненный LIMIT — **10 баров** |
-| D9 | Выход Стратегии 2 | — (фикс. 3R / биржевой трейлинг % / ботовый трейлинг по ATR) | ✅ Жёсткий фикс 3R. Трейлинги тестируем позже на данных из БД логов |
-| D10 | Риск на сделку, k, X | Стартовые значения предложить и проверить на истории | ✅ k = 5 (окно 11 баров), риск строго 1% депозита, X = 1.5 (из D3) |
-| D11 | Безубыток: по закрытию свечи или по mark price сразу | — | ✅ Перенос SL в BE мгновенно, как только mark price касается +1R, а не по закрытию свечи. Источник цены — см. О2 |
-| D12 | Доступ к коду проекта (папка) | Нужен для этапа 0 | ✅ Код лежит в рабочей папке `D:\softs\Trading` (проверено: `execution/`, `backtester/`, `collectors/`, `pipeline/`, `scripts/`, `tests/`) |
-
-### 6.1. Открытые вопросы после утверждения D1–D12
-
-| ID | Вопрос | Решение | Статус |
-|---|---|---|---|
-| О1 | Привязка «ATR с предыдущего закрытого бара» в D3 | ATR[i−1] (бар перед кандидатом), период 14. «Волатильность замеряется в момент формирования экстремума» | ✅ 2026-10-08 |
-| О2 | Источник mark price для D11 | Отдельная подписка `<symbol>@markPrice@1s` в Этапе 4; триггер безубытка висит на ней (поток стакана mark price не даёт). ❓ Существование потока на testnet и его частоту проверить до кода Этапа 4 | ✅ 2026-10-08 (проверка потока ⏳) |
-| О3 | BE-триггер в бэктесте | Пессимистичный бэктест: касание +1R по high/low бара; если в одном баре и +1R, и SL — засчитывается убыток по SL (всегда худший сценарий исполнения) | ✅ 2026-10-08 |
-| О4 | BE на +1R для Стратегии 2 | Да, для обеих стратегий | ✅ 2026-10-08 |
-| О5 | Стартовые параметры | Хардкодом, не ждать Этапа 2: буфер SL = 0.2·ATR, период ATR = 14. Подгонка (curve fitting) — минимальная и только после запуска системы. Лежат в `features/defaults.py`; порог по плечу/размеру позиции всё ещё не задан → О8 | ✅ 2026-10-08 |
-| О6 | «Лоу лежат между хаями по времени» (разд. 3.6 п.2) | Мягкая реализация: все три лоу образовались после самого старого из трёх хаёв и строго растут (`sl3_time > sh3_time`) | ✅ 2026-10-08 |
-| О7 | ATR: SMA(14) вместо Уайлдера | Оставляем SMA (рекурсивный ATR зависит от глубины истории: live ~300 баров ≠ бэктест, нарушение R8) | ✅ 2026-10-08 |
-| О8 | Потолок позиции при риске 1% | Плечо `0.01·entry/R` выше потолка (1.0 по первому решению, **5.0 с О12**) → сделка **отклоняется** и пишется в лог (`reject = exposure`), объём молча не урезается | ✅ 2026-10-08. ⚠️ Последствия на реальных данных — см. О12 |
-| О9 | История 15m/1h | Разрешено: `15m` добавлен в `KLINE_INTERVALS`, старт 2026-04-01; скачано с mainnet (публичные свечи) | ✅ выполнено 2026-10-08 |
-| О10 | Опорный свинг-лоу для CHoCH (разд. 3.5 п.4 говорит «в рамках медвежьего сетапа») | **Моя интерпретация:** динамический `sl1`, образованный после свипнутого хая. Переключатель `SmcSetupParams.choch_ref_after_pool`. Без него CHoCH 31 вместо 19, но исполненных сделок 10 вместо 4 при худшей статистике | ✅ 2026-10-08: опорный лоу строго после свипа; лоу до пула ликвидности — это дамп, а не слом микроструктуры |
-| О11 | «Триггер» Breakout (разд. 3.6 п.3) — событие или состояние | **Моя интерпретация:** событие — пересечение уровня (`close[j−1] ≤ уровня < close[j]`); иначе сигнал повторялся бы на каждой свече над уровнем | ✅ 2026-10-08 |
-| О12 | **Воронка слишком узкая:** за 6 месяцев на 2 монетах SMC даёт 19 сигналов (2 при потолке плеча 1.0), Breakout 3 (0 при потолке) — выборка статистически пуста (разд. 3.11) | Нужно решение пользователя. Варианты (не взаимоисключающие): (а) поднять потолок плеча (в таблице 3.11: при 2.0 проходят 11 из 19 сигналов SMC, при 3.0 — 12, без потолка — 19); (б) срок сетапа 15 → 30 баров (D8) — даёт 40 сигналов вместо 19; (в) смягчить фильтр импульса FVG 1.5 → 1.0·ATR — 60 сигналов (главное горло воронки); (г) добавить монет и таймфрейм 1h; (д) принять как есть и копить данные в shadow. Подгонку «по знаку прибыли» не делаю | ✅ 2026-10-08: **собираем статистику в Shadow Mode**; дефолты: потолок плеча 5.0 (`features/defaults.MAX_EXPOSURE`), импульс FVG 1.0·ATR (`IMPULSE_ATR_MULT`), срок сетапа 30 баров (`SETUP_TTL_BARS`). Результаты — разд. 3.11.1 |
-| О13 | Допущения симулятора, не из утверждённых: `max_hold = 192` бара; BE в том же баре, где достигнут +1R и цена касается входа = BE (худший случай); блокировка монеты с момента сигнала, а не исполнения; проскальзывание стопа не моделируется | Принято по принципу «худший сценарий» (О3) | ✅ 2026-10-08 (макс. удержание 192 бара — «адекватно для 15m») |
-| О14 | (утверждено 2026-10-08) Область блокировки монеты в Shadow: D4 говорит «кто первый вошёл», а 3.2 — «у каждой стратегии свой виртуальный трекер» | **Моё решение:** SHADOW — своя блокировка у каждой стратегии (статистика одной не искажается другой); все LIVE-стратегии делят одну (на бирже одна позиция на монету). Лонг и шорт SMC делят блокировку SMC. Код: `Orchestrator.lock_for` | ✅ 2026-10-08 |
-| О15 | (утверждено 2026-10-08) Правила виртуального исполнения по тикам (разд. 3.12): LIMIT исполняется при проходе цены сделки (`aggTrade`) строго через уровень; SL/TP/BE — по цене тика (со скольжением); BE — по `markPrice@1s`; эквити 10 000 USDT без реинвестирования | Мои допущения; очередь в стакане не моделируется, поэтому исполнение лимиток немного оптимистичнее реального (пользователь: строгий проход уровня это компенсирует) | ✅ 2026-10-08 |
-| О16 | `config.LIVE_MAX_EXPOSURE` (1.0) **не менял**: это потолок ML-контура `live_run`. Потолок 5.0 — `features/defaults.MAX_EXPOSURE` — действует для SMC/Breakout через `RiskSizer` приёмника | LIVE SMC — отдельный процесс с отдельным `TRADING_DATA_DIR`; потолки не пересекаются | ✅ 2026-10-09 (развели процессами и каталогами) |
-| О18 | Перенос в безубыток и вид защиты | ✅ 2026-10-09 (пользователь): защита **`quantity` + `reduceOnly=true`** вместо `closePosition=true` (последний опасен); безубыток **сначала POST нового стопа на входе, затем DELETE старого** — окна без стопа нет. Реализовано в `LiveBarrier` (разд. 3.13). ❓ Гипотеза «биржа принимает сумму reduceOnly больше позиции» проверяется скриптом (О19); если нет — перенос отклоняется безопасно (остаётся исходный стоп), решение по запасному варианту — после результатов | ✅ код, ⏳ подтверждение на testnet |
-| О19 | Живая проверка Algo API на testnet | ✅ 2026-10-09 (пользователь): ML-бот не трогаем; создан отдельный чистый testnet-аккаунт, ключи в `.env` подменяет пользователь сам. Скрипт `scripts/test_algo_live.py` готов (разд. 3.15, 16 тестов на фейковой бирже), запускает пользователь | 🔒 **закрыт 2026-10-10 вместе с заморозкой Этапа 4:** вывод запуска не получен, ❓ в разд. 4 про Algo API остаются непроверенными допущениями. Откроется заново при разморозке боя |
-| О20 | LIVE-приёмник оркестратора | ✅ код и тесты 2026-10-09 (разд. 3.14): `Signal → arm_protection + вход`, `markPrice@1s` → `on_mark_price`, цикл `pump()`, Fill → блокировка/журнал, округление объёма, эквити счёта. Живой прогон ждёт результатов О19 | ✅ код, ⏳ живая проверка |
-| О21 | Плечо аккаунта на бирже (`POST /fapi/v1/leverage`) бот не выставляет; MARKET-вход в Breakout и маржа зависят от текущего плеча аккаунта | ❓ не проверено; `RiskSizer` ограничивает плечо позиции (≤ 5.0), но не плечо аккаунта. Решить до боя | 🔒 закрыт 2026-10-10: вне объёма проекта (бой заморожен); вернуться при разморозке Этапа 4 |
-| О22 | Сервис `smc-live` в `docker-compose.yml` (отдельный каталог данных, `restart: on-failure`) | Не добавлен: ждёт результатов живой проверки | 🔒 закрыт 2026-10-10: не добавлен, бой заморожен |
-| О23 | Пул монет Shadow: `DOGEUSDT` и `PEPEUSDT` | ✅ 2026-10-10 (пользователь): монеты добавить; отдельная константа `config.SHADOW_SYMBOLS` (не `SYMBOLS`, чтобы не затронуть ML-контур) утверждена; PEPE на Binance Futures = `1000PEPEUSDT` подтверждён | ✅ утверждено, реализовано |
-| О24 | Параметры Scale Out | ✅ 2026-10-10 (пользователь): 50% на +1R с безубытком, 40% на +3R, 10% runner; трейлинг 3·ATR (режим `atr`) оставлен как стартовая точка (в сообщении пользователя — «О27»). Режим `wick` и множитель меняются в `features/defaults.py` | ✅ утверждено, реализовано |
-| О25 | Бэктест-симулятор `strategies/simulate.py` на схеме «100% на 3R»: выходы Shadow и бэктеста не сопоставимы | ✅ 2026-10-10 (пользователь): принято; `simulate.py` остаётся на жёстком 3R как базовая оценка, Scale Out живёт только в Shadow; позже — отдельный симулятор по данным БД | ✅ утверждено |
-| О26 | Восстановление открытых виртуальных позиций Shadow после перезапуска | ✅ 2026-10-10 (пользователь): для первого прогона не нужно; при падении контейнера позиции теряются и помечаются `aborted` / `process_restart` (в статистику не входят) | ✅ утверждено |
-| О27 | Бэкапы БД по расписанию (cron + ротация), мониторинг/алерты о падении `shadow-run` | Сейчас только ручной `deploy/shadow.sh backup` и Telegram-алертов у Shadow нет | 🔒 закрыт 2026-10-10 решением пользователя «код больше не пишем»: остаётся ручной `backup` (при желании — `cron` на сервере на стороне пользователя), алертов нет |
-| О17 | (утверждено 2026-10-08) Состояние Shadow живёт в памяти: при перезапуске процесса открытые виртуальные позиции теряются (журнал `shadow_events.jsonl` остаётся, обрыв потока помечает сделки `gap_affected`) | До БД (Этап 5) принято; восстановление из журнала — позже | ✅ 2026-10-08 |
-
-| О28 | **Свечи после сигнала для графика.** В снапшоте нет свечей после сигнала, а вход/выход — позже. Клиент достраивает их из публичного REST Binance (по умолчанию включено, опция в настройках) | Моё решение; альтернатива — писать в БД свечи на время жизни сделки (shadow-run) и отдавать их из API (даёт воспроизводимость и не нужен доступ к Binance с ПК) | ✅ 2026-10-10 (пользователь): утверждено — свечи достраивает клиент из публичного REST Binance; в БД не храним |
-| О29 | **Доступ к API:** было — порт только на `127.0.0.1` сервера + SSH-туннель. **Изменено 2026-10-11 пользователем:** прямой доступ `0.0.0.0:8001` (порт 8000 на сервере занят), `X-API-Key` — единственная защита, TLS нет | Моё решение (туннель) заменено решением пользователя; риск — ключ по HTTP открытым текстом (разд. 5) | ✏️ 2026-10-11 (пользователь): прямой доступ по IP |
-| О30 | **Источник живого состояния для WebSocket — БД (`state_events`), а не Оркестратор напрямую.** Состояние автомата хранится как последний переход за 3 суток; задержка до 2 с; shadow-run не менялся | Моё решение: чтение БД не требует изменений в торговом процессе и не может его уронить | ✅ 2026-10-10 (пользователь) |
-| О31 | **Определения метрик:** сделка — `status=closed` и не `gap_affected` (как `shadow.sh stats`); Win Rate — доля сделок с net R > 0; Profit Factor — сумма прибыльных R / модуль убыточных (без убыточных — «∞»); просадка — по накопленному R в порядке закрытия; порог «достаточно данных» — 200 сделок | Моё решение | ✅ 2026-10-10 (пользователь) |
-| О32 | **Отдельная роль БД «только SELECT»** для API не заведена (используется пользователь `tradeai` с read-only сессией) | Достаточно для текущей угрозы; роль требует ручной миграции на сервере | ✅ 2026-10-10 (пользователь); отдельная роль БД — вне объёма проекта |
-| О33 | **HTF Bias (разд. 3.20): определение тренда H4.** Реализовано по структуре свингов (HH+HL / LH+LL / иначе Neutral), а не по EMA 50/200; Neutral разрешает обе стороны; при отсутствии данных — запрет/падение (R1) | Мой выбор из предложенных («например EMA или Swing»): без зависимости от глубины истории (R8). Альтернативы: EMA 50/200 по наклону, либо запрет сторон и при Neutral (строже) | ✅ 2026-10-11 (пользователь): структура свингов утверждена |
-| О34 | **Миграция `strategy_id`: собственная система миграций проекта вместо Alembic** (разд. 3.21). Версия 2 в `persistence/schema.py`, применяется при старте shadow-run | Моё решение: один источник правды о версии схемы; Alembic дал бы вторую систему поверх `schema_migrations` | ✅ 2026-10-11 (пользователь): Alembic не нужен |
-| О35 | **Стратегия B: пороги смягчены до глубины ≥ 1.5 ATR и объёма > 1.5 SMA20** (было 2.5 / 2.5 — ≈ 0 сигналов) | Решение пользователя 2026-10-11; всё равно редко (≈ 3 сигнала за 6 мес. на пул по истории) — при желании 1.0 / 1.5 даёт ≈ 14 | ✅ 2026-10-11 |
-| О36 | **Определения стратегий C, D, E из текстовых описаний:** BOS = закрытие за последним подтверждённым свингом + импульс (тело > 1 ATR); OBI = среднее по топ-10 за 120 с до закрытия, порог ±0.25; всплеск дельты = ±0.30 и объём ≥ 1.5 SMA20; Азия 00–07 UTC, London 07–10, NY 12–15 UTC без DST; VWAP от 00:00 UTC, полосы ±3σ (взвешенное по объёму), паттерны — поглощение / pin-bar | Мои интерпретации (формулировки задания — свободные) | ✅ 2026-10-11 (пользователь) |
-| О37 | **Планы выхода по стратегиям:** B — 100% на +1R; E — 50% на +1R (+BE) и 50% на +2R; остальные — Scale Out 50/40/10 | Мои стартовые допущения | ✅ 2026-10-11 (пользователь) |
-| О38 | **Breakout Buildup выведен из боевого набора Shadow** (в задании пять стратегий); код и тесты сохранены | Мой выбор; вернуть — добавить в реестр | ✅ 2026-10-11 (пользователь) |
-| О39 | **Лимиты ресурсов:** у `shadow-run` сняты (было 768 МБ / 1 CPU); у `postgres` подняты до 2 ГБ / 2 CPU; `api` не менялся | По заданию + моё решение по `postgres` | ✅ по заданию |
-| О40 | **Live Execution Engine строится поверх `execution.rest.SignedRest`**, а не на `ccxt` / `binance-futures-connector` (их нет в зависимостях; подпись и обработка ошибок уже проверены у `LiveBarrier`) | Мой выбор | ⏳ ждёт подтверждения |
-| О41 | **Фиксированный размер:** нотионал = маржа × плечо (10 × 10 = 100 USDT), `ISOLATED`; риск сделки плавает от расстояния до стопа; стоп должен лежать ближе 0.8 / плечо от входа (8%) | Моя конкретизация «$10 маржи с 10x» | ⏳ |
-| О42 | **Суточный лимит:** убыток счёта (реализованный PnL + комиссии + фандинг, `/fapi/v1/income`) с 00:00 UTC **≥ $50** блокирует новые входы до 00:00 UTC (защёлка в файле) и отменяет неисполненные лимитки; **открытые позиции не закрываются** (стоп на бирже) | Моя трактовка «торговля блокируется»; граница включительная (fail-safe); альтернатива — закрывать всё по рынку | ✅ 2026-10-13 (пользователь): «трактовка верна» — новые сделки не открываем, лимитки снимаем, открытые позиции не трогаем |
-| О43 | **Выход live = выход Shadow:** Scale Out (50% / 40% / runner 10%), безубыток по mark price +1R и после первого уровня, трейлинг runner'а, тайм-аут 192 свечи — тем же `ScaleOutPlan` стратегии (`plans_for`); уровни — биржевые TAKE_PROFIT_MARKET | Требование пользователя: «мы не можем торговать в live по другой математике»; реализовано и подтверждено тестом паритета; отличия — только физические (разд. 3.23) | ✅ 2026-10-13 (пользователь) |
-| О44 | **Защита позиции — `quantity` + `reduceOnly` (как О18)** в Algo Service; ❓ гипотеза «биржа принимает SL и TP по полному объёму» не проверена; при отказе — закрытие + Safe Mode | Единство с О18 | ⏳ проверка на testnet |
-| О45 | **Состояние и перезапуск:** файл состояния (write-ahead) + сверка с биржей при старте: позиция, уровни и стопы подтягиваются и сопровождаются дальше, а не падение; чужая позиция со стопом — подтягивается, без стопа — Safe Mode | Требование пользователя 2026-10-13 («это критично»); реализовано (`recover`), тесты перезапуска посреди Scale Out и после простоя | ✅ 2026-10-13 (пользователь), реализовано |
-| О46 | **Зеркальный маршрут:** Shadow-трекер получает все сигналы всегда и независим от live (отказ/сбой live не искажает Shadow-статистику); в движок идут только принятые трекером сигналы одобренных стратегий | По заданию («продолжают писаться в Shadow-трекер») | ✅ по заданию |
-| О47 | **Охрана включения:** `LIVE_ALLOW_MAINNET=true` обязательно на mainnet; `docker-compose.yml` не менялся (в контейнере нет ключей) — для реального запуска понадобятся отдельная правка compose и `env_file` | Мой выбор | ⏳ |
-| О48 | **Testnet:** флаг `USE_TESTNET=true` переключает ТОЛЬКО адрес клиента ордеров (`config.LIVE_REST_URL` = `https://testnet.binancefuture.com`); `REST_BASE_URL` и данные Shadow остаются mainnet; скрипт `scripts/test_live_order.py` — принудительная сделка ~10 USDT по `1000PEPEUSDT` минуя риск-менеджер | Требование пользователя 2026-10-13 («на Mainnet без тестов не идём»); трактовка «10 USDT» — нотионал (параметр `--notional`), уточните, если имелась в виду маржа | ✅ 2026-10-13 (пользователь), трактовка нотионала ⏳ |
-| О49 | **План выхода обязан делиться на сетке лота** (отказ `plan_not_representable`, допуск 2% позиции на долю) вместо молчаливого изменения долей; MARKET-вход отклоняется при отклонении mark price от цены сигнала > 1% (`LIVE_MAX_ENTRY_DEVIATION`) | Мой выбор: иначе боевая математика молча разошлась бы с Shadow | ⏳ |
-| О50 | **«Немедленный стоп»:** безубыток/трейлинг на цене или за ценой (биржа ответила бы `-2021`) закрывается рынком сразу, Shadow проверяет такой стоп на следующем тике | Физическое отличие биржи от тиковой модели, не логики; в тесте паритета 3 из 176 траекторий | ⏳ |
-| О51 | **Чужая позиция без записи сделки:** со стопом на бирже — подтягивается (`adopted`, дальше безубыток/уровни/трейлинг по найденным ордерам), без стопа — Safe Mode и остановка, позицию не закрываем | Мой выбор; альтернатива — закрывать по рынку | ⏳ |
-| О52 | **MT5 на Linux — через облачный шлюз MetaApi** (`metaapi-cloud-sdk`), а не нативный `MetaTrader5` (Windows-only); скелет `exchange/mt5_metaapi.py` с Fail-Fast по `METAAPI_TOKEN` / `ACCOUNT_ID` | Решение пользователя 2026-10-13 | ✅ 2026-10-13 (пользователь), скелет готов |
-| О53 | **Пул Shadow = `BTCUSDT`, `ETHUSDT`** (макро-крипта вместо 8 альткоинов); `config.SYMBOLS` не менялся | Решение пользователя 2026-10-13 | ✅ код и деплой |
-| О54 | **Сброс статистики БД** (`TRUNCATE` четырёх таблиц) перед новым циклом сбора | Решение пользователя; выполнено 2026-10-13 `python -m scripts.reset_db --yes` | ✅ |
-| О55 | **Git без удалённого репозитория:** только локальные коммиты; `.gitignore` исключает секреты, данные, логи, окружения | Мой выбор (удалённый репозиторий пользователь не задал) | ⏳ |
-| О56 | **RPC-режим SDK** (запрос-ответ) для клиента MT5, а не потоковый; SL/TP — всегда оба уровня при модификации позиции; частичные тейки — рыночное частичное закрытие; объём в лотах с проверкой сетки после `load_symbols` | Мой выбор (разд. 3.25) | ⏳ |
-| О57 | **Разграничение рынков:** крипта (BTCUSDT, ETHUSDT) — `BinanceLiveClient`; традиционные активы (EURUSD, XAUUSD, XAGUSD, BRN, US500) — `MetaApiLiveClient` | Решение пользователя 2026-10-13 | ✅ |
-| О58 | **Расчёт лота по `lossTickValue` котировки** (а не по несуществующим в MetaApi полям `tradeTickSize` / `tradeTickValue`), округление только вниз, отказы `below_min_size` / `exposure` / `bad_risk` / `stop_too_close`, `max_margin_use = 1.0` | Мой выбор (отступление от текста задания, обосновано моделью SDK) | ⏳ |
-| О59 | **Проверка класса актива по `path` спецификации** при маппинге (акции и ETF отвергаются; ожидаемый класс по таблице) — защита от «тёзок» (`BRN`, `GOLD`, `WTI` у брокера — акции) | Мой выбор после живой проверки | ⏳ |
-| О60 | **Выбор режима исполнения MARKET: FOK → IOC → RETURN** с переходом на следующий при 10030 | Мой выбор (FOK не дробит объём плана) | ⏳ |
-| О61 | **BRN и US500 у текущего брокера недоступны** (нет нефтяных символов; все индексные CFD в режиме DISABLED) — нужен другой брокер/демо-сервер либо исключить инструменты | Вопрос к пользователю | ⏳ |
-| О62 | **Вариант А:** мульти-биржевой боевой контур — Binance (BTCUSDT, ETHUSDT) + MT5 (EURUSD, XAUUSD, XAGUSD); BRN и US500 исключены | Решение пользователя 2026-10-13 | ✅ (закрывает О61) |
-| О63 | **Закрытый рынок Forex — обычный отказ `market_closed`** (`tradeMode != FULL` на каждом сигнале либо ответ 10018): без Safe Mode и падения; при старте вне сессии символ в DISABLED загружается (`allow_disabled`) | Решение пользователя 2026-10-13 | ✅ реализовано |
-| О64 | **Сквозной суточный лимит: Total = Binance + MT5 (USD/USDT 1:1)**, одна защёлка блокирует обе площадки, результат каждой площадки обязан быть свежим (fail-closed), счёт MT5 только в USD/USDT/USDC | Решение пользователя + мои уточнения (свежесть, валюта, учёт пополнений) | ✅ реализовано; уточнения ⏳ |
-| О65 | **MT5 без управления позицией:** вход со стопом и тейком сигнала, дальше решает брокер; Scale Out / безубыток / трейлинг / тайм-аут для MT5 — отдельный этап; состояние MT5-сделок у брокера, не на диске | Мой выбор (объём работ) | ⏳ вопрос к пользователю |
-| О67 | **Сопровождение MT5 = план Shadow** (Scale Out / безубыток / трейлинг / тайм-аут) исполняет бот через `close_position(volume)` и `modify_position`; брокерский TP только у плана без runner'а; закрытый рынок (10018) — отложенная команда без Safe Mode; неизвестный исход разрешается по лотам брокера; состояние — файл + брокер | Решение пользователя 2026-10-13 (математика) + мои уточнения (TP, 10016, лоты как источник правды) | ✅ реализовано, паритет 176 траекторий; уточнения ⏳ |
-| О68 | **Пул Shadow = BTC, ETH, EURUSD, XAUUSD, XAGUSD**; данные MT5-символов — из MetaApi (свечи M15, производный H4, котировки), а не с Binance | Решение пользователя 2026-10-13; способ получения данных — мой (прежние фиды физически не работают для этих символов) | ✅ код; ⏳ ключи MetaApi на сервере вписывает пользователь |
-| О69 | **H4 для Forex производный из M15** (UTC-границы), выходные — плоские свечи «назад», плоские и 20 свечей после дыры ≥ 4 свечей не торгуются (`skipped_stale`) | Мой выбор (иначе `HtfBias`/Оркестратор падают на дырах) | ⏳ |
-| О70 | **Тики MT5 — середина bid/ask раз в секунду** (trade и mark), без ленты и стакана; `OBI_Breakout` по MT5 не торгует | Мой выбор (у Forex нет единой ленты сделок) | ⏳ |
-| О71 | **MT5-фиды включаются только при наличии ключей MetaApi в окружении**, иначе предупреждение и работа по крипте; ключи в архив/образ не попадают | Мой выбор (не ломать боевой сбор данных и не копировать секрет на сервер без вашего слова) | ⏳ |
-| О66 | **`LIVE_ENABLE_MT5` выключен по умолчанию**; маршрутизатор всегда стоит между движком и клиентами (в Binance-only режиме символы MT5 и любые чужие — `unsupported_symbol`) | Мой выбор | ⏳ |
-
----
-
-## 7. Этапы (roadmap)
-
-Статусы: ⬜ не начат · 🟨 в работе · ✅ готов · ⛔ заблокирован
-
-| # | Этап | Результат | Критерий готовности | Зависит от | Статус |
-|---|---|---|---|---|---|
-| 0 | Изучить текущий код (WsLiveFeatureFeed, LiveBarrier, Safe Mode) | Карта интеграции | Реальные интерфейсы описаны в этом файле | D12 ✅ | ✅ (разд. 3.8) |
-| 1 | Модуль признаков на Polars | `features/` + тесты | Проходит тест обрезки (R4) | D1–D3 ✅, О1 ✅ | ✅ (разд. 3.9; 23 теста; ждёт ответов по О6, О7) |
-| 2 | Детекторы стратегий + прогон по истории (.parquet) | Отчёт + примеры на графике | Пользователь визуально подтверждает паттерны | 1, D6–D10 ✅, О3 ✅, О5 ✅, О8 ✅, О9 ✅ | ✅ (разд. 3.10–3.11.1; геометрия подтверждена пользователем по `examples.html`) |
-| 3 | Orchestrator + VirtualTracker + «владелец монеты» | Shadow на **реальных публичных данных mainnet** (не testnet: там нереальные цены) | Конфликты блокируются и логируются; Shadow в отдельном контейнере | 2 ✅, D4 ✅, D5 ✅ | ✅ (разд. 3.12; О14, О15, О17 утверждены; контейнер `shadow-run` пользователь запускает сам на сервере) |
-| 4 | LiveBarrier: Algo API, безубыток, reduceOnly | Проверено на testnet | Каждый тип ордера выставлен и отменён вживую | 0 ✅, D11 ✅, О2 ✅ | ⏸ **ЗАМОРОЖЕН 2026-10-10 по решению пользователя** (приоритет — Shadow на VPS). Состояние на момент заморозки: 🟨 **код, LIVE-приёмник (разд. 3.14) и скрипт живой проверки (разд. 3.15) готовы, 1193 теста зелёные; живой проверки на testnet ещё нет** — критерий не выполнен, ждём запуск `scripts/test_algo_live.py` пользователем (О19) |
-| 5 | PostgreSQL + запись снапшотов | Схема + миграция | Снапшот пишется до ордера (R7) | 3 | ✅ **утверждён пользователем 2026-10-10.** Схема, миграции, запись сделок/закрытий/снапшотов/состояний, compose, упаковщик и серверный скрипт готовы и проверены (PostgreSQL 16, сквозной прогон compose локально, 1254 теста зелёные). R7 соблюдён для Shadow (снапшот ставится в очередь до любого исполнения); для LIVE нужен `flush()` — не подключено (Этап 4 заморожен). Развёртывание на VPS и сбор статистики (~2 недели) — на стороне пользователя (разд. 3.18) |
-| 6 | FastAPI + Flet-клиент | `api/` + сервис в compose; `client/` + `.exe` | История и график сделки открываются | 5 + прототип графика ✅ | ✅ **принят пользователем 2026-10-10 на уровне кода** (разд. 3.19): `api/`, сервис `api` в compose, `client/`, `.exe` собран `flet pack`; О28–О32 утверждены. Не проверено на практике: запуск на VPS пользователя, двойной клик на реальном ПК, Windows 10 без WebView2 |
-| 7 | Мульти-стратегийный Shadow: изоляция позиций, БД `strategy_id`, 5 стратегий | Реестр стратегий, ключ позиции `символ + strategy_id`, миграция v2, лента и стакан | Позиции стратегий не пересекаются (тесты), `strategy_id` во всех таблицах, деплой | 5, 6, О33 ✅ | ✅ **код и тесты 2026-10-11** (разд. 3.21); деплой выполнен 2026-10-11 |
-| 8 | Аналитический контур: MCP-сервер (AI Risk Manager) | `mcp_server/`: 3 инструмента, read-only БД, туннель, README | Инструменты вызываются из Cursor/Claude Desktop на ПК, запись в БД невозможна (тесты), пароль не утекает | 5, 7 | ✅ **код и тесты 2026-10-11** (разд. 3.22); живой запуск на VPS пользователя ещё не выполнялся |
-| 9 | Боевой модуль исполнения (Live Execution Engine) | `exchange/binance_live.py`, `orchestrator/live_risk.py`, `orchestrator/live_engine.py`, `scripts/test_live_order.py`, флаги `TRADE_MODE` / `USE_TESTNET` | Правильные запросы (тесты на подпись и payload), риск-менеджер блокирует по лимиту/фильтру/плечу, выход совпадает с Shadow (тест паритета), перезапуск не теряет позицию, модуль выключен при `TRADE_MODE=shadow` | 4, 7 | ✅ **код и тесты 2026-10-12, доработан 2026-10-13** (разд. 3.23), **ВЫКЛЮЧЕН**, на сервер не деплоился; **живой проверки на бирже нет — следующий шаг: пользователь запускает `scripts/test_live_order.py` на testnet**; О40, О41, О44, О46, О47, О49–О51 ждут подтверждения |
-| 10 | Переход на макро-активы: Git, пул BTC/ETH, сброс БД, подготовка к MT5 (MetaApi) | `.git` + `.gitignore`, `SHADOW_SYMBOLS`, `scripts/reset_db.py`, `exchange/mt5_metaapi.py` | Коммит без секретов; Shadow торгует только BTC/ETH на чистой БД; конструктор MetaApi падает без ключей | 7, 9 | ✅ **2026-10-13: Git, пул BTC/ETH, очистка БД, деплой и скелет MetaApi готовы** (разд. 3.24); стратегии для Forex/металлов не писались, MetaApi без токена не проверялся |
-| 11 | Клиент MetaApi (MT5): реализация и проверка связи | `exchange/mt5_metaapi.py`, `scripts/test_mt5_connection.py`, тесты | Подключение к аккаунту и брокеру, баланс/Equity, котировки; ордера на демо | 10 | ✅ **2026-10-13: связь проверена пользователем (CONNECTED, $100 000, спред EURUSD 0.1 пипса); ордера на демо ещё не отправлялись** |
-| 12 | Исполнение MT5: маппинг символов, расчёт лотов, торговые методы | `exchange/symbol_mapper.py`, `exchange/mt5_risk.py`, `exchange/mt5_metaapi.py`, тесты (93) | Лоты по риску 1% с учётом контракта; отказы `below_min_size` / `exposure`; все торговые методы с retcode-ошибками; живая проверка спецификаций | 11 | 🟨 **код, тесты и read-only живая проверка спецификаций 2026-10-13 ✅; ордера на брокер не отправлялись; BRN и US500 у текущего брокера недоступны (разд. 3.26)** |
-| 13 | Мульти-биржевой контур: `ExecutionRouter`, `market_closed`, сквозной суточный лимит | `exchange/router.py`, правки `live_engine.py` / `live_risk.py` / `mt5_metaapi.py`, тесты (71 новый) | Маршрут по символу; закрытый рынок = отказ без Safe Mode; Binance + MT5 PnL суммируются, блокировка обеих площадок | 12 | ✅ **код и тесты 2026-10-13 (мутации 14/14); ордера на MT5 не отправлялись; контур выключен** |
-| 14 | Сопровождение MT5-позиций планом Shadow + данные Forex/металлов для Shadow | `exchange/mt5_exit.py`, правки `router.py` / `live_engine.py` / `mt5_metaapi.py`, `orchestrator/mt5_feeds.py`, `scripts/shadow_run.py`, пул из 5 символов | Тест паритета MT5-выхода с `VirtualTracker` (176 траекторий), закрытый рынок 10018 без Safe Mode, фиды проходят выходные без падений | 13 | ✅ **код и тесты 2026-10-13 (разд. 3.28)**; ⏳ ключи MetaApi на сервере и живая проверка данных; контур выключен, ордера на MT5 не отправлялись |
-
-### 7.1. Итоговый статус проекта на 2026-10-10
-
-| Область | Статус |
-|---|---|
-| Этапы 0–3, 5 | ✅ Этапы 0, 1, 2, 3 и 5 приняты. Shadow Mode (4 монеты, Scale Out 50/40/10 с трейлингом) пишет сделки, частичные закрытия, снапшоты и состояния в PostgreSQL |
-| Этап 4 (боевое исполнение) | ⏸ заморожен по решению пользователя; код и тесты на фейковой бирже сохранены, живая проверка на testnet не выполнялась |
-| Этап 6 (FastAPI + Flet-клиент) | ✅ принят 2026-10-10 на уровне кода: `api/` (REST + WebSocket, ключ, read-only БД), сервис `api` в compose, `deploy/shadow.sh`, клиент `client/` (Dashboard, Statistics, History, график сделки), `client/dist/TradeAI-Monitor.exe` собран `flet pack`. О28–О32 утверждены. **Практически не проверено:** запуск на VPS пользователя, двойной клик на реальном ПК (разд. 3.19) |
-| Упаковка и деплой | ✅ **проект упакован и готов к развёртыванию на стороне пользователя:** `python -m scripts.deploy_pack` → архив `trading_shadow.tar.gz` (+ `.sha256`, без ключей и `.env`) → на сервере `deploy/shadow.sh up` (разд. 3.18). Проверено сквозным прогоном на машине разработки; **на VPS пользователя не проверялось** |
-| Тесты | **2026-10-13 (после доработки Live Execution Engine): 1495 зелёных + 34 пропущены (PostgreSQL-тесты без `TEST_DATABASE_URL`); из них на боевой контур 118 (разд. 3.23).** Ранее 2026-10-12: 1458 + 34 пропущены. Ещё ранее: **1411** зелёных в корневом проекте (2026-10-11, после мульти-стратегийного релиза; на 2026-10-10 было **1339**) (интеграционные идут на PostgreSQL при `TEST_DATABASE_URL`, иначе пропускаются; в т.ч. 43 в `tests/api`) + **53** теста клиента (`client/tests`, окружение `client/.venv`) |
-| Следующий шаг | Только эксплуатация, код больше не пишется: (1) `python -m scripts.deploy_pack` → на VPS `./deploy/shadow.sh up` → `./deploy/shadow.sh apikey`; (2) открыть порт 8001 в файрволе VPS и запустить `client/dist/TradeAI-Monitor.exe` (ключ — из `apikey`: вводится один раз, дальше `settings.json` рядом с `.exe`; `client/README.md`). адрес API — `http://193.233.75.254:8001` (контейнер `api` нужно пересоздать: `./deploy/shadow.sh up`); (3) ~2 недели сбора статистики; первые проверки — `./deploy/shadow.sh logs` (доступность `fstream.binance.com` из региона VPS ❓), затем `status` и `stats`. Выводов о прибыльности до накопления сотен сделок не делать |
-| Что остаётся открытым | **Вопросов, требующих решения, нет** (О19, О21, О22, О27 закрыты 2026-10-10 как отложенные вместе с заморозкой Этапа 4 / решением «код больше не пишем»). Остаются **непроверенные допущения** (❓ в разд. 4 про Algo API, VPS, двойной клик) — это не решения, а факты, которые выяснятся при эксплуатации. При разморозке боя начать с О19/О21/О22; позже — симулятор Scale Out по данным БД |
-
----
-
-## 8. Журнал решений
-
-| Дата | ID | Решение | Кем |
-|---|---|---|---|
-| 2026-10-07 | — | Ведение проекта в CLAUDE.md | Пользователь |
-| 2026-10-08 | D1 | Polars — сигналы и геометрия; жизненный цикл ордера — асинхронные хендлеры Python | Пользователь |
-| 2026-10-08 | D2 | Свинг: `left_max < cand >= right_max` | Пользователь |
-| 2026-10-08 | D3 | Амплитуда (хай кандидата − min лоу окна) > 1.5·ATR; ATR с предыдущего закрытого бара | Пользователь |
-| 2026-10-08 | D4 | Coin Ownership Lock; отклонённые сигналы → `skipped_due_to_lock` | Пользователь |
-| 2026-10-08 | D5 | Shadow — отдельный Docker-контейнер, обязательно | Пользователь |
-| 2026-10-08 | D6 | SMC симметрично: шорт и лонг | Пользователь |
-| 2026-10-08 | D7 | LIMIT от 50% FVG | Пользователь |
-| 2026-10-08 | D8 | Сетап (свип → CHoCH) 15 баров; LIMIT 10 баров | Пользователь |
-| 2026-10-08 | D9 | Стратегия 2: фикс 3R, трейлинги позже | Пользователь |
-| 2026-10-08 | D10 | k = 5 (11 баров), риск 1% депозита | Пользователь |
-| 2026-10-08 | D11 | BE мгновенно при касании mark price +1R, не по закрытию свечи | Пользователь |
-| 2026-10-08 | D12 | Корень проекта `D:\softs\Trading`; работа в Cursor, полный доступ к файловой системе, файлы у пользователя больше не запрашиваются | Пользователь |
-| 2026-10-08 | О1 | ATR[i−1], период 14 | Пользователь |
-| 2026-10-08 | О2 | Mark price: подписка `<symbol>@markPrice@1s` в Этапе 4, триггер BE висит на ней | Пользователь |
-| 2026-10-08 | О3 | Пессимистичный бэктест: +1R и SL в одной свече → убыток по SL | Пользователь |
-| 2026-10-08 | О4 | BE на +1R и для Breakout Buildup | Пользователь |
-| 2026-10-08 | О5 | Буфер SL = 0.2·ATR, ATR 14, хардкодом; оптимизация минимальная и после запуска | Пользователь |
-| 2026-10-08 | О6 | Мягкая реализация «лоу между хаями»: все 3 лоу после самого старого хая и строго растут | Пользователь |
-| 2026-10-08 | О7 | ATR = SMA(14), не Уайлдер (паритет бэктест/live, R8) | Пользователь |
-| 2026-10-08 | О8 | Плечо > 1.0 при риске 1% → сделка отклоняется и логируется, объём не урезается | Пользователь |
-| 2026-10-08 | О9 | История 15m/1h: `KLINE_INTERVALS += 15m`, старт 2026-04-01, скачать загрузчиком | Пользователь |
-| 2026-10-08 | — | Скачано с mainnet (публичные свечи), а не с testnet из `.env`; синтетические 1h убраны в `_synthetic_1h_backup/` | Claude (по смыслу задачи: бэктест на реальном рынке); сообщено пользователю |
-| 2026-10-08 | О10, О11, О13 | Интерпретации автомата и допущения симулятора утверждены | Пользователь |
-| 2026-10-08 | О12 | Расширить воронку: потолок плеча 5.0, импульс FVG 1.0·ATR, срок сетапа 30 баров (дефолты); цель — статистика в Shadow Mode | Пользователь |
-| 2026-10-08 | О14–О17 | Область блокировки в Shadow, правила виртуального исполнения, потолки ML-контура и LIVE, память вместо БД | Claude, ждёт подтверждения |
-| 2026-10-08 | О14, О15, О17 | Утверждены: изоляция блокировок в Shadow и общий лок в Live; исполнение лимитки по строгому проходу уровня, виртуальное эквити 10k; состояние Shadow в памяти до Этапа 5. Shadow на mainnet — верное решение (на testnet нет адекватной микроструктуры). Контейнер `shadow-run` пользователь запускает сам | Пользователь |
-| 2026-10-08 | Этап 4 | Защита — Algo API (`STOP_MARKET`/`TAKE_PROFIT_MARKET`), `clientAlgoId` хранится в `LocalState`; `ALGO_UPDATE` и исполнения порождённых ордеров не считаются «чужими»; перенос стопа в безубыток — **DELETE старого → POST нового** | Пользователь |
-| 2026-10-08 | О18–О20 | Окно без стопа при переносе, живая проверка на отдельном testnet-аккаунте, LIVE-приёмник | Claude, ждёт решения |
-| 2026-10-09 | О18 | Защита `quantity` + `reduceOnly=true` вместо `closePosition`; безубыток POST нового → DELETE старого | Пользователь |
-| 2026-10-09 | О19 | ML-бота не трогаем; живая проверка на отдельном чистом testnet-аккаунте, ключи в `.env` подменяет пользователь, запуск — вручную; скрипт `scripts/test_algo_live.py` | Пользователь |
-| 2026-10-09 | О20 | Написать LIVE-приёмник, связывающий `StrategySMC` с обновлённым `LiveBarrier` (`arm_protection`, вход, `markPrice@1s`, триггеры) | Пользователь |
-| 2026-10-10 | Приоритет | Боевое исполнение (Этап 4) заморожено; главная цель — Shadow Mode на VPS для сбора статистики на публичном mainnet WebSocket | Пользователь |
-| 2026-10-10 | О24 | Scale Out в `VirtualTracker`: 50% на +1R с безубытком, 40% на +3R, 10% runner с трейлингом (по теням свечей или по динамическому ATR) | Пользователь |
-| 2026-10-10 | О23 | В пул Shadow добавить `DOGEUSDT` и `PEPEUSDT` (реализовано как `SHADOW_SYMBOLS`, `1000PEPEUSDT`) | Пользователь (монеты) / Claude (где хранить и название контракта), ждёт подтверждения |
-| 2026-10-10 | О23–О26, Этап 5 ✅ | Утверждены: `SHADOW_SYMBOLS`, тикер `1000PEPEUSDT`, `simulate.py` остаётся на 3R (Scale Out только в Shadow), рестарт без восстановления позиций (`aborted`), трейлинг 3·ATR как старт; Этап 5 принят; пользователь собирает статистику на сервере ~2 недели. (Нумерация в сообщении пользователя отличалась от этого файла; зафиксировано по сути.) | Пользователь |
-| 2026-10-10 | Этап 5 | PostgreSQL (asyncpg), схема `trades`/`trade_snapshots`/`state_events` + `trade_closes`, запись из `VirtualTracker`; `postgres` в compose; упаковщик `deploy_pack` и серверный скрипт; ключей на VPS нет, пароли серверу не передаются | Пользователь (задача) / Claude (реализация) |
-| 2026-10-09 | О16, О21, О22 | Потолки ML-контура и LIVE SMC развели процессами/каталогами; плечо аккаунта и docker-сервис `smc-live` — открыты | Claude, О21/О22 ждут решения |
-
-| 2026-10-10 | Этап 6 | Начат: `api/` (FastAPI, только чтение БД, `X-API-Key`), сервис `api` в `docker-compose.yml`, клиент Flet в `client/` (не отправляется на сервер), сборка `.exe` через `flet pack` | Пользователь (задача) / Claude (реализация) |
-| 2026-10-10 | О28–О32 | Свечи после сигнала из публичного Binance; порт API только на localhost + SSH-туннель; живое состояние из БД; определения метрик; без отдельной роли БД | Claude; ✅ утверждены пользователем 2026-10-10 |
-| 2026-10-11 | О29 ✏️ | Прямой доступ к API по IP сервера вместо SSH-туннеля: `0.0.0.0:8001` (на сервере порт 8000 занят — наружу 8001, не нарушать работающее), защита только `X-API-Key`; клиент: `settings.json` рядом с `.exe`, автоподключение при запуске, дефолты в `build_defaults.py` | Пользователь |
-| 2026-10-11 | HTF Bias, пул монет | HTF-фильтр H4 для M15-автомата SMC (шорт не при Bullish, лонг не при Bearish; Breakout не фильтруется); `SHADOW_SYMBOLS` → SOL, XRP, LTC, ZEC, ADA, AVAX, DOT, LINK; порт API не менять (`0.0.0.0:8001:8000`); деплой выполнить самому | Пользователь (задача) / Claude (определение тренда — О33) |
-| 2026-10-11 | О33 ✅, мульти-стратегийный Shadow | Утверждён HTF Bias по структуре свингов; запуск 5 параллельных стратегий (SMC_Pro_Trend, SMC_Counter_Trend, OBI_Breakout, ICT_Killzones, VWAP_Reversion); изоляция позиций по ключу `символ + strategy_id`; `strategy_id` во всех таблицах БД; снять лимиты 1 CPU / 768 МБ; деплой выполнить самому | Пользователь |
-| 2026-10-11 | О34–О39 | Миграция в собственной системе (не Alembic); пороги B как в задании (почти не торгует); определения C/D/E; планы выхода по стратегиям; Breakout вне боевого набора; лимиты ресурсов | Claude, О34–О38 ждут подтверждения |
-| 2026-10-11 | Этап 8, MCP | Создать локальный MCP-сервер `mcp_server/` (AI Risk Manager): только математика и логи из БД, без соцсетей; read-only; инструменты `get_strategies_overview`, `get_trade_details`, `analyze_drawdown_causes`; автодеплой на VPS не нужен | Пользователь (задача) / Claude (реализация: SDK `mcp<2`, причина входа через `api.reason`, доступ через туннель) |
-| 2026-10-12 | Туннель MCP | Работа по SSH-ключам без пароля, автозапуск туннеля при входе в Windows; `auto_deploy` не запускать (чтобы не сбросить виртуальные позиции); пароль `root` меняет пользователь сам | Пользователь (задача) / Claude (реализация) |
-| 2026-10-12 | Этап 9, Live Execution Engine | Спроектировать и написать боевой модуль исполнения для Binance Futures (клиент, Live Risk Manager: фиксированная маржа $10 × 10x, суточный лимит убытка $50 до 00:00 UTC, `APPROVED_STRATEGIES`), флаг `TRADE_MODE=shadow\|live`, модуль ВЫКЛЮЧЕН, на сервер ничего не деплоить | Пользователь (задача) / Claude (реализация; О40–О47) |
-| 2026-10-13 | О42–О48, доработка Live Engine | Состояние + сверка с биржей при старте (позицию не терять, а подтягивать); боевой выход на 100% как в Shadow (Scale Out + безубыток); суточный лимит — как трактовал Claude (лимитки снять, открытые позиции не трогать); поддержка testnet (`USE_TESTNET`) и скрипт `scripts/test_live_order.py`; на сервер ничего не деплоить | Пользователь (решения) / Claude (реализация) |
-| 2026-10-13 | Этап 10, О52–О55 | Заморозка боевого контура Binance, переход на макро-активы и Forex/металлы: Git-бэкап, очистка БД, пул Shadow = BTC/ETH, MT5 через MetaApi (Linux), скелет `exchange/mt5_metaapi.py` | Пользователь (задача) / Claude (реализация; очистка БД заблокирована системой прав) |
-| 2026-10-13 | Этап 11 | Реализовать полноценный асинхронный клиент MetaApi (баланс, позиции, котировки, market/limit, SL/TP, отмена) и скрипт проверки связи; ключи внесены в `.env` | Пользователь (задача) / Claude (реализация; живая проверка не пройдена — токен повреждён) |
-| 2026-10-13 | Этап 12, О57 | Связь с MetaApi/MT5 подтверждена; утверждено разграничение рынков (крипта — Binance, Forex/металлы/сырьё/индексы — MetaApi); писать маппер символов, калькулятор лотов и торговые методы; на сервер не деплоить | Пользователь (задача) / Claude (реализация; О58–О61) |
-| 2026-10-13 | Этап 14, О67–О71 | Зафиксировать коммитом контур Этапа 13; сопровождение MT5-позиций на 100% как Shadow (Scale Out / BE / трейлинг / тайм-аут, 10018 без Safe Mode); пул Shadow = BTC, ETH, EURUSD, XAUUSD, XAGUSD, проверить фиды; тесты и паритет; самому выполнить авто-деплой; обновить документацию | Пользователь (задача) / Claude (реализация; О67–О71) |
-| 2026-10-13 | Этап 13, О62–О64 | Вариант А: коммит модулей MT5; `ExecutionRouter` между движком и биржами (`unsupported_symbol` для остальных); `market_closed` без Safe Mode; сквозной суточный лимит $50 по Binance + MT5; тесты и документация; на сервер не деплоить | Пользователь (задача) / Claude (реализация; О65–О66) |
-| 2026-10-10 | Этап 6 ✅, закрытие | Пользователь утвердил О28–О32, перевёл Этап 6 в «Выполнено», объявил проект завершённым на уровне кода; код больше не пишется. Открытые О19, О21, О22, О27 закрыты как отложенные (бой заморожен) | Пользователь |
+| 2026-10-08 | D1–D12, О1–О13 утверждены; О12 — расширить воронку, копить статистику в Shadow; О14–О17 |
+| 2026-10-09 | Защита `reduceOnly`, перенос BE «POST → DELETE» (О18); живая проверка — на отдельном testnet-аккаунте (О19) |
+| 2026-10-10 | Боевое исполнение заморожено, приоритет — Shadow на VPS; Scale Out 50/40/10; О23–О26, О28–О32 утверждены |
+| 2026-10-11 | Прямой доступ к API по IP (О29); HTF Bias (О33); 5 стратегий, `strategy_id`, лимиты ресурсов сняты (О34–О39); MCP-сервер |
+| 2026-10-12 | SSH-ключи и автозапуск туннеля; модуль Live Execution Engine (выключен) |
+| 2026-10-13 | Выход live = Shadow, состояние на диске (О42–О48); переход на макро-активы: Git, BTC/ETH, сброс БД, MetaApi (О52–О54); разграничение рынков, вариант А, сквозной лимит (О57, О62–О64); сопровождение MT5 по плану Shadow, пул из 5 символов (О67–О71) |
+| 2026-10-14 | Полная сверка `CLAUDE.md` с кодом, тестами и сервером; удалены устаревшие данные (разд. 9) |
 
 ---
 
@@ -1165,36 +296,14 @@ lots         = floor_to_volumeStep( equity * 1% / loss_per_lot )
 
 | Дата | Что сделано |
 |---|---|
-| 2026-10-13 | **Сопровождение MT5 и данные Forex для Shadow (разд. 3.28):** коммит `6c2e325` (Этап 13); новые `exchange/mt5_exit.py` (Scale Out / безубыток / трейлинг / тайм-аут / отложенные команды при 10018), `orchestrator/mt5_feeds.py` (`Mt5KlineFeed`, `Mt5HtfView`, `Mt5TickFeed`, `MultiFeed`, `connect_mt5_data`), тесты `tests/exchange/test_mt5_exit.py` (12, из них паритет на 176 траекториях), `tests/orchestrator/test_mt5_feeds.py` (8); правки `exchange/router.py` (план выхода, `plan_not_representable`, `on_tick` / `on_bar_closed`, файл состояния, восстановление), `exchange/mt5_metaapi.py` (`get_candles`), `orchestrator/live_engine.py` (тики/свечи в маршрутизатор, события MT5, восстановление), `scripts/shadow_run.py` (MT5-фиды при наличии ключей), `config.py` (`SHADOW_SYMBOLS` из 5 символов, `LIVE_MT5_STATE_NAME`), `api/settings.py`, `docker-compose.yml` (необязательные `METAAPI_*`), `.env.shadow.example`. Тесты: 1679 зелёных + 34 пропущены (PostgreSQL-тесты без TEST_DATABASE_URL). Деплой: выполнен 2026-10-13 20:55 UTC (auto_deploy, 9 шагов OK, схема БД v2; shadow-run, api, postgres healthy; Shadow пока по BTC/ETH: ключей MetaApi на сервере нет, MT5-символы пропущены предупреждением; в логе первого запуска auto_deploy на Windows упал вывод кодировки cp1251 — перезапуск с -X utf8; depth-stream не тронут) |
-| 2026-10-13 | **Мульти-биржевой контур (разд. 3.27):** коммит `272b540` (клиент MT5, SymbolMapper, калькулятор лотов); новые `exchange/router.py` (`ExecutionRouter`: маршрут Binance / MT5 / `unsupported_symbol`, MT5-вход prepare→send с лотами и именем брокера, сопровождение, восстановление), `tests/exchange/fake_mt5.py`, `tests/exchange/test_router.py` (38), `tests/orchestrator/test_live_multivenue.py` (25); `exchange/mt5_metaapi.py` — `MarketClosedError` (10018, `tradeMode != FULL`), `ensure_entry_allowed`, `realized_pnl_since` (история сделок без пополнений, пагинация); `exchange/symbol_mapper.py` — `allow_disabled`; `orchestrator/live_risk.py` — площадки, сквозной Total Daily PnL, `gate`, `reserve`, `stale_venues`; `orchestrator/live_engine.py` — параметр `router`, `_execute_mt5`, агрегированный `refresh_pnl`, `poll`/`recover` для MT5, `build_live_engine` строит маршрутизатор; `config.py` — `LIVE_BINANCE_SYMBOLS`, `LIVE_MT5_SYMBOLS`, `LIVE_MT5_ACCOUNT_CURRENCIES`, `LIVE_ENABLE_MT5`. Мутации 14/14. Найдена и исправлена ошибка: ключ `reason` в деталях отказа брокера затирал причину отказа в журнале. На сервер ничего не деплоилось |
-| 2026-10-13 | **Исполнение MT5 (разд. 3.26):** новые `exchange/symbol_mapper.py` (маппинг с суффиксами брокера и псевдонимами, проверка класса актива по `path`, кеш спецификаций), `exchange/mt5_risk.py` (лоты по риску с учётом контракта, округление вниз, отказы `below_min_size`/`exposure`/`bad_risk`/`stop_too_close`); `exchange/mt5_metaapi.py` — выбор filling mode (FOK→IOC→RETURN, переход при 10030), `modify_position`, `close_position(volume)` с проверкой остатка, `calculate_margin`, `get_symbol_specification` с кешем, таблица кодов возврата MT5 (`RETCODES`) и `MetaApiTradeError` с пояснением/`retryable`/`outcome_unknown`, проверка сетки цен и стопов; тесты: `test_symbol_mapper.py` (34), `test_mt5_risk.py` (15), `test_mt5_metaapi.py` (44); мутационная проверка 12/12. Живой read-only прогон: EURUSD, XAUUSD, XAGUSD разрешены и считаются, `BRN` (у брокера акция) и `US500` (`tradeMode DISABLED`) — нет. На сервер ничего не деплоилось |
-| 2026-10-13 | **Клиент MetaApi (разд. 3.25):** `exchange/mt5_metaapi.py` переписан из заглушки в рабочий асинхронный клиент (RPC-соединение SDK, ожидание развёртывания/связи с брокером/синхронизации, перевод исключений SDK, проверка сетки лотов), `scripts/test_mt5_connection.py` (только чтение), `tests/exchange/test_mt5_metaapi.py` (21 тест на имитации SDK), `metaapi-cloud-sdk` установлен в `.venv`. **Запуск проверки связи: код 3 — токен в `.env` повреждён (посторонний символ U+B354 на позиции 1129); нужен новый токен.** Торговый контур, БД, compose, сервер не менялись |
-| 2026-10-13 | **Переход на макро-крипту, Git, подготовка к MT5 (разд. 3.24):** (1) `.gitignore` + `git init`, коммит `269da62` «Backup before MT5 migration and DB reset» (257 файлов, секретов нет); (2) `config.SHADOW_SYMBOLS` = BTC, ETH, `api/settings.py::DEFAULT_COINS`, тест `tests/test_deploy.py`, комментарии в compose/`shadow_run.py`; (3) `scripts/reset_db.py` (TRUNCATE четырёх таблиц, `--yes`, DSN из окружения/`mcp_server/.env`) — очистка БД выполнена (после разрешения пользователя); перед ней `shadow-run` остановлен командой `docker compose stop shadow-run`; (4) `requirements.txt` + `metaapi-cloud-sdk>=29.1,<30`; (5) `exchange/mt5_metaapi.py` (скелет `MetaApiLiveClient`, Fail-Fast `ConfigError`) + `tests/exchange/test_mt5_metaapi.py` (7); (6) автодеплой выполнен после очистки (9 шагов OK, схема v2, BTC/ETH). Торговый контур и схема БД не менялись |
-| 2026-10-13 | **Доработка Live Execution Engine по решениям пользователя (разд. 3.23), по-прежнему ВЫКЛЮЧЕН, на сервер не деплоилось:** (1) `orchestrator/live_engine.py` переписан: **выход = Shadow** (биржевые TAKE_PROFIT_MARKET на уровни Scale Out плана стратегии, SL на весь объём, безубыток по mark price +1R и после первого уровня — POST нового стопа, затем DELETE старого, размер стопа = остаток, трейлинг runner'а по ATR/теням, тайм-аут 192 свечи), отклонение MARKET-входа при уходе mark price > 1%; (2) **состояние и перезапуск:** `LiveTrade` / `LiveStateStore` (`live_engine_state.json`, write-ahead), `recover()` — сверка с биржей при старте, подтягивание чужой позиции со стопом, снятие висячих `tb…` algo-ордеров; (3) `orchestrator/live_risk.py` — план выхода из реестра стратегий (`plans=`), `split_levels` (деление на сетке лота, отказ `plan_not_representable`); (4) `exchange/binance_live.py` — `get_position` (entryPrice), `get_mark_price`, `get_open_algo_orders`, `actual_price`/`actual_qty`; адрес `config.LIVE_REST_URL`; (5) `config.py` — `USE_TESTNET`, `TESTNET_REST_URL`, `LIVE_REST_URL`, `LIVE_MAX_HOLD_BARS`, `LIVE_MAX_ENTRY_DEVIATION`, `LIVE_STATE_NAME`, `PREMIUM_INDEX_PATH` (убран `LIVE_TP_R`); (6) `scripts/shadow_run.py` — `live.on_tick(tick)` (те же тики, что у Shadow); `LiveMirrorSink` передаёт свечу движку; (7) **`scripts/test_live_order.py`** — принудительная тестовая сделка на testnet (~10 USDT по `1000PEPEUSDT`, SL + TP, безубыток, закрытие, отчёт JSON); (8) тесты: `test_live_parity.py` (паритет с `VirtualTracker`: 176 траекторий, 304 закрытия совпали точно), `test_live_recovery.py` (20), `tests/test_live_order_script.py` (7), дополнены `test_live_engine.py`, `test_live_risk.py`, `tests/exchange`; имитация биржи `fake_live_rest.py` получила движущуюся цену, срабатывание algo-ордеров, `entryPrice`, `openAlgoOrders`, `premiumIndex`. Полный набор: 1495 зелёных + 34 пропущены. `docker-compose.yml`, Dockerfile (кроме прежней строки `COPY exchange`), схема БД и торговое поведение при `TRADE_MODE=shadow` не менялись |
-| 2026-10-12 | **Боевой модуль Live Execution Engine (разд. 3.23), ВЫКЛЮЧЕН:** новые `exchange/__init__.py`, `exchange/binance_live.py` (клиент приватного API поверх `SignedRest`), `orchestrator/live_risk.py` (`LiveRiskManager`), `orchestrator/live_engine.py` (`LiveExecutionEngine`, `LiveMirrorSink`, `build_live_engine`); `config.py` — `TRADE_MODE` (по умолчанию `shadow`), `APPROVED_STRATEGIES`, `LIVE_MARGIN_USDT`, `LIVE_LEVERAGE`, `LIVE_DAILY_LOSS_LIMIT_USDT`, `LIVE_LIQ_SAFETY`, `LIVE_TP_R`, `LIVE_PNL_MAX_AGE_S`, `LIVE_ALLOW_MAINNET`, пути API и проверки в `validate()`; `scripts/shadow_run.py` — ленивая сборка движка только при `TRADE_MODE=live`, `live.check()` в цикле; `Dockerfile` — `COPY exchange`; тесты: `tests/exchange/test_binance_live.py` (30), `tests/orchestrator/test_live_risk.py` (11), `tests/orchestrator/test_live_engine.py` (40), `tests/orchestrator/fake_live_rest.py`, `live_helpers.py`. **Деплой не выполнялся, `docker-compose.yml` и схема БД не менялись**, торговое поведение при `TRADE_MODE=shadow` прежнее |
-| 2026-10-12 | **Туннель MCP по ключам + автозапуск (разд. 3.22):** создан `~/.ssh/id_ed25519` на ПК, публичный ключ добавлен в `/root/.ssh/authorized_keys` на VPS (один раз по паролю, дальше пароль не нужен); `mcp_server/tunnel.ps1` переписан (ключ, автопереподключение, мьютекс, лог), новые `tunnel-hidden.vbs`, `install_autostart.ps1` (задача Планировщика «TradeAI MCP Tunnel»); `mcp_server/README.md` обновлён. Серверные контейнеры не перезапускались, схема и торговый контур не менялись |
-| 2026-10-11 | **Аналитический контур — MCP-сервер (разд. 3.22):** новая папка `mcp_server/` (`server.py`, `db.py`, `queries.py`, `analytics.py`, `tunnel.ps1`, `README.md`, `.env.example`, `requirements.txt`, `.gitignore`, `tests/test_mcp_server.py` — 28 тестов, из них 8 на PostgreSQL 16 и через протокол MCP); отдельное окружение `mcp_server/.venv` (`mcp` 1.30, `asyncpg`); `scripts/deploy_pack.py` — `mcp_server` в `EXCLUDED_PARTS`, `.dockerignore` — `mcp_server`. Торговый контур, схема БД, `docker-compose.yml`, API и клиент **не менялись**; деплой не выполнялся (по заданию) |
-| 2026-10-11 | **Мульти-стратегийный Shadow (разд. 3.21):** (1) `orchestrator/tracker.py` — активные позиции `dict[символ][strategy_id]`, ключ позиции, `TrackerError` на дубль ключа, планы по стратегии (`plans=`), `strategy_id` в строках БД; `orchestrator/types.py` — `Signal.strategy_id/position_key`, `Tick.qty/buyer_maker`; (2) `persistence/schema.py` — миграция v2 (`strategy_id` в `trades`/`trade_snapshots`/`state_events`, индексы, уникальный индекс активной позиции на ключ), `persistence/recorder.py`, `orchestrator/core.py` — `strategy_id` в снапшотах и событиях; (3) новые `strategies/counter_trend.py`, `obi_breakout.py`, `killzones.py`, `vwap_reversion.py`, `orchestrator/multi_strategies.py`, `registry.py`, `microstructure.py` (агрегатор, `DepthFeed`); `orchestrator/strategies.py` — имя `SMC_Pro_Trend`; (4) `scripts/shadow_run.py` — пять стратегий, `DepthFeed`, лента из `TickFeed`; `orchestrator/tick_feed.py` — объём и сторона агрессора; `scripts/smc_live_run.py` сохраняет имя `smc`; (5) `docker-compose.yml` — сняты лимиты `shadow-run`, `postgres` 2 ГБ/2 CPU; (6) API: `strategy_id` в ответах, фильтры и статистика по `strategy_id`, `/api/info.strategies`, причины входа всех стратегий; `deploy/shadow.sh stats` по `strategy_id`; (7) клиент: фильтры стратегий/монет, подписи (исходники; `.exe` не пересобирался); (8) 72 новых теста, остальные подогнаны под `strategy_id`; полный набор 1411 (корень) + 54 (клиент). Деплой выполнен 2026-10-11 (см. разд. 3.21), `.exe` пересобран с ключом; пороги стратегии B смягчены до 1.5 / 1.5 (О35) |
-| 2026-10-11 | **Доступ без SSH-туннеля, запуск `.exe` в один клик:** (1) `docker-compose.yml` — `api` публикуется `${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000` (внутри контейнера 8000 не менялся, healthcheck цел); `.env.shadow.example`, `deploy/shadow.sh` (текст `apikey`), `tests/test_deploy.py` приведены в соответствие; (2) `client/tradeai_client/settings.py` — `settings.json` рядом с `.exe` (запасной `%APPDATA%`), `load_settings` берёт файл → дефолты сборки → env; (3) новый `client/tradeai_client/build_defaults.py` (адрес `http://193.233.75.254:8001`, ключ пуст); `client/build_exe.ps1` — параметры `-ServerUrl`, `-ApiKey` (подмена только на время сборки, откат в `finally`); подсказка в окне настроек; `client/README.md`; (4) тесты клиента 49→52 (путь рядом с `.exe`, дефолты, цикл «ввод → перезапуск», запасной путь); (5) `client/dist/TradeAI-Monitor.exe` пересобран (89.9 МБ, самопроверка окна графика → 0); `docker compose config` показывает `0.0.0.0:8001→8000`. На VPS **не развёртывалось** (деплой — за пользователем); ключ API в сборку не зашит (его знает только сервер) |
-| 2026-10-11 | **HTF Bias (H4) + боевой пул Shadow:** новые `features/htf.py`, `orchestrator/htf.py`; правки `strategies/smc_setups.py` (`htf_filter`), `orchestrator/kline_feed.py` (`emit_latest_on_start`), `orchestrator/strategies.py` (H4 в `meta`), `scripts/shadow_run.py` (фид H4 + `HtfBias`), `features/defaults.py` (`HTF_*`), `config.py` (`SHADOW_SYMBOLS`), `api/settings.py` (`DEFAULT_COINS`), `api/reason.py` (текст причины); `docker-compose.yml` **не менялся**. Тесты 1311 → **1339** (+28), мутации 14/14; живой 70-секундный прогон на mainnet. Подробности и ограничения — разд. 3.20. Деплой — см. следующую запись |
-| 2026-10-11 | **Деплой HTF-фильтра выполнен:** `python -m scripts.auto_deploy --host 193.233.75.254` → 9 шагов OK, схема БД v1; `postgres`, `shadow-run`, `api` — `running/healthy`, `api` `0.0.0.0:8001->8000` (маппинг не менялся, проверено и в compose на сервере); `depth-stream` не затронут. В логе `shadow-run`: 8 монет нового пула, `kline_4h` и `kline_15m` подключены (первая попытка — `NetworkError`, через 1 с подключились), история 300×8 для 15m и 4h, bias на старте: XRP, ZEC, ADA, AVAX, LINK — Bearish; SOL, LTC, DOT — Neutral (записаны в `state_events` как `htf_bias`); сделок прошлого запуска помечено `aborted`: 0 (в БД сделок ещё не было). Нагрузка: shadow-run 2.5% CPU / 50 МБ, api 37 МБ, postgres 24 МБ. API снаружи отдаёт новый пул монет |
-| 2026-10-11 | **Деплой на VPS выполнен (по заданию пользователя) и `.exe` пересобран с ключом:** `python -m scripts.auto_deploy --host 193.233.75.254` (пароль — переменной окружения `VPS_PASSWORD`, в `.env` его нет) → 9 шагов OK, схема БД v1; на сервере `postgres`, `shadow-run`, `api` — `running/healthy`, `api` на `0.0.0.0:8001->8000`; посторонний контейнер `depth-stream` (аптайм 45 ч) не затронут. С ПК извне: `/api/health` 200, `/api/info` без ключа 401, с ключом 200 (4 монеты, пульс shadow жив) — файрвол порт 8001 пропускает. Ключ API забран с сервера (`.env.shadow`) и зашит в `client/dist/TradeAI-Monitor.exe` через `build_exe.ps1` (в `build_defaults.py` пуст, проверено). Найдена и исправлена ошибка: старый `%APPDATA%`-файл настроек перебивал адрес сборки (чтение `%APPDATA%` убрано, тесты клиента 53). Подсказка об ошибке сети больше не говорит только про туннель |
-| 2026-10-10 | **Финал проекта (уровень кода):** Этап 6 → ✅, О28–О32 утверждены, О19/О21/О22/О27 закрыты как отложенные; обновлены шапка, разд. 1, 3.19, 6.1, 7, 7.1, журнал решений. **Кода не менялось**, только `CLAUDE.md`. Тесты на момент закрытия: 1311 (корень) + 49 (клиент), зелёные по последнему прогону этапа 6 — в этой сессии не перезапускались |
-| 2026-10-10 | **Этап 6 🟨:** (1) `api/` — `main.py`, `security.py`, `stats.py`, `livestate.py`, `reason.py`, `serialize.py`, `settings.py`, `Dockerfile`, `requirements.txt`; (2) `docker-compose.yml` — сервис `api` (профиль `shadow`, порт на `127.0.0.1`, read-only, ключ из `.env.shadow`); `deploy/shadow.sh` — `API_KEY` создаётся/дописывается в `.env.shadow`, команды `apikey`, `logs [сервис]`; `scripts/deploy_pack.py` — образ API едет на сервер, `client/` исключён; `scripts/auto_deploy.py` — проверяет и `api`; `.env.shadow.example`, `.dockerignore`; (3) `client/` — `app.py`, пакет `tradeai_client` (`api`, `chart_spec`, `chart_window`, `binance`, `settings`, `fmt`, `ui/*`), `README.md`, `build_exe.ps1`, `requirements*.txt`, тесты и снимки ответов API; (4) `scripts/demo_api_data.py` — синтетические демо-данные (только в БД `*_demo`/`*_test`); (5) тесты: `tests/api/` (43), `tests/test_deploy.py` (+api), `client/tests` (49). Корневой набор: **1311** зелёных. Сборка `client/dist/TradeAI-Monitor.exe` (flet pack) и самопроверка окна графика в нём. Торговый контур, `shadow_run.py`, схема БД не менялись |
-| 2026-10-07 | Создан CLAUDE.md: контекст, правила, архитектура, проверенные факты, решения на утверждение, этапы |
-| 2026-10-08 | **Этап 0 ✅:** прочитаны `execution/ws_live_features.py`, `live_features.py`, `live_barrier.py`, `state.py`, `pipeline/features/base.py`, `pipeline/loaders/*`, `config.py`, `scripts/live_run.py` (структура); карта интеграции — разд. 3.8. Найдено: ML-фид зашит на 1m, в `LiveBarrier` нет Algo API, биржевой стоп сработает как «чужое исполнение» и включит Safe Mode, 15m-истории нет, данные синтетические |
-| 2026-10-08 | **Этап 1 ✅:** создан пакет `features/` (`smc.py`, `defaults.py`) и `tests/features/test_smc.py` (23 теста, в т.ч. R4). Тесты нашли и помогли исправить ошибку: `eqh_ok` истинен при менее чем 3 хаях (`max_horizontal` пропускает null). Полный набор: 938 старых + 23 новых зелёных. Рабочий live-процесс и `config.py` не трогались |
-| 2026-10-08 | О1–О5 утверждены, добавлены О6–О9 (разд. 6.1) |
-| 2026-10-08 | О6–О9 утверждены. **Загрузка истории:** `config.py` — `KLINE_INTERVALS = ("1m","15m","1h")`, `HISTORY_START = 2026-04-01` (было 2024-01-01; влияет и на `funding_downloader`, и на docker-сервис klines — их докачка продолжается с последней сохранённой свечи). Запущен `collectors.klines_downloader` только для 15m и 1h с `BINANCE_PROFILE=mainnet`: 2 × (18 288 + 4 572) свечей, код выхода 0 |
-| 2026-10-08 | **Этап 3 ✅** (О14, О15, О17 утверждены). **Этап 4 🟨:** `execution/state.py` (`LocalAlgoOrder`, `Protection`, версия состояния 2 при наличии algo-данных), `execution/user_stream.py` (`AlgoUpdate`), `execution/live_barrier.py` (+~440 строк: `arm_protection`, `pump`, `on_mark_price`, `move_stop_to_breakeven`, `on_algo_update`, учёт algo-исполнений, буфер неопознанных), `execution/reconcile.py` (algo-расхождения, `POSITION_UNPROTECTED`), `config.py` (`ALGO_*`, `LIVE_PRICE_TICK`, `USER_STREAM_EVENTS_WITH_ALGO`), `scripts/live_run.py` (диспетчер `AlgoUpdate`), `tests/execution/fake_algo.py` и `test_algo.py` (49 тестов). Весь набор: **1135 зелёных**. Документация Binance по Algo API сверена (New/Cancel/Query Algo Order); страница `ALGO_UPDATE` не открылась, формат — по сводке. Живой проверки на testnet **не было**: аккаунт занят работающим ML-ботом, см. О19 |
-| 2026-10-10 | **Автодеплой:** `scripts/auto_deploy.py` переписан под Shadow (9 шагов, глубокая проверка, детектор блокировки IP Binance), `tests/test_auto_deploy.py`; разд. 3.18 |
-| 2026-10-10 | **Итог: Этап 5 ✅, проект упакован и готов к развёртыванию пользователем.** Кода не менялось, только `CLAUDE.md`: статус Этапа 5, итоговый статус (разд. 7.1), утверждения О23–О26 |
-| 2026-10-10 | **Приоритет сменён: Этап 4 заморожен, Shadow на VPS.** (1) `orchestrator/tracker.py` переписан: `ScaleOutPlan` (50% на +1R с BE, 40% на +3R, runner 10% с трейлингом ATR/wick), `Leg`, `LEGACY_PLAN`, запись в рекордер; `orchestrator/types.py` (`BarInfo`, `FeatureContext.bar/snapshot_candles`), `orchestrator/core.py` (снапшот входа, переходы автомата сетапа `setup_state`), `orchestrator/strategies.py` (`StrategySMC.analyze`); (2) пул Shadow — `config.SHADOW_SYMBOLS` (+DOGE, 1000PEPE), `config.DATABASE_URL`; (3) **Этап 5:** пакет `persistence/` (схема и миграции, asyncpg, `PgRecorder`), `scripts/shadow_run.py` (БД, 4 монеты, `recorder.check()`), `docker-compose.yml` (`postgres`, том `pgdata`, `shadow-run` на БД), `Dockerfile` (+`persistence`), `requirements.txt` (+asyncpg), `.env.shadow.example`, `.dockerignore`; (4) деплой: `scripts/deploy_pack.py` переписан (состав по Dockerfile, цель `shadow` без секретов, sha256), `deploy/shadow.sh`; (5) тесты: `test_scale_out.py` (25), `test_recording.py` (8), `tests/persistence/test_pg.py` (15, из них 9 на PostgreSQL 16 при `TEST_DATABASE_URL`), `tests/test_deploy.py` (13); старые тесты трекера идут на `LEGACY_PLAN`. Весь набор: **1254 зелёных** (было 1193). Сквозной прогон compose локально: сборка → postgres healthy → миграция → 4 монеты → рестарт с пометкой `aborted` → удаление стенда. Этап 4 (`LiveBarrier`, `live_route`, `test_algo_live.py`) не менялся |
-| 2026-10-09 | **Этап 4 🟨 (дополнен):** (1) `execution/live_barrier.py` — защита `quantity` + `reduceOnly` вместо `closePosition`, покрытие позиции суммой объёмов (добавки на частичные исполнения), безубыток POST→DELETE с идемпотентными шагами и отказом без потери исходного стопа (`Protection.be_failed`), округление цены BE до шага, `protection()`, `round_price()`, `pop_exit_role()`; (2) `execution/reconcile.py` — сверка объёма/reduceOnly, `POSITION_UNPROTECTED` по объёму; (3) `execution/exchange_filters.py` — фильтры биржи (`exchangeInfo`), `config.py`: `EXCHANGE_INFO_PATH`, `LIVE_MIN_QTY`, `LIVE_MIN_NOTIONAL`; (4) `scripts/test_algo_live.py` — скрипт живой проверки Algo API (разд. 3.15); (5) `orchestrator/live_route.py` — настоящий `LiveBarrierSink` вместо заглушки (разд. 3.14), `orchestrator/core.py` — `adopt_held`, `scripts/smc_live_run.py` — точка входа LIVE-контура; (6) тесты: `test_algo.py` 49→60, `test_algo_live_script.py` (16), `test_live_route.py` (23), `test_smc_live_run.py` (8); фейковая биржа получила `quantity`/`reduceOnly`, режим `strict_reduce_sum`, `exchangeInfo`, `premiumIndex`. Весь набор: **1193 зелёных** (было 1135). Мутационная проверка: 22 поломки — 21 поймана. `live_run.py` и ML-контур не менялись (поведенчески) |
-| 2026-10-08 | **Этап 2 ✅.** Применены дефолты О12 (`features/defaults.py`: `MAX_EXPOSURE=5.0`, `IMPULSE_ATR_MULT=1.0`, `SETUP_TTL_BARS=30`; `SmcParams.impulse_atr_mult` читает их). Автомат получил выходную колонку `*_fvg_t1` (для геометрии). Отчёт перезапущен — разд. 3.11.1 |
-| 2026-10-08 | **Этап 3 🟨 (код):** пакет `orchestrator/` (типы, `CoinOwnershipLock`, `RiskSizer`, `FeatureEngine`, `StrategySMC/StrategyBreakout`, `VirtualTracker`, `Orchestrator`, `SmcKlineFeed`, `TickFeed`, журнал JSONL), `scripts/shadow_run.py`, сервис `shadow-run` в `docker-compose.yml`, `Dockerfile` копирует `features/strategies/orchestrator`. 69 новых тестов; весь набор 1086 зелёных. Живой дымовой прогон 75 с на mainnet (публичные данные, отдельный каталог, без ключей): оба потока подключились, история 300×2 свечей загружена, пульс идёт. `live_run.py` и ML-контур не менялись |
-| 2026-10-08 | **Этап 2 (код) 🟨:** пакет `strategies/` (автомат SMC S0→S4 для лонга и шорта, Breakout, пессимистичный симулятор, раннер), `scripts/stage2_report.py`, `scripts/stage2_charts.py`, 56 тестов; параметры по умолчанию в `features/defaults.py` (+`MAX_EXPOSURE`). Полный набор: 1017 тестов зелёные (938 старых + 23 + 56). Результаты — разд. 3.11. Открыты О10–О13 |
-| 2026-10-08 | D1–D12 переведены в ✅ с уточнениями пользователя; разделы 3.1, 3.2, 3.5, 3.6, 3.7 и этапы 0–4 приведены в соответствие; добавлен раздел 6.1 (открытые вопросы О1–О5). Код не писался |
+| 2026-10-14 | `CLAUDE.md` переписан: сверен с кодом, тестами (1713), сервером (`docker ps`, SQL) и клиентом; убраны устаревшие и неверные утверждения (см. ниже), добавлены карта процессов, ML-контур, деплой, дубль `LIVE_STATE_NAME`, расхождение с `origin`. Код не менялся |
+| 2026-10-13 | Сопровождение MT5 по плану Shadow (`mt5_exit.py`), фиды Forex/металлов (`mt5_feeds.py`), пул из 5 символов, деплой (коммиты `6c2e325`, `eef4ac5`); `ExecutionRouter`, `market_closed`, сквозной лимит; символы/лоты/торговые методы MT5; клиент MetaApi; Git, пул BTC/ETH, сброс БД |
+| 2026-10-12 | Live Execution Engine (выключен), `exchange/binance_live.py`, `live_risk.py`; SSH-ключи и автозапуск туннеля MCP |
+| 2026-10-11 | HTF Bias, 5 стратегий, миграция БД v2, MCP-сервер, прямой доступ к API, `.exe` в один клик, деплой |
+| 2026-10-10 | Scale Out, PostgreSQL, деплой Shadow, FastAPI + Flet-клиент, `auto_deploy` |
+| 2026-10-08–09 | Признаки, детекторы, бэктест, оркестратор, Shadow, Algo API (заморожено), LIVE-приёмник (заморожено) |
+
+**Удалено при сверке 2026-10-14 как неверное/устаревшее:** «удалённого репозитория нет» (есть `origin`); «PostgreSQL, Orchestrator, FastAPI, Flet в коде отсутствуют»; «на testnet крутится боевой ML-процесс» (не запущен нигде); итоговый статус 2026-10-10 (4 монеты, 1339 тестов, «код больше не пишется»); лимиты `shadow-run` 512–768 МБ / 0.5–1 CPU и «4 монеты» в описании деплоя; «управление MT5-позицией не реализовано» и «данных Forex в Shadow нет»; устаревшие счётчики тестов; «аптайм depth-stream 45 ч»; подробные журналы по каждому тесту и мутации (оставлены итоги).
 
 ---
 
@@ -1202,28 +311,23 @@ lots         = floor_to_volumeStep( equity * 1% / loss_per_lot )
 
 | Термин | Простыми словами |
 |---|---|
-| Lookahead bias (заглядывание в будущее) | Ошибка, когда расчёт в прошлом случайно использует данные, которых тогда ещё не было. Бэктест выглядит отлично, а вживую стратегия проигрывает. |
-| Swing High / Low | Локальный пик / провал: самая высокая / низкая точка среди соседних свечей. |
-| ATR | Средний размах свечи за N баров (обычно 14). Мера «нормальной» волатильности. |
-| Liquidity Sweep (свип) | Цена прокалывает старый пик (где стоят чужие стопы), но закрывается обратно ниже. |
-| FVG (имбаланс) | «Дыра» в цене после резкого движения: тени свечей i−2 и i не пересекаются. |
-| CHoCH | Смена характера рынка: закрытие телом ниже последнего подтверждённого провала. |
-| R (риск) | Расстояние от входа до стопа. 3R = тейк в три раза дальше стопа. |
-| Безубыток (BE) | Перенос стопа на цену входа, чтобы сделка не могла закончиться в минусе. |
-| One-Way Mode | Режим биржи: на одну монету одна общая позиция (лонг или шорт). |
-| reduceOnly | Флаг ордера: может только уменьшать позицию, не открывая новую. |
-| Shadow Mode | Стратегия считает сделки виртуально, без реальных ордеров. |
-| Идемпотентность | Повторная отправка того же ордера не создаёт дубль (за счёт clientOrderId). |
-| SSH-туннель | Защищённый канал до сервера (по желанию, с 2026-10-11 не обязателен): при `API_BIND=127.0.0.1` порт API виден только самому серверу, а на ПК «пробрасывается» командой `ssh -N -L 8000:127.0.0.1:8001 user@server`; клиент подключается к `http://127.0.0.1:8000`. |
-| API-ключ | Длинный случайный пароль в заголовке запроса `X-API-Key`; без него сервер мониторинга не отдаёт ничего, кроме `/api/health`. |
-| WebSocket | Постоянное соединение «сервер → клиент»: Dashboard получает изменения состояния сам, без обновления вручную. |
-| OBI (Order Book Imbalance) | Дисбаланс стакана: (объём заявок на покупку − на продажу) / сумма по лучшим уровням, от −1 до +1. Положительный — давят покупатели. |
-| Дельта ленты | (объём сделок, где агрессор покупал − где продавал) / общий объём за свечу. |
-| Killzone | Окно времени открытия торговой сессии (London, New York), когда чаще снимают ликвидность за границами Азиатского диапазона. |
-| Anchored VWAP | Средневзвешенная по объёму цена, накапливаемая с выбранного «якоря» (здесь — начало суток UTC); полосы — ± k стандартных отклонений. |
-| Ключ позиции | `символ + strategy_id` (например `SOLUSDT_SMC_Pro_Trend`): по одной монете параллельно живут независимые позиции разных стратегий. |
-| Векторизация | Расчёт сразу над целой колонкой, без перебора строк по одной. Быстро и без ошибок порядка. |
-| TRADE_MODE | Флаг режима: `shadow` — ордера никогда не отправляются (по умолчанию); `live` — одобренные стратегии торгуют реальными деньгами через Live Execution Engine. |
-| ISOLATED (изолированная маржа) | Потеря по позиции ограничена маржой этой сделки, остальной счёт не затрагивается (в отличие от CROSSED). |
-| MetaApi | Облачный шлюз к терминалам MetaTrader 5: терминал работает у них, мы торгуем из Python через REST/WebSocket на любой ОС (нужен токен и id аккаунта). Нужен, потому что пакет `MetaTrader5` работает только в Windows, а наш VPS — Linux. |
-| MCP (Model Context Protocol) | Стандарт, по которому приложение (Cursor, Claude Desktop) запускает небольшую программу-сервер и позволяет языковой модели вызывать её «инструменты» (функции). Здесь инструменты читают статистику сделок из БД. |
+| Lookahead bias | Ошибка, когда расчёт в прошлом использует данные из будущего: бэктест красивый, live — убыточный |
+| Swing High / Low | Локальный пик / провал среди соседних свечей |
+| ATR | Средний размах свечи за N баров (здесь SMA, 14) |
+| Liquidity Sweep (свип) | Прокол старого пика/лоя и возврат обратно |
+| FVG | «Дыра» после резкого движения: тени свечей i−2 и i не пересекаются |
+| CHoCH | Смена характера рынка: закрытие за последним подтверждённым свингом против тренда |
+| HTF Bias | Тренд старшего таймфрейма (H4): Bullish / Bearish / Neutral |
+| R | Расстояние от входа до стопа; 3R = тейк втрое дальше стопа |
+| Scale Out / runner | Частичные закрытия по уровням; остаток (10%) идёт с трейлингом |
+| Безубыток (BE) | Стоп на цене входа |
+| Shadow Mode | Виртуальные сделки по реальному рынку без ордеров |
+| Fail-Fast / Safe Mode | Ошибка роняет процесс; защёлка-файл блокирует новые позиции до ручного снятия |
+| reduceOnly | Ордер может только уменьшать позицию |
+| Algo Service | Условные ордера Binance (SL/TP) через `/fapi/v1/algoOrder` |
+| OBI / дельта ленты | Дисбаланс стакана / перевес агрессивных покупок над продажами |
+| Killzone, Anchored VWAP | Окно открытия сессии; средневзвешенная цена с якоря (00:00 UTC) ± σ |
+| Ключ позиции | `монета + strategy_id`: параллельные независимые позиции разных стратегий |
+| MetaApi | Облачный шлюз к MT5 (пакет `MetaTrader5` — только Windows, VPS — Linux) |
+| Плоская свеча | Свеча O=H=L=C, объём 0 — заполнитель закрытого рынка |
+| MCP | Протокол, по которому ИИ-приложение вызывает «инструменты» локального сервера (здесь — чтение статистики из БД) |
