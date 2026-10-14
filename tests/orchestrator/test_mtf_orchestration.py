@@ -324,11 +324,41 @@ def test_orchestrator_runs_the_real_vwap_strategy_on_the_5m_clock_only():
     log = MemoryEventLog()
     tracker = VirtualTracker(log, equity=10_000.0)
     orch = Orchestrator([vwap], {VWAP_REVERSION: Route(Mode.SHADOW, tracker)}, log, max_signal_age_ms=10**12)
-    frame = vwap_frame().head(62)  # сигнал шорта на баре 61 (касание 3 sd на баре 60, поглощение на 61)
-    for end in range(55, 62):
+    # кадр >= суток (288 баров): полночь на строке 240, к строке 301 в новых сутках накоплено 61 бар; касание 3 sd на строке 300, поглощение на 301
+    frame = vwap_frame(n=320, at=300, offset=48).head(302)
+    for end in range(295, 302):
         orch.on_context(FeatureContext(SYM, "5m", M5, frame.head(end), end * M5 + 1000))
-    events = orch.on_context(FeatureContext(SYM, "5m", M5, frame, 62 * M5 + 1000))
+    events = orch.on_context(FeatureContext(SYM, "5m", M5, frame, 302 * M5 + 1000))
     assert [e.kind for e in events] == ["signal_accepted"] and events[0].strategy == VWAP_REVERSION
     (trade,) = tracker.active()
     assert trade.signal.interval == "5m" and trade.signal.signal_id.startswith("VWAP_Reversion:BTCUSDT:5m:")
     assert orch.on_context(mk_ctx("15m", 0)) == ()  # 15m-свеча стратегию не запускает (в кадре нет колонок: вызов детектора упал бы)
+
+
+def test_vwap_history_guard_fails_loudly_at_startup_and_at_runtime():
+    from orchestrator.multi_strategies import VWAP_REVERSION
+    from orchestrator.registry import ensure_history_depth
+    from strategies.vwap_reversion import M5_MS, min_history_bars
+    from tests.strategies.test_multi_strategies import vwap_frame
+
+    assert M5_MS == config.INTERVAL_MS["5m"] and min_history_bars(M5) == 300 and min_history_bars(M15) == 108  # сутки + запас 12 баров
+    five = build_strategies(SHADOW_STRATEGIES, mtf=True, interval="15m")
+    ensure_history_depth(five, 300, "15m")  # граница: ровно 300 - можно
+    for bad in (299, 150, 100):
+        with pytest.raises(ConfigError, match="--history >= 300"):
+            ensure_history_depth(five, bad, "15m")
+    legacy = build_strategies(SHADOW_STRATEGIES, interval="15m")  # MTF выключен: VWAP на 15m, хватает 108
+    ensure_history_depth(legacy, 108, "15m")
+    with pytest.raises(ConfigError, match="15m"):
+        ensure_history_depth(legacy, 107, "15m")
+    ensure_history_depth([s for s in five if s.name != VWAP_REVERSION], 100, "15m")  # без VWAP глубина не проверяется
+    (vwap,) = build_strategies((VWAP_REVERSION,), mtf=True, interval="15m")
+    short = vwap_frame(n=287, at=270, offset=0)  # 287 свечей: целых суток нет
+    with pytest.raises(DataError, match="целые сутки"):
+        vwap.detect(FeatureContext(SYM, "5m", M5, short, 1))
+    assert vwap.detect(FeatureContext(SYM, "5m", M5, vwap_frame(n=288, at=270), 1)) == ()  # 288: ровно сутки - проходит (сигнала на последней строке нет)
+    import inspect
+
+    from scripts import shadow_run
+
+    assert "ensure_history_depth(strategies, opts.history, opts.interval)" in inspect.getsource(shadow_run.shadow_main)

@@ -11,6 +11,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+import config
+
 from features.smc import SmcParams, add_features
 from strategies.counter_trend import CounterTrendParams, detect_counter_trend
 from strategies.killzones import DAY_MS, HOUR_MS, KillzoneParams, detect_killzones
@@ -162,22 +164,23 @@ def test_killzone_params_validation():
 # ======================================================================================== E: VWAP_Reversion
 
 
-M5 = 300_000  # рабочий таймфрейм VWAP_Reversion с 2026-10-15; окна по умолчанию (48 баров = 4 часа, 9 баров = 45 минут) заданы для него
+M5 = config.INTERVAL_MS["5m"]  # рабочий таймфрейм VWAP_Reversion с 2026-10-15; окна по умолчанию (48 баров = 4 часа, 9 баров = 45 минут) заданы для него
 
 
-def vwap_frame(n: int = 80, **series) -> pl.DataFrame:
+def vwap_frame(n: int = 80, at: int = 60, offset: int = 0, **series) -> pl.DataFrame:
     """Сутки 00:00 UTC, шаг 5 минут. Закрытие колеблется 99.5 / 100.5 (sd ~ 0.5, полоса 3 sd ~ 101.5), объём 10. Бар 60 - всплеск до 103 (касание полосы; к нему
-    накоплено 61 бар суток >= 48), бар 61 - медвежье поглощение (открытие >= закрытия 60, закрытие <= открытия 60)."""
+    накоплено 61 бар суток >= 48), бар 61 - медвежье поглощение (открытие >= закрытия 60, закрытие <= открытия 60). `at` сдвигает пару баров (событие на at, at + 1),
+    `offset` - сдвиг сетки времени в барах (чтобы полночь пришлась на нужную строку)."""
     close = {i: 99.5 if i % 2 else 100.5 for i in range(n)}
     base = {"close": close, "open": {i: 100.0 for i in range(n)}, "high": {i: close[i] + 0.2 for i in range(n)}, "low": {i: close[i] - 0.2 for i in range(n)}}
-    base["high"].update({60: 103.0, 61: 102.7})
-    base["open"].update({60: 100.5, 61: 102.6})
-    base["close"].update({60: 102.4, 61: 100.3})
-    base["low"].update({60: 100.4, 61: 100.1})
+    base["high"].update({at: 103.0, at + 1: 102.7})
+    base["open"].update({at: 100.5, at + 1: 102.6})
+    base["close"].update({at: 102.4, at + 1: 100.3})
+    base["low"].update({at: 100.4, at + 1: 100.1})
     for k, v in series.items():
         base.setdefault(k, {}).update(v)
     df = with_cols(frame(n, **base), volume=10.0)
-    return df.with_columns((pl.int_range(pl.len(), dtype=pl.Int64) * M5).alias("open_time"))
+    return df.with_columns(((pl.int_range(pl.len(), dtype=pl.Int64) + offset) * M5).alias("open_time"))
 
 
 def test_vwap_default_windows_keep_the_calendar_time_of_the_approved_m15_values():

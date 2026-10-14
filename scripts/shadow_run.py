@@ -49,7 +49,7 @@ from orchestrator.journal import JsonlEventLog
 from orchestrator.kline_feed import MultiFeed, SmcKlineFeed
 from orchestrator.microstructure import DepthFeed, MicroStructure
 from orchestrator.mtf import MtfState
-from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, approved_interval, build_strategies, plans_for, strategy_allowed
+from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, approved_interval, build_strategies, ensure_history_depth, plans_for, strategy_allowed
 from orchestrator.strategies import SMC_PRO_TREND
 from orchestrator.tick_feed import TickFeed
 from orchestrator.tracker import VirtualTracker
@@ -184,6 +184,7 @@ async def shadow_main(opts: Options) -> None:
                 if mtf and mt5_client is not None and opts.interval != "15m":
                     raise ConfigError("MT5-символы поддерживают только --interval 15m (рабочий 15m собирается из M5)")
                 strategies = build_strategies(names, mtf=mtf, interval=opts.interval)
+                ensure_history_depth(strategies, opts.history, opts.interval)  # до сети: VWAP_Reversion без целых суток в кадре молча не торгует
                 tracker = VirtualTracker(events, equity=opts.equity, recorder=recorder, plans=plans_for(names))
                 live = None
                 sink = tracker

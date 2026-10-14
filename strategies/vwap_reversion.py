@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
+import config
 from features import defaults as D
 from strategies.killzones import DAY_MS
 from utils.errors import ConfigError, DataError
@@ -32,7 +33,14 @@ SIDES = ("short", "long")
 
 REF_MIN_DAY_BARS = 16  # исходные пороги заданы в барах M15: 4 часа накопления суток и окно касания 45 минут (утверждённые 2026-10-11)
 REF_TOUCH_LOOKBACK = 3
-M5_MS = 300_000
+M5_MS = config.INTERVAL_MS["5m"]  # рабочий таймфрейм по умолчанию - из общей таблицы интервалов, без второй копии константы
+DAY_MARGIN_BARS = 12  # запас сверх одних суток при проверке глубины истории на старте
+
+
+def min_history_bars(interval_ms: int) -> int:
+    """Минимальная глубина истории кадра (`--history`), при которой суточный якорь всегда в кадре: сутки + запас (на M5: 288 + 12 = 300).
+    Короче - первая свеча суток выпадает из кадра, `_anchored` ложно, и сигналов нет молча."""
+    return DAY_MS // interval_ms + DAY_MARGIN_BARS
 
 
 @dataclass(frozen=True)

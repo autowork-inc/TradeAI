@@ -19,7 +19,7 @@ from orchestrator.types import Direction, FeatureContext, Kind, Signal, geometry
 from strategies.counter_trend import CounterTrendParams, detect_counter_trend
 from strategies.killzones import DAY_MS, HOUR_MS, KillzoneParams, detect_killzones
 from strategies.obi_breakout import DELTA_COLUMN, OBI_COLUMN, ObiParams, detect_obi_breakout
-from strategies.vwap_reversion import VwapParams, detect_vwap_reversion
+from strategies.vwap_reversion import VwapParams, detect_vwap_reversion, min_history_bars
 from utils.errors import DataError
 
 SMC_COUNTER_TREND = "SMC_Counter_Trend"
@@ -136,6 +136,10 @@ class StrategyVwapReversion:
     def detect(self, ctx: FeatureContext) -> tuple[Signal, ...]:
         if self.interval is not None and ctx.interval != self.interval:  # Оркестратор такой контекст не передаёт; прямой вызов - баг (R1)
             raise DataError(f"{self.name}: стратегия считается только на {self.interval}, получен контекст {ctx.symbol} {ctx.interval}")
+        day_bars = DAY_MS // ctx.interval_ms
+        if ctx.frame.height < day_bars:  # суточный якорь не поместился бы в кадр: сигналов не было бы молча - падаем громко (R1)
+            raise DataError(f"{self.name} {ctx.symbol}: в кадре {ctx.frame.height} свечей {ctx.interval}, а нужны целые сутки ({day_bars}) для якоря VWAP: "
+                            f"увеличьте --history до {min_history_bars(ctx.interval_ms)} и больше / проверьте глубину истории источника")
         det = detect_vwap_reversion(ctx.frame, self.params)
         last = _last(det)
         out = []

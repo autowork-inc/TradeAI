@@ -34,7 +34,7 @@ from orchestrator.multi_strategies import (
 from orchestrator.strategies import SMC_PRO_TREND, Strategy, StrategySMC
 from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan
 from strategies.smc_setups import SmcSetupParams
-from strategies.vwap_reversion import VwapParams
+from strategies.vwap_reversion import VwapParams, min_history_bars
 from utils.errors import ConfigError
 
 SHADOW_STRATEGIES = (SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION)
@@ -79,6 +79,19 @@ def approved_interval(strategies: Sequence[Strategy], approved: Collection[str],
     if len(found) != 1:
         raise ConfigError(f"Одобренные для live стратегии {sorted(approved)} работают на таймфреймах {sorted(found) or 'нет'}: нужен ровно один")
     return found.pop()
+
+
+def ensure_history_depth(strategies: Sequence[Strategy], history: int, default_interval: str) -> None:
+    """Проверка глубины истории на старте (до сети): суточный якорь VWAP_Reversion требует в кадре целые сутки + запас (на 5m: 300 свечей). Короче - стратегия молча
+    не давала бы сигналов (кадр без начала суток), поэтому ConfigError сразу - процесс падает и уходит на ретрай, а не торгует вполсилы."""
+    for s in strategies:
+        if s.name != VWAP_REVERSION:
+            continue
+        interval = getattr(s, "interval", None) or default_interval
+        need = min_history_bars(config.INTERVAL_MS[interval])
+        if history < need:
+            raise ConfigError(f"{VWAP_REVERSION} на {interval} требует --history >= {need} (целые сутки для суточного якоря VWAP + запас), задано {history}: "
+                              f"без этого стратегия молча не давала бы сигналов")
 
 
 def build_strategies(names: Sequence[str] = SHADOW_STRATEGIES, *, mtf: bool = False, interval: str | None = None) -> list[Strategy]:
