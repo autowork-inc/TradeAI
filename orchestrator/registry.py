@@ -72,18 +72,10 @@ def vwap_reversion_on(interval: str) -> StrategyVwapReversion:
     return StrategyVwapReversion(VwapParams.for_interval(config.INTERVAL_MS[interval]), interval=interval)
 
 
-def approved_interval(strategies: Sequence[Strategy], approved: Collection[str], default: str) -> str:
-    """Единый рабочий таймфрейм одобренных для live стратегий (LiveExecutionEngine живёт по свечам одного таймфрейма: сроки заявок и тайм-аут считаются в его барах).
-    Стратегии без своего таймфрейма считаются работающими на `default`. Разные таймфреймы или пустой набор - ConfigError (R1)."""
-    found = {getattr(s, "interval", None) or default for s in strategies if s.name in approved}
-    if len(found) != 1:
-        raise ConfigError(f"Одобренные для live стратегии {sorted(approved)} работают на таймфреймах {sorted(found) or 'нет'}: нужен ровно один")
-    return found.pop()
-
-
 def ensure_history_depth(strategies: Sequence[Strategy], history: int, default_interval: str) -> None:
-    """Проверка глубины истории на старте (до сети): суточный якорь VWAP_Reversion требует в кадре целые сутки + запас (на 5m: 300 свечей). Короче - стратегия молча
-    не давала бы сигналов (кадр без начала суток), поэтому ConfigError сразу - процесс падает и уходит на ретрай, а не торгует вполсилы."""
+    """Проверка глубины истории на старте (до сети): суточный якорь VWAP_Reversion требует в кадре целые сутки + запас (на 15m: 96 + 12 = 108 свечей, на 5m: 300).
+    Короче - стратегия молча не давала бы сигналов (кадр без начала суток), поэтому ConfigError сразу - процесс падает и уходит на ретрай, а не торгует вполсилы.
+    Порог берётся по таймфрейму самой стратегии, а не фиксированным числом: на 15m 300 свечей (по умолчанию) - запас почти втрое."""
     for s in strategies:
         if s.name != VWAP_REVERSION:
             continue
@@ -97,8 +89,9 @@ def ensure_history_depth(strategies: Sequence[Strategy], history: int, default_i
 def build_strategies(names: Sequence[str] = SHADOW_STRATEGIES, *, mtf: bool = False, interval: str | None = None) -> list[Strategy]:
     """Экземпляры стратегий по strategy_id. Неизвестное имя или дубль - ConfigError (R1).
 
-    mtf=True: SMC_Pro_Trend работает на 5m с колонками 1h/1d (`smc_pro_trend_mtf`) и вместе с ней VWAP_Reversion (5m; с 2026-10-15 - один такт в живом движке),
-    остальные - на `interval` (рабочий 15m): Оркестратор считает каждую стратегию только на закрытии её таймфрейма. mtf=False (по умолчанию): прежний одно-таймфреймовый режим; `interval` (если задан) закрепляет за всеми стратегиями таймфрейм."""
+    mtf=True: SMC_Pro_Trend работает на 5m с колонками 1h/1d (`smc_pro_trend_mtf`), остальные (в т.ч. VWAP_Reversion с исходными окнами 16 / 3) - на `interval`
+    (рабочий 15m): Оркестратор считает каждую стратегию только на закрытии её таймфрейма, а живой движок ведёт каждую сделку по барам её таймфрейма.
+    mtf=False (по умолчанию): прежний одно-таймфреймовый режим; `interval` (если задан) закрепляет за всеми стратегиями таймфрейм."""
     if len(set(names)) != len(names):
         raise ConfigError(f"Дубли в наборе стратегий: {list(names)}")
     if (SMC_PRO_TREND in names or SMC_COUNTER_TREND in names) and not D.HTF_FILTER_ENABLED:
@@ -110,7 +103,7 @@ def build_strategies(names: Sequence[str] = SHADOW_STRATEGIES, *, mtf: bool = Fa
         SMC_COUNTER_TREND: StrategyCounterTrend,
         OBI_BREAKOUT: StrategyObiBreakout,
         ICT_KILLZONES: StrategyKillzones,
-        VWAP_REVERSION: (lambda: vwap_reversion_on(D.MTF_BASE_INTERVAL)) if mtf else (lambda: vwap_reversion_on(interval) if interval else StrategyVwapReversion()),
+        VWAP_REVERSION: (lambda: vwap_reversion_on(interval)) if interval else StrategyVwapReversion,  # свой 15m: окна 16 / 3 (откат с 5m 2026-10-15)
     }
     unknown = [n for n in names if n not in factories]
     if unknown:

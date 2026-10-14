@@ -119,6 +119,7 @@ class LiveTrade:
     recent_bars: list[list[float]] = field(default_factory=list)  # [high, low] последних закрытых свечей (трейлинг по теням)
     cancel_reason: str | None = None  # запрошена отмена лимитки: invalidated | tp_before_fill | ttl | risk_blocked
     adopted: bool = False
+    interval: str | None = None  # таймфрейм сигнала (SMC_Pro_Trend - 5m, VWAP_Reversion - 15m): сделка живёт по барам СВОЕГО таймфрейма; None - запасной таймфрейм движка
 
     @property
     def trade_id(self) -> str:
@@ -231,6 +232,15 @@ class LiveExecutionEngine:
     def trades(self) -> dict[str, LiveTrade]:
         return dict(self._trades)
 
+    def _trade_ms(self, t: LiveTrade) -> int:
+        """Длительность бара таймфрейма сделки; у сделки без таймфрейма (подобранной с биржи после перезапуска) - запасной таймфрейм движка."""
+        if t.interval is None:
+            return self._interval_ms
+        ms = config.INTERVAL_MS.get(t.interval)
+        if ms is None:
+            raise ConfigError(f"{t.trade_id}: неизвестный таймфрейм сделки {t.interval!r}")
+        return ms
+
     def enqueue(self, signal: Signal, now_ms: int) -> None:
         """Синхронно (из обработчика свечи): сигнал в очередь исполнителя. Сеть здесь запрещена."""
         self._queue.put_nowait((signal, now_ms))
@@ -251,13 +261,12 @@ class LiveExecutionEngine:
 
     def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: BarInfo | None = None, interval: str | None = None) -> None:
         """Закрытие свечи: отмены лимитки (те же правила, что у VirtualTracker, R8), тайм-аут позиции, трейлинг runner'а.
-        Движок живёт по свечам ОДНОГО таймфрейма (`interval_ms` из конструктора - рабочий таймфрейм одобренных стратегий): бары других таймфреймов пропускаются."""
-        if interval is not None and config.INTERVAL_MS.get(interval) != self._interval_ms:
-            return
+        Стратегии могут жить на РАЗНЫХ таймфреймах (SMC_Pro_Trend - 5m, VWAP_Reversion - 15m): каждая сделка ведётся по барам таймфрейма своего сигнала
+        (`LiveTrade.interval`), бары других таймфреймов для неё пропускаются; `interval=None` (старые вызовы) - любой бар, как раньше."""
         if self.router is not None:
-            self.router.on_bar_closed(symbol, bar)
+            self.router.on_bar_closed(symbol, bar, interval)
         t = self._trades.get(symbol)
-        if t is None:
+        if t is None or (interval is not None and config.INTERVAL_MS.get(interval) != self._trade_ms(t)):
             return
         t.bars_closed += 1
         sgn = t.sgn
@@ -268,7 +277,7 @@ class LiveExecutionEngine:
                 elif t.plan.tp is not None and sgn * close <= sgn * t.plan.tp:
                     t.cancel_reason = "tp_before_fill"
         elif t.status == OPEN:
-            if t.fill_bar_no is not None and t.bars_closed - t.fill_bar_no >= self._max_hold:
+            if t.fill_bar_no is not None and t.bars_closed - t.fill_bar_no >= self._max_hold * D.bars_scale(self._trade_ms(t)):
                 t.timeout_pending = True
             else:
                 self._trail(t, bar)
@@ -371,7 +380,7 @@ class LiveExecutionEngine:
         if isinstance(plan, LiveRejected):
             self._emit_signal(now_ms, "live_rejected", signal, {"reason": plan.reason, **(plan.detail or {})})
             return
-        trade = LiveTrade(plan, now_ms, entry_cid=client_id(self.client.id_prefix, "E", plan.signal_id))
+        trade = LiveTrade(plan, now_ms, entry_cid=client_id(self.client.id_prefix, "E", plan.signal_id), interval=signal.interval)
         self._trades[plan.symbol] = trade
         res: OrderResult | None = None
         ok = False
@@ -633,7 +642,8 @@ class LiveExecutionEngine:
         self._save()
 
     async def _poll_entry(self, trade: LiveTrade, now: int) -> None:
-        if trade.cancel_reason is None and now - trade.created_ms >= self._ttl_bars * self._interval_ms:
+        ms = self._trade_ms(trade)
+        if trade.cancel_reason is None and now - trade.created_ms >= self._ttl_bars * D.bars_scale(ms) * ms:  # срок лимитки в календарном времени не зависит от таймфрейма
             trade.cancel_reason = "ttl"
         try:
             res = await self.client.get_order(trade.plan.symbol, trade.entry_cid)
@@ -941,8 +951,8 @@ async def build_live_engine(
         max_open_positions=config.LIVE_MAX_OPEN_POSITIONS,
     )
     clock = now_ms or (lambda: int(time.time() * 1000))
-    scale = D.bars_scale(interval_ms)  # сроки в барах заданы для M15; на 5m календарное время сохраняется (как у VirtualTracker)
-    engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush, limit_ttl_bars=D.LIMIT_TTL_BARS * scale,
-                                 max_hold_bars=config.LIVE_MAX_HOLD_BARS * scale, store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router)
+    # сроки в барах (10 / 192) заданы для M15; на каждой сделке они умножаются по её таймфрейму (5m x3): календарное время то же, что у VirtualTracker
+    engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush,
+                                 store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router)
     await engine.recover(symbols)
     return engine

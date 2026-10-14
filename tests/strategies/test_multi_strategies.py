@@ -11,8 +11,6 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-import config
-
 from features.smc import SmcParams, add_features
 from strategies.counter_trend import CounterTrendParams, detect_counter_trend
 from strategies.killzones import DAY_MS, HOUR_MS, KillzoneParams, detect_killzones
@@ -164,13 +162,10 @@ def test_killzone_params_validation():
 # ======================================================================================== E: VWAP_Reversion
 
 
-M5 = config.INTERVAL_MS["5m"]  # рабочий таймфрейм VWAP_Reversion с 2026-10-15; окна по умолчанию (48 баров = 4 часа, 9 баров = 45 минут) заданы для него
-
-
-def vwap_frame(n: int = 80, at: int = 60, offset: int = 0, **series) -> pl.DataFrame:
-    """Сутки 00:00 UTC, шаг 5 минут. Закрытие колеблется 99.5 / 100.5 (sd ~ 0.5, полоса 3 sd ~ 101.5), объём 10. Бар 60 - всплеск до 103 (касание полосы; к нему
-    накоплено 61 бар суток >= 48), бар 61 - медвежье поглощение (открытие >= закрытия 60, закрытие <= открытия 60). `at` сдвигает пару баров (событие на at, at + 1),
-    `offset` - сдвиг сетки времени в барах (чтобы полночь пришлась на нужную строку)."""
+def vwap_frame(n: int = 40, at: int = 30, offset: int = 0, **series) -> pl.DataFrame:
+    """Сутки 00:00 UTC, шаг 15 минут. Закрытие колеблется 99.5 / 100.5 (sd ~ 0.5, полоса 3 sd ~ 101.5), объём 10. Бар 30 - всплеск до 103 (касание полосы),
+    бар 31 - медвежье поглощение (открытие >= закрытия 30, закрытие <= открытия 30). `at` сдвигает пару баров (событие на at, at + 1), `offset` - сдвиг сетки
+    времени в барах (чтобы полночь пришлась на нужную строку, а кадр был не короче суток)."""
     close = {i: 99.5 if i % 2 else 100.5 for i in range(n)}
     base = {"close": close, "open": {i: 100.0 for i in range(n)}, "high": {i: close[i] + 0.2 for i in range(n)}, "low": {i: close[i] - 0.2 for i in range(n)}}
     base["high"].update({at: 103.0, at + 1: 102.7})
@@ -180,15 +175,7 @@ def vwap_frame(n: int = 80, at: int = 60, offset: int = 0, **series) -> pl.DataF
     for k, v in series.items():
         base.setdefault(k, {}).update(v)
     df = with_cols(frame(n, **base), volume=10.0)
-    return df.with_columns(((pl.int_range(pl.len(), dtype=pl.Int64) + offset) * M5).alias("open_time"))
-
-
-def test_vwap_default_windows_keep_the_calendar_time_of_the_approved_m15_values():
-    p = VwapParams()
-    assert (p.min_day_bars, p.touch_lookback) == (48, 9) and p.min_day_bars * M5 == 16 * STEP and p.touch_lookback * M5 == 3 * STEP  # 4 часа и 45 минут
-    p15 = VwapParams.for_interval(STEP)
-    assert (p15.min_day_bars, p15.touch_lookback) == (16, 3) and VwapParams.for_interval(M5) == p
-    assert VwapParams.for_interval(M5, sd_mult=2.0).sd_mult == 2.0 and VwapParams.for_interval(3_600_000).min_day_bars == 16  # старше M15 - не меньше исходных
+    return df.with_columns(((pl.int_range(pl.len(), dtype=pl.Int64) + offset) * STEP).alias("open_time")) if offset else df
 
 
 def test_vwap_matches_manual_cumulative_calculation():
@@ -204,38 +191,25 @@ def test_vwap_matches_manual_cumulative_calculation():
         assert out["vw_upper"][i] == pytest.approx(vwap + 3 * sd, abs=1e-9) and out["vw_lower"][i] == pytest.approx(vwap - 3 * sd, abs=1e-9)
 
 
-def test_vwap_anchor_resets_at_midnight_utc_on_5m_bars():
-    """288 баров M5 в сутках: на баре 288 (00:00 следующих суток) накопление начинается заново, VWAP = типичная цена этого бара."""
-    n = 300
-    df = with_cols(frame(n), volume=10.0).with_columns((pl.int_range(pl.len(), dtype=pl.Int64) * M5).alias("open_time"),
-                                                       (100.0 + pl.int_range(pl.len(), dtype=pl.Int64).cast(pl.Float64) * 0.01).alias("close"))
-    df = df.with_columns((pl.col("close") + 0.5).alias("high"), (pl.col("close") - 0.5).alias("low"), pl.col("close").alias("open"))
-    out = detect_vwap_reversion(df)
-    tp = (df["high"] + df["low"] + df["close"]) / 3
-    assert out["vw_vwap"][288] == pytest.approx(tp[288]) and out["vw_sd"][288] == pytest.approx(0.0, abs=1e-9)  # новые сутки: один бар
-    assert out["vw_vwap"][287] == pytest.approx(tp[:288].mean())  # предыдущие сутки накоплены полностью (288 баров, равные объёмы)
-    assert out["vw_vwap"][289] == pytest.approx((tp[288] + tp[289]) / 2)
-
-
 def test_vwap_short_on_bearish_engulfing_after_touching_the_third_deviation():
     out = detect_vwap_reversion(vwap_frame())
-    assert idx(out, "vw_short_signal") == [61] and not any(out["vw_long_signal"])
-    assert out["vw_short_sl"][61] == pytest.approx(103.0 + 0.2)  # максимум за окно касания (бары 53-61) + 0.2 ATR
-    assert out["high"][60] >= out["vw_upper"][60] and out["high"][59] < out["vw_upper"][59]  # касание 3-го отклонения случилось на баре 60
+    assert idx(out, "vw_short_signal") == [31] and not any(out["vw_long_signal"])
+    assert out["vw_short_sl"][31] == pytest.approx(103.0 + 0.2)  # максимум за окно касания (бары 29-31) + 0.2 ATR
+    assert out["high"][30] >= out["vw_upper"][30] and out["high"][29] < out["vw_upper"][29]  # касание 3-го отклонения случилось на баре 30
 
 
 def test_vwap_long_is_the_mirror():
     df = vwap_frame()
     m = df.with_columns((200.0 - pl.col("low")).alias("high"), (200.0 - pl.col("high")).alias("low"), (200.0 - pl.col("open")).alias("open"), (200.0 - pl.col("close")).alias("close"))
     out = detect_vwap_reversion(m)
-    assert idx(out, "vw_long_signal") == [61] and not any(out["vw_short_signal"])
-    assert out["vw_long_sl"][61] == pytest.approx(200.0 - 103.0 - 0.2)
+    assert idx(out, "vw_long_signal") == [31] and not any(out["vw_short_signal"])
+    assert out["vw_long_sl"][31] == pytest.approx(200.0 - 103.0 - 0.2)
 
 
 @pytest.mark.parametrize("name, kw", [
-    ("нет разворотного паттерна (бар 61 бычий)", {"series": {"open": {61: 100.0}, "close": {61: 101.5}, "high": {61: 101.7}}}),
+    ("нет разворотного паттерна (бар 31 бычий)", {"series": {"open": {31: 100.0}, "close": {31: 101.5}, "high": {31: 101.7}}}),
     ("касания полосы не было (поглощение есть, но цена не доходила до 3 sd)",
-     {"series": {"high": {60: 100.9, 61: 100.9}, "open": {60: 100.4, 61: 100.9}, "close": {60: 100.8}, "low": {60: 100.3}}}),
+     {"series": {"high": {30: 100.9, 31: 100.9}, "open": {30: 100.4, 31: 100.9}, "close": {30: 100.8}, "low": {30: 100.3}}}),
 ])
 def test_vwap_each_condition_is_required(name, kw):
     df = vwap_frame(**kw["series"])
@@ -243,39 +217,46 @@ def test_vwap_each_condition_is_required(name, kw):
 
 
 def test_vwap_touch_may_precede_the_reversal_pattern_within_the_lookback_window():
-    """Касание на баре 60, нейтральный бар 61, поглощение на баре 62 (до касания - два бара): окно 9 баров (45 минут) это допускает, окно 2 - нет."""
-    series = {"high": {61: 100.9, 62: 101.1}, "open": {61: 100.0, 62: 101.0}, "close": {61: 100.8, 62: 99.9}, "low": {61: 99.9, 62: 99.8}}
+    """Касание на баре 30, нейтральный бар 31, поглощение на баре 32 (до касания - два бара): окно 3 бара это допускает, окно 2 - нет."""
+    series = {"high": {31: 100.9, 32: 101.1}, "open": {31: 100.0, 32: 101.0}, "close": {31: 100.8, 32: 99.9}, "low": {31: 99.9, 32: 99.8}}
     df = vwap_frame(**series)
     out = detect_vwap_reversion(df)
-    assert idx(out, "vw_short_signal") == [62] and out["high"][62] < out["vw_upper"][62]  # на самом баре 62 касания полосы нет
-    assert out["vw_short_sl"][62] == pytest.approx(103.0 + 0.2)  # SL берёт экстремум окна, а не только свечи паттерна
+    assert idx(out, "vw_short_signal") == [32] and out["high"][32] < out["vw_upper"][32]  # на самом баре 32 касания полосы нет
+    assert out["vw_short_sl"][32] == pytest.approx(103.0 + 0.2)  # SL берёт экстремум окна, а не только свечи паттерна
     assert idx(detect_vwap_reversion(df, VwapParams(touch_lookback=2)), "vw_short_signal") == []
-
-
-def test_vwap_touch_window_is_nine_5m_bars_not_three():
-    """Касание на баре 60; поглощение через 8 баров (68) ещё в окне 9, через 9 баров (69) - уже нет. С окном M15 (3 бара) сигнала бы не было вовсе."""
-    for engulf, expected in ((68, [68]), (69, [])):
-        series = {"high": {i: 100.6 for i in range(61, engulf)}, "open": {i: 100.0 for i in range(61, engulf)}, "close": {i: 100.3 for i in range(61, engulf)}}
-        series["high"].update({engulf: 101.1})
-        series["open"].update({engulf: 101.0})
-        series["close"].update({engulf: 99.9})
-        series["low"] = {engulf: 99.8}
-        df = vwap_frame(**series)
-        assert idx(detect_vwap_reversion(df), "vw_short_signal") == expected, engulf
-    assert idx(detect_vwap_reversion(vwap_frame(**series), VwapParams.for_interval(STEP)), "vw_short_signal") == []
 
 
 def test_vwap_needs_the_day_anchor_and_enough_bars():
     full = vwap_frame()
     assert idx(detect_vwap_reversion(full.slice(5)), "vw_short_signal") == []  # кадр начинается не с начала суток: VWAP был бы другим
-    assert idx(detect_vwap_reversion(full, VwapParams(min_day_bars=70)), "vw_short_signal") == []  # на бар 61 суток накоплено меньше 70 свечей
-    assert idx(detect_vwap_reversion(vwap_frame().slice(0, 62), VwapParams(min_day_bars=62)), "vw_short_signal") == [61]  # ровно 62 свечи - достаточно
-    young = vwap_frame().with_columns(((pl.int_range(pl.len(), dtype=pl.Int64) + 256) * M5).alias("open_time"))  # полночь на баре 32: к бару 61 накоплено 30 баров суток
-    assert idx(detect_vwap_reversion(young), "vw_short_signal") == []  # меньше 48 баров суток: sd вырожден, сигнала нет
+    assert idx(detect_vwap_reversion(full, VwapParams(min_day_bars=40)), "vw_short_signal") == []  # на бар 31 суток накоплено меньше 40 свечей
     with pytest.raises(ConfigError):
         VwapParams(touch_lookback=0)
     with pytest.raises(DataError, match="volume"):
         detect_vwap_reversion(full.drop("volume"))
+
+
+def test_vwap_defaults_are_the_original_m15_windows_and_for_interval_keeps_the_calendar_time():
+    p = VwapParams()
+    assert (p.min_day_bars, p.touch_lookback) == (16, 3)  # исходные значения 2026-10-11: 4 часа накопления суток, касание за 45 минут
+    assert VwapParams.for_interval(STEP) == p
+    m5 = VwapParams.for_interval(300_000, sd_mult=2.0)  # 5m поддерживается (эксперимент 2026-10-15), но не используется: те же 4 часа и 45 минут
+    assert (m5.min_day_bars, m5.touch_lookback, m5.sd_mult) == (48, 9, 2.0)
+    assert VwapParams.for_interval(3_600_000).min_day_bars == 16  # старше M15 - не меньше исходных
+
+
+def test_vwap_min_history_covers_the_day_anchor_with_a_margin():
+    from strategies.vwap_reversion import min_history_bars
+
+    assert min_history_bars(STEP) == 96 + 12 == 108 and min_history_bars(300_000) == 288 + 12 == 300 and min_history_bars(3_600_000) == 24 + 12
+
+
+def test_vwap_frame_that_lost_the_start_of_the_day_is_silent_so_the_depth_must_be_guarded():
+    """Тот же сигнал (бар 99, полночь на строке 48): в кадре из 100 баров он есть, в кадре из 40 последних (начало суток выпало) - детектор молчит без ошибки.
+    Поэтому глубину охраняют `ensure_history_depth` (старт) и StrategyVwapReversion.detect (каждая свеча)."""
+    df = vwap_frame(n=120, at=98, offset=48).head(100)
+    assert idx(detect_vwap_reversion(df), "vw_short_signal") == [99]
+    assert idx(detect_vwap_reversion(df.slice(60, 40)), "vw_short_signal") == []
 
 
 # ========================================================================================== C: OBI_Breakout
@@ -347,11 +328,6 @@ def pipeline_features(df: pl.DataFrame) -> pl.DataFrame:
     return add_features(df, FP, interval_ms=STEP)
 
 
-def on_m5(d: pl.DataFrame) -> pl.DataFrame:
-    """Та же случайная серия на сетке M5 (позиция строки в сутках сохраняется: open_time' = номер бара * 5 минут), чтобы суточный якорь VWAP считался по 288 барам."""
-    return d.with_columns((pl.col("open_time") // STEP * M5).alias("open_time"))
-
-
 def with_bias(f: pl.DataFrame) -> pl.DataFrame:
     """Детерминированный bias по времени свечи (causal): сменяется каждые 80 свечей."""
     return f.with_columns((((pl.col("open_time") // STEP // 80) % 3) - 1).cast(pl.Int8).alias("htf_bias"))
@@ -364,13 +340,13 @@ def with_micro(f: pl.DataFrame) -> pl.DataFrame:
 
 SOFT_CT = CounterTrendParams(min_sweep_atr=0.05, volume_mult=0.5)  # мягкие пороги: на случайных данных глубоких свипов почти нет
 SOFT_OBI = ObiParams(impulse_atr_mult=0.3, obi_min=0.2, delta_min=0.2, delta_volume_mult=0.5)
-SOFT_VW = VwapParams(sd_mult=1.5, min_day_bars=24, touch_lookback=9)  # на M5 (окна по умолчанию - 48 / 9 баров)
+SOFT_VW = VwapParams(sd_mult=1.5, min_day_bars=8)
 
 CASES = {  # имя -> (функция кадр свечей -> кадр с сигналами, колонки сигналов, число баров случайного ряда: сигналы редкие - нужен длинный)
     "counter_trend": (lambda d: detect_counter_trend(with_bias(pipeline_features(d)), SOFT_CT), ("ct_short_signal", "ct_long_signal"), 6000),
     "obi_breakout": (lambda d: detect_obi_breakout(with_micro(pipeline_features(d)), SOFT_OBI), ("obi_long_signal", "obi_short_signal"), 1500),
     "killzones": (lambda d: kz(pipeline_features(d)), ("kz_short_signal", "kz_long_signal"), 6000),
-    "vwap_reversion": (lambda d: detect_vwap_reversion(add_features(on_m5(d), FP, interval_ms=M5), SOFT_VW), ("vw_short_signal", "vw_long_signal"), 2500),
+    "vwap_reversion": (lambda d: detect_vwap_reversion(pipeline_features(d), SOFT_VW), ("vw_short_signal", "vw_long_signal"), 1500),
 }
 
 

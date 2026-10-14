@@ -379,3 +379,28 @@ def test_other_trade_errors_are_not_swallowed():
         with pytest.raises(MetaApiTradeError):
             await router.poll_mt5()
     asyncio.run(body())
+
+
+def test_mt5_trade_counts_only_bars_of_its_own_timeframe_and_timeout_scales():
+    """2026-10-15: SMC_Pro_Trend (5m) и VWAP_Reversion (15m) в одном движке; MT5-сделка ведётся по барам своего таймфрейма, max_hold (в барах M15) умножается."""
+    async def body():
+        router, rpc, _, t = await opened(max_hold=2)
+        await router.poll_mt5()
+        assert t.interval == "15m" and t.exit.bars_closed == 0  # сигнал тестового помощника - 15m
+        router.on_bar_closed(SYM, BarInfo(2001.0, 2000.0, 0.5), "5m")  # чужой таймфрейм: пропущен
+        assert t.exit.bars_closed == 0
+        router.on_bar_closed(SYM, BarInfo(2001.0, 2000.0, 0.5), "15m")
+        assert t.exit.bars_closed == 1 and t.exit.forced_reason is None
+        t.interval = "5m"  # та же позиция, но сделка на 5m: бары 15m не считаются, тайм-аут 2 * 3 = 6 баров
+        router.on_bar_closed(SYM, BarInfo(2001.0, 2000.0, 0.5), "15m")
+        assert t.exit.bars_closed == 1
+        for _ in range(5):
+            router.on_bar_closed(SYM, BarInfo(2001.0, 2000.0, 0.5), "5m")
+        assert t.exit.bars_closed == 6 and t.exit.fill_bar_no == 1 and t.exit.forced_reason is None  # 6 - 1 < 6: ещё не вышло
+        router.on_bar_closed(SYM, BarInfo(2001.0, 2000.0, 0.5), "5m")
+        assert t.exit.forced_reason == "timeout"
+        rec = t.to_record()
+        assert rec["interval"] == "5m" and Mt5Tracked.from_record(rec).interval == "5m"
+        del rec["interval"]
+        assert Mt5Tracked.from_record(rec).interval is None  # запись до этой версии: любой бар, как раньше
+    asyncio.run(body())

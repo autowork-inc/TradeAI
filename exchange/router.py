@@ -106,6 +106,7 @@ class Mt5Tracked:
     plan: Mt5OrderPlan | None = None
     adopted: bool = False
     exit_plan: ScaleOutPlan | None = None
+    interval: str | None = None  # таймфрейм сигнала: сделка ведётся по барам своего таймфрейма; None - любой бар (подобранная с брокера / старая запись)
     exit: Mt5Exit | None = None  # состояние сопровождения (создаётся, когда позиция впервые замечена у брокера)
     early_ticks: list[tuple[float, str]] = field(default_factory=list)  # тики между отправкой MARKET и первым опросом: проигрываются при создании состояния
 
@@ -289,7 +290,8 @@ class ExecutionRouter:
     def _track(self, p: Mt5Prepared, order: MetaApiOrder) -> Mt5Tracked:
         market = p.kind is not Kind.LIMIT
         t = Mt5Tracked(p.signal.signal_id, p.signal.strategy, p.signal.symbol, p.plan.broker_symbol, p.plan.side, p.kind, p.client_id, p.plan.lots,
-                       order.order_id, order.position_id if market else None, "open" if market else "pending", p.plan, exit_plan=p.exit_plan)
+                       order.order_id, order.position_id if market else None, "open" if market else "pending", p.plan, exit_plan=p.exit_plan,
+                       interval=p.signal.interval)
         self._tracked[t.symbol] = t
         self._save()  # сделка на диске сразу после отправки: после падения управление вернётся (recover_mt5)
         return t
@@ -306,11 +308,21 @@ class ExecutionRouter:
         elif not t.adopted and len(t.early_ticks) < 20_000:
             t.early_ticks.append((tick.price, tick.kind))  # позиция ещё не замечена опросом: лучшая цена и mark не теряются
 
-    def on_bar_closed(self, symbol: str, bar: BarInfo | None) -> None:
-        """Закрытие свечи: тайм-аут и трейлинг runner'а (исполняется следующим `poll_mt5`)."""
+    def on_bar_closed(self, symbol: str, bar: BarInfo | None, interval: str | None = None) -> None:
+        """Закрытие свечи: тайм-аут и трейлинг runner'а (исполняется следующим `poll_mt5`). Бары чужого таймфрейма сделки пропускаются; тайм-аут в барах
+        (`max_hold_bars` задан для M15) умножается по таймфрейму сделки: календарное время то же."""
         t = self._tracked.get(symbol)
-        if t is not None and t.status == "open" and t.exit is not None and self.mapper is not None:
-            mt5_exit.on_bar_closed(t.exit, bar, self.mapper.spec(symbol), self._max_hold)
+        if t is None or t.status != "open" or t.exit is None or self.mapper is None:
+            return
+        scale = 1
+        if t.interval is not None:
+            ms = config.INTERVAL_MS.get(t.interval)
+            if ms is None:
+                raise ConfigError(f"{t.signal_id}: неизвестный таймфрейм сделки {t.interval!r}")
+            if interval is not None and config.INTERVAL_MS.get(interval) != ms:
+                return
+            scale = D.bars_scale(ms)
+        mt5_exit.on_bar_closed(t.exit, bar, self.mapper.spec(symbol), self._max_hold * scale)
 
     async def poll_mt5(self) -> list[Mt5Event]:
         """Сверка живых MT5-сделок с брокером и сопровождение планом выхода. Один запрос позиций и один - ордеров на всё."""

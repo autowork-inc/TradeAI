@@ -49,7 +49,7 @@ from orchestrator.journal import JsonlEventLog
 from orchestrator.kline_feed import MultiFeed, SmcKlineFeed
 from orchestrator.microstructure import DepthFeed, MicroStructure
 from orchestrator.mtf import MtfState
-from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, approved_interval, build_strategies, ensure_history_depth, plans_for, strategy_allowed
+from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, build_strategies, ensure_history_depth, plans_for, strategy_allowed
 from orchestrator.strategies import SMC_PRO_TREND
 from orchestrator.tick_feed import TickFeed
 from orchestrator.tracker import VirtualTracker
@@ -191,9 +191,8 @@ async def shadow_main(opts: Options) -> None:
                 if config.TRADE_MODE == "live":  # ВЫКЛЮЧЕНО по умолчанию (TRADE_MODE=shadow): боевой код тогда даже не импортируется
                     from orchestrator.live_engine import LiveMirrorSink, build_live_engine
 
-                    live_interval = approved_interval(strategies, config.APPROVED_STRATEGIES, opts.interval)  # SMC_Pro_Trend и VWAP_Reversion - оба на 5m
                     live = await build_live_engine(session, events, symbols=crypto, strategy_names=names,
-                                                   interval_ms=config.INTERVAL_MS[live_interval],
+                                                   interval_ms=config.INTERVAL_MS[opts.interval],  # запасной таймфрейм; у каждой сделки свой (из сигнала): SMC_Pro_Trend 5m, VWAP 15m
                                                    flush=recorder.flush if recorder is not None else None)
                     sink = LiveMirrorSink(tracker, live)  # Shadow-трекер получает все сигналы как прежде; одобренные - ещё и боевой движок
                 orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder,

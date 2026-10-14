@@ -16,11 +16,11 @@ from exchange.binance_live import BinanceLiveClient
 from execution.state import SafeMode
 from orchestrator.journal import MemoryEventLog
 from orchestrator.live_engine import (
-    CLOSED, ENTRY, OPEN, LiveExecutionEngine, LiveExecutionError, LiveMirrorSink, LiveStateStore, build_live_engine,
+    CLOSED, ENTRY, OPEN, LiveExecutionEngine, LiveExecutionError, LiveMirrorSink, LiveStateStore, LiveTrade, build_live_engine,
 )
 from orchestrator.live_risk import utc_day_start_ms
 from orchestrator.tracker import Submission
-from orchestrator.types import Direction, Kind
+from orchestrator.types import BarInfo, Direction, Kind
 from tests.orchestrator.fake_live_rest import FakeRest, api_error, network_error
 from tests.orchestrator.live_helpers import BAR, FILTERS, STRATEGY, T0, manager, signal
 from utils.errors import ConfigError
@@ -640,10 +640,82 @@ def test_default_open_position_limit_is_four(tmp_path):
         manager(tmp_path, max_open_positions=0)
 
 
-def test_build_on_the_5m_clock_for_pro_trend_and_vwap_with_calendar_equal_limits(build_env, monkeypatch):
-    """2026-10-15: SMC_Pro_Trend и VWAP_Reversion идут на одном 5m такте; сроки заявки и тайм-аута пересчитаны (x3), чужие таймфреймы движок пропускает."""
+# ------------------------------------------------ стратегии на разных таймфреймах в одном движке (SMC_Pro_Trend 5m + VWAP_Reversion 15m)
+
+M5 = 300_000
+
+
+def two_clock_env(tmp_path):
+    """SMC_Pro_Trend на 5m (SOLUSDT) и VWAP_Reversion на 15m (XRPUSDT): обе лимитки стоят на бирже, у каждой сделки свой таймфрейм."""
+    import dataclasses
+
+    env = Env(tmp_path, risk_kw={"approved": (STRATEGY, "VWAP_Reversion")})
+    five = dataclasses.replace(signal(kind=Kind.LIMIT, entry=100.0, sl=98.0, tp=106.0, inval=98.0, n=1), interval="5m", bar_close_ms=T0 + M5)
+    fifteen = signal(strategy="VWAP_Reversion", symbol="XRPUSDT", kind=Kind.LIMIT, entry=100.0, sl=98.0, tp=106.0, inval=98.0, n=2)
+    run(env.engine.execute(five, NOW))
+    run(env.engine.execute(fifteen, NOW))
+    return env
+
+
+def test_one_engine_runs_a_5m_and_a_15m_strategy_each_on_its_own_bars(tmp_path):
+    env = two_clock_env(tmp_path)
+    a, b = env.engine.trades["SOLUSDT"], env.engine.trades["XRPUSDT"]
+    assert (a.interval, b.interval) == ("5m", "15m") and a.status == b.status == ENTRY  # сборка без ConfigError: общего таймфрейма не требуется
+    for k in range(1, 7):  # шесть закрытий 5m: считает только сделка на 5m
+        env.engine.on_bar_closed("SOLUSDT", T0 + k * M5, 100.0, NOW + k * M5, None, interval="5m")
+        env.engine.on_bar_closed("XRPUSDT", T0 + k * M5, 100.0, NOW + k * M5, None, interval="5m")
+    assert (a.bars_closed, b.bars_closed) == (6, 0)
+    for k in range(1, 3):  # два закрытия 15m: считает только сделка на 15m
+        env.engine.on_bar_closed("SOLUSDT", T0 + k * BAR, 100.0, NOW + k * BAR, None, interval="15m")
+        env.engine.on_bar_closed("XRPUSDT", T0 + k * BAR, 100.0, NOW + k * BAR, None, interval="15m")
+    assert (a.bars_closed, b.bars_closed) == (6, 2)
+    env.engine.on_bar_closed("SOLUSDT", T0, 100.0, NOW)  # вызов без таймфрейма (прежний контракт): считается любой бар
+    assert a.bars_closed == 7
+
+
+def test_limit_ttl_is_the_same_calendar_time_for_both_timeframes(tmp_path):
+    env = two_clock_env(tmp_path)
+    env.clock.t = NOW + 10 * BAR - 1  # 150 минут без миллисекунды
+    run(env.engine.poll())
+    assert set(env.engine.trades) == {"SOLUSDT", "XRPUSDT"}  # 30 баров 5m = 10 баров 15m: ещё живы обе
+    env.clock.t = NOW + 10 * BAR
+    run(env.engine.poll())
+    assert env.engine.trades == {} and [e.detail["reason"] for e in env.journal.of_kind("live_trade_cancelled")] == ["ttl", "ttl"]
+
+
+def test_position_timeout_in_bars_scales_with_the_trade_timeframe(tmp_path):
+    env = two_clock_env(tmp_path)
+    for sym in ("SOLUSDT", "XRPUSDT"):
+        env.rest.fill_limit(env.engine.trades[sym].entry_cid)
+    run(env.engine.poll())
+    a, b = env.engine.trades["SOLUSDT"], env.engine.trades["XRPUSDT"]
+    assert a.status == b.status == OPEN
+    hold = config.LIVE_MAX_HOLD_BARS  # 192 бара M15 = 576 баров M5 = 48 часов
+    for k in range(1, 3 * hold + 1):
+        env.engine.on_bar_closed("SOLUSDT", T0 + k * M5, 100.5, NOW + k * M5, BarInfo(101.0, 100.0, 1.0), interval="5m")
+    assert not a.timeout_pending  # 576 закрытий после бара входа: ещё не вышло
+    env.engine.on_bar_closed("SOLUSDT", T0 + 3 * hold * M5 + M5, 100.5, NOW, BarInfo(101.0, 100.0, 1.0), interval="5m")
+    assert a.timeout_pending and not b.timeout_pending  # 15m-сделка от 5m-баров не стареет
+    for k in range(1, hold + 1):
+        env.engine.on_bar_closed("XRPUSDT", T0 + k * BAR, 100.5, NOW + k * BAR, BarInfo(101.0, 100.0, 1.0), interval="15m")
+    assert not b.timeout_pending
+    env.engine.on_bar_closed("XRPUSDT", T0 + (hold + 1) * BAR, 100.5, NOW, BarInfo(101.0, 100.0, 1.0), interval="15m")
+    assert b.timeout_pending
+
+
+def test_trade_timeframe_survives_a_restart_through_the_state_file(tmp_path):
+    env = two_clock_env(tmp_path)
+    reborn = env.reborn()
+    run(reborn.recover(("SOLUSDT", "XRPUSDT")))
+    assert {s: t.interval for s, t in reborn.trades.items()} == {"SOLUSDT": "5m", "XRPUSDT": "15m"}  # сделки не теряют свой такт после перезапуска
+    assert LiveTrade.from_record({**reborn.trades["SOLUSDT"].to_record(), "interval": "15m"}).interval == "15m"
+    old = reborn.trades["SOLUSDT"].to_record()
+    del old["interval"]  # запись до этой версии: таймфрейма нет -> запасной таймфрейм движка
+    assert LiveTrade.from_record(old).interval is None
+
+
+def test_build_engine_needs_no_common_timeframe_for_the_approved_strategies(build_env, monkeypatch):
+    """Раньше (шаг с VWAP на 5m) единый таймфрейм был условием сборки; теперь одобрены SMC_Pro_Trend (5m) и VWAP_Reversion (15m) - движок собирается."""
     monkeypatch.setattr(config, "APPROVED_STRATEGIES", (STRATEGY, "VWAP_Reversion"))
-    engine = build(interval_ms=300_000)
-    assert engine.risk.approved == {STRATEGY, "VWAP_Reversion"}
-    assert engine._interval_ms == 300_000 and engine._ttl_bars == 30 and engine._max_hold == config.LIVE_MAX_HOLD_BARS * 3
-    engine.on_bar_closed(SYM, T0, 100.0, NOW, None, interval="15m")  # чужой таймфрейм: молча пропущен
+    engine = build(interval_ms=BAR)
+    assert engine.risk.approved == {STRATEGY, "VWAP_Reversion"} and engine._ttl_bars == 10 and engine._max_hold == config.LIVE_MAX_HOLD_BARS  # опорные значения (M15)
