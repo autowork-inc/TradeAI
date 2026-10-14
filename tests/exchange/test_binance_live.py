@@ -464,3 +464,20 @@ def test_use_testnet_flag_switches_only_the_order_url(monkeypatch):
     off = run_({"BINANCE_PROFILE": "mainnet"})
     assert on[:2] == ["True", "https://testnet.binancefuture.com"] and on[2] != on[1]  # данные - mainnet, ордера - testnet
     assert off[0] == "False" and off[1] == off[2]
+
+
+def test_empty_position_risk_list_means_a_flat_position():
+    """Binance отвечает [] на positionRisk?symbol=..., когда по символу позиции нет (так ответил testnet): это ноль, не ошибка."""
+    async def scenario(c, s):
+        pos = await c.get_position("BTCUSDT")
+        return pos.amt, pos.entry_price, await c.get_position_amt("BTCUSDT")
+
+    assert run_client(scenario, replies={("GET", config.POSITION_RISK_PATH): []}) == (0.0, 0.0, 0.0)
+
+
+def test_position_risk_that_is_not_a_list_is_still_a_data_error():
+    async def scenario(c, s):
+        with pytest.raises(DataError):
+            await c.get_position("BTCUSDT")
+
+    run_client(scenario, replies={("GET", config.POSITION_RISK_PATH): {"code": -1}})

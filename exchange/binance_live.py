@@ -268,7 +268,11 @@ class BinanceLiveClient:
     async def get_position(self, symbol: str) -> "PositionInfo":
         """Позиция по символу (One-Way): объём со знаком и средняя цена входа (0.0, пока позиции нет)."""
         data = await self._rest.request("GET", config.POSITION_RISK_PATH, {"symbol": symbol})
-        rows = [r for r in data if isinstance(r, dict) and r.get("symbol") == symbol] if isinstance(data, list) else []
+        if not isinstance(data, list):
+            raise DataError(f"positionRisk: ожидается список, получено {str(data)[:200]}")
+        if not data:  # по символу не было позиции - Binance (testnet и mainnet) отвечает пустым списком: это нулевая позиция, не ошибка
+            return PositionInfo(symbol, 0.0, 0.0)
+        rows = [r for r in data if isinstance(r, dict) and r.get("symbol") == symbol]
         if not rows:
             raise DataError(f"positionRisk: нет строки по {symbol}: {str(data)[:200]}")
         amt = sum(_num(r, "positionAmt", "positionRisk") for r in rows)
