@@ -123,3 +123,16 @@ def test_history_row_shows_gap_warning_and_signs(fx):
     item = dict(v._items[0], gap_affected=True, status="closed", r_multiple=-1.5, pnl=-12.34)
     t = texts(v._row(item))
     assert any(x.startswith("Закрыта") and x.endswith("⚠") for x in t) and "−1.50 R" in t and "−12.34" in t
+
+
+def test_closing_the_window_terminates_the_whole_process(monkeypatch):
+    """Закрытие окна = выход процесса: окна графиков закрываются, затем os._exit(0) (иначе приложение висело в фоне)."""
+    import os
+
+    from tradeai_client import chart_window, main as app_main
+
+    calls = []
+    monkeypatch.setattr(chart_window, "terminate_all", lambda: calls.append("charts"))
+    monkeypatch.setattr(os, "_exit", lambda code: calls.append(("exit", code)))
+    app_main._shutdown()
+    assert calls == ["charts", ("exit", 0)]
