@@ -6,9 +6,12 @@
 свечах M15 и одном фиде H4 (лишних подключений нет); позиция идентифицируется ключом `<монета>_<strategy_id>`, у каждой стратегии своя
 блокировка монеты, свой план управления позицией и своя колонка strategy_id в БД. Для OBI_Breakout добавлен поток стакана
 `depth10@500ms`; ленту (aggTrade) он берёт из того же TickFeed, что и трекер.
+Мульти-таймфреймовый SMC (2026-10-14): SMC_Pro_Trend считается на 5m (FVG, CHoCH, вход), пул ликвидности и свип берутся с 1h, направление (HTF Bias) - с 1d;
+остальные четыре стратегии остались на 15m (и 4h bias у SMC_Counter_Trend). Фиды: рабочие 15m и 5m идут Оркестратору, фиды состояния 1h / 4h / 1d - в `MtfState`
+(orchestrator/mtf.py): за один цикл сначала обрабатываются ВСЕ закрытия старших таймфреймов, потом рабочие свечи, поэтому 5m видит свежий 1h-свип.
 Что делает: свечи 15m (SmcKlineFeed) -> FeatureEngine -> Orchestrator -> VirtualTracker; тики (TickFeed: aggTrade и
 markPrice@1s) двигают виртуальные заявки и позиции. Монеты - config.SHADOW_SYMBOLS (с 2026-10-13: BTC, ETH, EURUSD, XAUUSD, XAGUSD).
-MT5-символы (EURUSD, XAUUSD, XAGUSD): Binance их не отдаёт, поэтому свечи M15, производные H4 и тики идут из MetaApi (orchestrator/mt5_feeds.py) и
+MT5-символы (EURUSD, XAUUSD, XAGUSD): Binance их не отдаёт, поэтому свечи M5 (из них производные 15m / 1h / 4h / 1d) и тики идут из MetaApi (orchestrator/mt5_feeds.py) и
 включаются, только если в окружении есть METAAPI_TOKEN и METAAPI_ACCOUNT_ID (без них - предупреждение в лог, процесс работает по крипте).
 HTF Bias (2026-10-11): вторым фидом идут свечи H4 (kline_4h + история REST); структура H4 (features/htf.py) присоединяется
 к контексту M15, и автомат SMC не начинает сетап против тренда H4 (шорт при Bullish, лонг при Bearish). Управление
@@ -42,11 +45,12 @@ from features import defaults as D
 from features.smc import SmcParams
 from orchestrator.core import Orchestrator, Route
 from orchestrator.feature_engine import FeatureEngine
-from orchestrator.htf import HtfBias
 from orchestrator.journal import JsonlEventLog
-from orchestrator.kline_feed import SmcKlineFeed
+from orchestrator.kline_feed import MultiFeed, SmcKlineFeed
 from orchestrator.microstructure import DepthFeed, MicroStructure
-from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, build_strategies, plans_for, strategy_allowed
+from orchestrator.mtf import MtfState
+from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, approved_interval, build_strategies, plans_for, strategy_allowed
+from orchestrator.strategies import SMC_PRO_TREND
 from orchestrator.tick_feed import TickFeed
 from orchestrator.tracker import VirtualTracker
 from orchestrator.types import Mode, Tick
@@ -65,6 +69,7 @@ INSTANCE_NAME = "shadow_run"
 JOURNAL_NAME = "shadow_events.jsonl"
 HEARTBEAT_NAME = ".shadow_heartbeat"
 POLL_INTERVAL_S = 1.0
+D1_MIN_BARS = 60  # 1d-свечей, с которых считается bias (прогрев признаков - 21; история D.MTF_BIAS_HISTORY_BARS = 90): общий порог FeatureEngine.min_bars = 100 для суток велик
 SUMMARY_EVERY_S = 3600.0
 
 
@@ -91,7 +96,7 @@ class ShadowRun:
 
     def __init__(self, feed, orchestrator: Orchestrator, tracker: VirtualTracker, tick_feed=None, *,
                  heartbeat: Path | None = None, clock=time.monotonic, recorder: PgRecorder | None = None,
-                 htf_feed=None, htf: HtfBias | None = None, micro: MicroStructure | None = None, depth_feed: DepthFeed | None = None, live=None):
+                 htf_feed=None, htf: MtfState | None = None, micro: MicroStructure | None = None, depth_feed: DepthFeed | None = None, live=None):
         if (htf_feed is None) != (htf is None):
             raise ConfigError("HTF: htf_feed и htf задаются вместе (фид H4 без таблицы bias, как и наоборот, бессмыслен)")
         if (micro is None) != (depth_feed is None):
@@ -121,7 +126,7 @@ class ShadowRun:
         for ctx in contexts:
             if self._htf is not None:
                 ctx = self._htf.attach(ctx)
-            if self._micro is not None:
+            if self._micro is not None and ctx.interval_ms == self._micro.interval_ms:  # микроструктура считается по окнам рабочего 15m, к 5m её не присоединяем
                 ctx = self._micro.attach(ctx)
             self._orch.on_context(ctx)
         if self._heartbeat is not None:
@@ -167,7 +172,7 @@ async def shadow_main(opts: Options) -> None:
                 api = BinanceRest(session, config.REST_BASE_URL)
                 mt5_data = None
                 if mt5_wanted:  # импорт здесь: пакет exchange (боевой код) при чисто крипто-запуске не загружается
-                    from orchestrator.mt5_feeds import Mt5KlineFeed, Mt5TickFeed, MultiFeed, connect_mt5_data
+                    from orchestrator.mt5_feeds import Mt5KlineFeed, Mt5TickFeed, connect_mt5_data
 
                     mt5_data = await connect_mt5_data(mt5_wanted)
                 mt5_client, mt5_mapper = mt5_data if mt5_data is not None else (None, None)
@@ -175,25 +180,40 @@ async def shadow_main(opts: Options) -> None:
                 all_symbols = crypto if mt5_client is None else symbols  # без ключей MetaApi MT5-символы в этом запуске не участвуют
                 symbols = all_symbols
                 names = SHADOW_STRATEGIES
-                strategies = build_strategies(names)
+                mtf = D.MTF_ENABLED and SMC_PRO_TREND in names  # SMC_Pro_Trend: 1d bias -> 1h свип -> 5m вход; остальные - на opts.interval (15m), как раньше
+                if mtf and mt5_client is not None and opts.interval != "15m":
+                    raise ConfigError("MT5-символы поддерживают только --interval 15m (рабочий 15m собирается из M5)")
+                strategies = build_strategies(names, mtf=mtf, interval=opts.interval)
                 tracker = VirtualTracker(events, equity=opts.equity, recorder=recorder, plans=plans_for(names))
                 live = None
                 sink = tracker
                 if config.TRADE_MODE == "live":  # ВЫКЛЮЧЕНО по умолчанию (TRADE_MODE=shadow): боевой код тогда даже не импортируется
                     from orchestrator.live_engine import LiveMirrorSink, build_live_engine
 
+                    live_interval = approved_interval(strategies, config.APPROVED_STRATEGIES, opts.interval)  # SMC_Pro_Trend и VWAP_Reversion - оба на 5m
                     live = await build_live_engine(session, events, symbols=crypto, strategy_names=names,
-                                                   interval_ms=config.INTERVAL_MS[opts.interval],
+                                                   interval_ms=config.INTERVAL_MS[live_interval],
                                                    flush=recorder.flush if recorder is not None else None)
                     sink = LiveMirrorSink(tracker, live)  # Shadow-трекер получает все сигналы как прежде; одобренные - ещё и боевой движок
                 orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder,
                                   symbol_filter=strategy_allowed)  # OBI_Breakout - только символы со стаканом (Binance), см. config.STRATEGY_SYMBOLS
-                feed = SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=opts.interval, history_bars=opts.history)
+                # Рабочие фиды (контексты идут стратегиям): 15m (opts.interval) всегда, 5m - для SMC_Pro_Trend. Фиды состояния (1h, 1d, 4h) стратегиям не идут.
+                work = [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=opts.interval, history_bars=opts.history)]
+                if mtf:
+                    work.append(SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=D.MTF_BASE_INTERVAL, history_bars=opts.history))
+                feed = MultiFeed(work)
                 htf_feed = htf = None
                 if D.HTF_FILTER_ENABLED:
-                    htf = HtfBias(D.HTF_INTERVAL, config.INTERVAL_MS[D.HTF_INTERVAL], events)
-                    htf_feed = SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=D.HTF_INTERVAL,
-                                            history_bars=D.HTF_HISTORY_BARS, emit_latest_on_start=True)
+                    htf = MtfState(config.INTERVAL_MS, events, base=D.MTF_BASE_INTERVAL if mtf else None, struct=D.MTF_STRUCT_INTERVAL, bias=D.MTF_BIAS_INTERVAL,
+                                   legacy=opts.interval, legacy_bias=D.HTF_INTERVAL)
+                    state = [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=D.HTF_INTERVAL, history_bars=D.HTF_HISTORY_BARS,
+                                          emit_latest_on_start=True)]
+                    if mtf:
+                        state += [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=D.MTF_STRUCT_INTERVAL,
+                                               history_bars=D.MTF_STRUCT_HISTORY_BARS, emit_latest_on_start=True),
+                                  SmcKlineFeed(api, session, FeatureEngine(SmcParams(), min_bars=D1_MIN_BARS), symbols=crypto, interval=D.MTF_BIAS_INTERVAL,
+                                               history_bars=D.MTF_BIAS_HISTORY_BARS, emit_latest_on_start=True)]
+                    htf_feed = MultiFeed(state)
                 micro = depth_feed = None
                 if any(n in NEEDS_MICRO for n in names):  # лента - из того же aggTrade, что и тики трекера; стакан - отдельный публичный поток (только крипта)
                     micro = MicroStructure(crypto, config.INTERVAL_MS[opts.interval])
@@ -213,19 +233,24 @@ async def shadow_main(opts: Options) -> None:
                         micro.aggregator.mark_gap("trade")
 
                 ticks = TickFeed(session, on_tick, on_gap, symbols=crypto)
-                if mt5_client is not None:  # MT5-символы: свечи M15, производные H4 и тики - из MetaApi (Binance их не отдаёт)
+                if mt5_client is not None:  # MT5-символы: свечи M5 (единственный запрос к MetaApi), из них производные 15m / 1h / 4h / 1d, и тики
                     mt5_feed = Mt5KlineFeed(mt5_client, FeatureEngine(SmcParams()), broker_name=mt5_mapper.broker_name, symbols=mt5_wanted,
-                                            interval=opts.interval, history_bars=opts.history)
+                                            history_bars=opts.history, emit=mtf)
                     if htf_feed is not None:
-                        htf_feed = MultiFeed([htf_feed, mt5_feed.htf_view(FeatureEngine(SmcParams()))])
-                    feed = MultiFeed([feed, mt5_feed])
+                        views = [mt5_feed.htf_view(FeatureEngine(SmcParams()))]
+                        if mtf:
+                            views += [mt5_feed.h1_view(FeatureEngine(SmcParams())), mt5_feed.d1_view(FeatureEngine(SmcParams(), min_bars=D1_MIN_BARS))]
+                        htf_feed = MultiFeed([htf_feed, *views])
+                    # Порядок: производный 15m раньше первичного M5 - M5 последним забирает снимок хранилища цикла (см. mt5_feeds.py)
+                    feed = MultiFeed([feed, mt5_feed.m15_view(FeatureEngine(SmcParams())), mt5_feed])
                     mt5_ticks = Mt5TickFeed(mt5_client, on_tick, lambda ts: [tracker.mark_gap(s, ts) for s in mt5_wanted], broker_name=mt5_mapper.broker_name,
                                             symbols=mt5_wanted)
                     ticks = MultiFeed([ticks, mt5_ticks])
                 runner = ShadowRun(feed, orch, tracker, ticks, heartbeat=config.DATA_DIR / HEARTBEAT_NAME, recorder=recorder,
                                  htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live)
-                log.info("Shadow Mode: %s %s, стратегии %s, HTF-фильтр %s, микроструктура %s, эквити %.0f, журнал %s, БД %s, TRADE_MODE=%s",
-                         all_symbols, opts.interval, list(names), D.HTF_INTERVAL if htf is not None else "выключен",
+                log.info("Shadow Mode: %s %s%s, стратегии %s, HTF-фильтр %s, микроструктура %s, эквити %.0f, журнал %s, БД %s, TRADE_MODE=%s",
+                         all_symbols, opts.interval, f" + SMC_Pro_Trend {D.MTF_BIAS_INTERVAL}->{D.MTF_STRUCT_INTERVAL}->{D.MTF_BASE_INTERVAL}" if mtf else "",
+                         list(names), D.HTF_INTERVAL if htf is not None else "выключен",
                          "стакан + лента" if micro is not None else "нет", opts.equity, journal.path, "включена" if recorder is not None else "нет", config.TRADE_MODE)
                 if htf_feed is not None:
                     htf_feed.start()

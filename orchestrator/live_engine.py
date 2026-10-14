@@ -249,8 +249,11 @@ class LiveExecutionEngine:
         else:
             t.best_q = min(t.best_q, q)
 
-    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: BarInfo | None = None) -> None:
-        """Закрытие свечи: отмены лимитки (те же правила, что у VirtualTracker, R8), тайм-аут позиции, трейлинг runner'а."""
+    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: BarInfo | None = None, interval: str | None = None) -> None:
+        """Закрытие свечи: отмены лимитки (те же правила, что у VirtualTracker, R8), тайм-аут позиции, трейлинг runner'а.
+        Движок живёт по свечам ОДНОГО таймфрейма (`interval_ms` из конструктора - рабочий таймфрейм одобренных стратегий): бары других таймфреймов пропускаются."""
+        if interval is not None and config.INTERVAL_MS.get(interval) != self._interval_ms:
+            return
         if self.router is not None:
             self.router.on_bar_closed(symbol, bar)
         t = self._trades.get(symbol)
@@ -893,9 +896,9 @@ class LiveMirrorSink:
             self._engine.enqueue(signal, now_ms)
         return sub
 
-    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: Any = None) -> None:
-        self._primary.on_bar_closed(symbol, bar_open_time, close, now_ms, bar)
-        self._engine.on_bar_closed(symbol, bar_open_time, close, now_ms, bar)
+    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: Any = None, interval: str | None = None) -> None:
+        self._primary.on_bar_closed(symbol, bar_open_time, close, now_ms, bar, interval=interval)
+        self._engine.on_bar_closed(symbol, bar_open_time, close, now_ms, bar, interval=interval)
 
     def add_close_listener(self, listener: Callable[[Any], None]) -> None:
         self._primary.add_close_listener(listener)
@@ -938,7 +941,8 @@ async def build_live_engine(
         max_open_positions=config.LIVE_MAX_OPEN_POSITIONS,
     )
     clock = now_ms or (lambda: int(time.time() * 1000))
-    engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush,
-                                 store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router)
+    scale = D.bars_scale(interval_ms)  # сроки в барах заданы для M15; на 5m календарное время сохраняется (как у VirtualTracker)
+    engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush, limit_ttl_bars=D.LIMIT_TTL_BARS * scale,
+                                 max_hold_bars=config.LIVE_MAX_HOLD_BARS * scale, store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router)
     await engine.recover(symbols)
     return engine

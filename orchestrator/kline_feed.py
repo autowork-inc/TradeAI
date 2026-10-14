@@ -1,4 +1,5 @@
-"""SmcKlineFeed: закрытые свечи 15m/1h по WebSocket -> FeatureContext для Оркестратора (R5: только закрытые, k.x = true).
+"""SmcKlineFeed: закрытые свечи ОДНОГО интервала (Shadow: 5m, 15m, 1h, 4h, 1d - по экземпляру на интервал, `MultiFeed` склеивает) по WebSocket ->
+FeatureContext (R5: только закрытые, k.x = true). Рабочие интервалы (5m, 15m) идут Оркестратору, старшие (1h, 4h, 1d) - в состояние `MtfState`.
 
 Источник: `<symbol>@kline_<interval>` на маршруте config.WS_MARKET_URL (/market/stream; проверено на mainnet 2026-10-08,
 в /public свечи не приходят). История для признаков - REST /fapi/v1/klines (history_bars + формирующаяся) на старте и
@@ -31,6 +32,34 @@ from utils.binance_rest import BinanceRest, klines_weight
 from utils.errors import ConfigError, DataError, WebSocketClosed
 
 log = logging.getLogger("orchestrator.kline_feed")
+
+
+class MultiFeed:
+    """Несколько фидов с одним контрактом (Binance 5m / 15m / 1h / 4h / 1d, MT5) как один: `poll` склеивает контексты в порядке фидов, `start/aclose/check` - всем.
+
+    Порядок фидов важен там, где один фид зависит от снимка другого (MT5: производные виды раньше первичного 5m, см. orchestrator/mt5_feeds.py);
+    остальной порядок обработки задаёт цикл ShadowRun: контексты старших таймфреймов обрабатываются раньше рабочих."""
+
+    def __init__(self, feeds: list[Any]):
+        self._feeds = feeds
+
+    def start(self) -> None:
+        for f in self._feeds:
+            f.start()
+
+    async def aclose(self) -> None:
+        for f in self._feeds:
+            await f.aclose()
+
+    def check(self) -> None:
+        for f in self._feeds:
+            f.check()
+
+    async def poll(self) -> list[FeatureContext]:
+        out: list[FeatureContext] = []
+        for f in self._feeds:
+            out += await f.poll()
+        return out
 
 
 class SmcKlineFeed:
@@ -132,8 +161,8 @@ class SmcKlineFeed:
 
     # ------------------------------------------------------------------------------------------ poll
 
-    async def poll(self) -> list[FeatureContext]:
-        """Контексты по свечам, закрывшимся с прошлого вызова (по порядку, без пропусков)."""
+    def check(self) -> None:
+        """Упавшая задача потока -> исключение (R1); для MultiFeed.check и poll."""
         if self._task is not None and self._task.done():
             if self._task.cancelled():
                 raise WebSocketClosed("Задача фида свечей отменена")
@@ -141,6 +170,10 @@ class SmcKlineFeed:
             if exc is not None:
                 raise exc
             raise DataError("Задача фида свечей завершилась без ошибки: так быть не должно")
+
+    async def poll(self) -> list[FeatureContext]:
+        """Контексты по свечам, закрывшимся с прошлого вызова (по порядку, без пропусков)."""
+        self.check()
         out: list[FeatureContext] = []
         for symbol in self._symbols:
             last = self._last_emitted[symbol]

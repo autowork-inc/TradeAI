@@ -1,19 +1,24 @@
-"""Данные Forex/металлов для Shadow Mode (EURUSD, XAUUSD, XAGUSD): свечи M15 + производные H4 и тики из котировок MetaApi.
+"""Данные Forex/металлов для Shadow Mode (EURUSD, XAUUSD, XAGUSD): свечи M5 + производные 15m / 1h / 4h / 1d и тики из котировок MetaApi.
 
-Binance WebSocket этих символов не отдаёт (`kline_15m` и `aggTrade` - только крипта), поэтому для MT5-символов пул Shadow питают отдельные фиды с тем же
+Binance WebSocket этих символов не отдаёт (`kline_*` и `aggTrade` - только крипта), поэтому для MT5-символов пул Shadow питают отдельные фиды с тем же
 контрактом, что у `SmcKlineFeed` / `TickFeed` (R5: только закрытые свечи; Оркестратору - по одному `FeatureContext` на свечу, без пропусков):
 
-  * `Mt5KlineFeed` - M15: история и новые закрытые свечи из REST рыночных данных MetaApi (`get_candles`), опрос раз в `poll_s`. Свеча закрыта, когда
-    `open_time + interval + settle <= сейчас` (последнюю формирующуюся не берём).
+  * ЕДИНСТВЕННЫЙ источник - M5 из REST рыночных данных MetaApi (`get_candles(..., "5m", ...)`): история при старте и новые закрытые свечи раз в `poll_s`.
+    Других таймфреймов у брокера НЕ запрашивается (2026-10-14: «никаких новых REST-запросов»): число запросов растёт только за счёт глубины истории M5 при
+    старте (страницы по 1000 свечей, тот же цикл, что был у M15). Свеча закрыта, когда `open_time + interval + settle <= сейчас` (формирующуюся не берём).
+  * Все старшие таймфреймы ПРОИЗВОДНЫЕ (`derive_tf`): 15m (рабочий для четырёх стратегий), 1h (структура и свип SMC_Pro_Trend), 4h (HTF Bias для 15m-стратегий),
+    1d (HTF Bias SMC_Pro_Trend) собираются из M5 того же хранилища на UTC-сетке: open первой, high/low - экстремумы, close последней, volume - сумма. У брокера
+    границы старших свечей привязаны к серверному времени, а гарантия «старшая свеча не отстаёт от рабочей» (HtfBias / MtfState.attach) выполнима, только
+    если все шкалы собраны из одних данных. Неполный край (формирующийся час/сутки) не берётся.
+  * Снимок. `Mt5HtfView.poll()` (и любой другой производный вид) снимает снимок хранилища; первичные фиды (M5 и производный 15m) в том же цикле обрабатывают ТОТ ЖЕ
+    снимок (иначе новая свеча между опросами дала бы рабочую без своей старшей -> DataError). Снимок сбрасывается, когда его забрали все первичные фиды.
   * Дыры в сетке - ЗАКРЫТЫЙ РЫНОК (выходные, пауза, праздники): у MT5 свечи без тиков не бывает, а пайплайн признаков и Оркестратор требуют непрерывную сетку.
     Пропуски между известными закрытыми свечами заполняются ПЛОСКИМИ свечами (open = high = low = close = прошлый close, объём 0). Заполнение идёт только
     «назад» - когда уже пришла следующая реальная свеча, поэтому во время закрытого рынка контекстов нет, а при открытии они приходят подряд (replay).
   * Контексты плоских свечей и `warmup_bars` свечей после дыры в `stale_gap_bars`+ свечей получают `received_ms` = закрытие + 1 ч: Оркестратор
-    помечает их `skipped_stale` и НЕ торгует (ATR и средний объём после выходных занижены плоскими свечами; сигналы на них были бы артефактом). Трекер и сроки
-    позиций при этом получают закрытия свечей как обычно.
-  * H4 для HTF-фильтра ПРОИЗВОДНЫЙ: собирается из M15 (границы UTC 00/04/08/12/16/20) того же хранилища, а не берётся у брокера: у брокера границы H4 привязаны к
-    серверному времени, а гарантия «H4 не отстаёт от M15» (HtfBias.attach) выполнима, только если обе шкалы из одних данных. `Mt5HtfView.poll()` снимает снимок
-    хранилища, `Mt5KlineFeed.poll()` затем обрабатывает ТОТ ЖЕ снимок (иначе новая свеча между опросами дала бы M15 без своего H4 -> DataError).
+    помечает их `skipped_stale` и НЕ торгует (ATR и средний объём после выходных занижены плоскими свечами; сигналы на них были бы артефактом). Пороги заданы
+    в M5-барах (12 и 60 = прежние 4 и 20 M15). Производная 15m-свеча «опоздавшая», если опоздала любая из трёх её M5. Трекер и сроки позиций получают закрытия
+    свечей как обычно.
   * `Mt5TickFeed` - тики из котировок (раз в секунду): цена = середина bid/ask, и как `trade`, и как `mark`. Это грубее настоящей ленты aggTrade: лимитные заявки Shadow
     исполняются по проходу цены середины, а не по сделкам (❓ у Forex нет единой ленты сделок; допущение Shadow). Объёма и стороны агрессора нет (OBI_Breakout по
     этим символам сигналов не даёт: нет стакана/ленты - значения `ms_*` = null, fail-closed).
@@ -24,14 +29,17 @@ Fail-Fast (R1): временные сбои MetaApi (таймаут, терми�
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from bisect import bisect_left
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 import polars as pl
 
 from exchange.mt5_metaapi import MetaApiError
+from features import defaults as D
 from orchestrator.feature_engine import FeatureEngine
+from orchestrator.kline_feed import MultiFeed  # noqa: F401  (прежнее место класса; чисто крипто-запуск этот модуль не импортирует)
 from orchestrator.types import FeatureContext, Tick
 from orchestrator.ws import wall_clock_ms
 from pipeline.loaders.schemas import KLINE_SCHEMA
@@ -39,9 +47,14 @@ from utils.errors import ConfigError, DataError
 
 log = logging.getLogger("orchestrator.mt5_feeds")
 
+M5_MS = 5 * 60_000
+M15_MS = 15 * 60_000
+H1_MS = 3_600_000
 H4_MS = 4 * 3_600_000
+D1_MS = 86_400_000
 STALE_AFTER_MS = 3_600_000  # на сколько «опоздавшим» объявляется контекст, по которому торговать нельзя
 CANDLES_PAGE = 1000
+BASE_TIMEFRAME = "5m"  # единственный таймфрейм, который запрашивается у MetaApi
 
 Row = tuple  # строка KLINE_SCHEMA
 
@@ -59,30 +72,53 @@ def _flat(open_time: int, close: float, interval_ms: int) -> Row:
     return _row(open_time, close, close, close, close, 0.0, interval_ms)
 
 
-def derive_h4(rows: dict[int, Row], m15_ms: int) -> dict[int, Row]:
-    """Полные 4-часовые свечи (UTC-сетка) из непрерывных M15-строк: open первой, high/low экстремумы, close последней, volume суммы. Неполный край - не берётся."""
-    per = H4_MS // m15_ms
+def derive_tf(rows: Mapping[int, Row], base_ms: int, target_ms: int, *, since: int | None = None) -> dict[int, Row]:
+    """Полные свечи `target_ms` (UTC-сетка) из непрерывных строк `base_ms`: open первой, high/low - экстремумы, close последней, volume - суммы.
+    Неполный край (не все слоты есть) не берётся. `since` - с какого open_time искать (по умолчанию - с начала): производные виды досчитывают только хвост.
+    Чистая функция: запросов нет, закрытая свеча старшего таймфрейма после появления не меняется."""
+    if base_ms <= 0 or target_ms <= base_ms or target_ms % base_ms:
+        raise ConfigError(f"derive_tf: целевой интервал {target_ms} должен быть кратным и большим базового {base_ms}")
+    if not rows:
+        return {}
+    per = target_ms // base_ms
+    lo = min(rows) if since is None else since
+    first = lo - lo % target_ms
     out: dict[int, Row] = {}
-    for start in sorted({t - t % H4_MS for t in rows}):
-        slots = [start + k * m15_ms for k in range(per)]
+    for start in range(first, max(rows) + 1, target_ms):
+        slots = [start + k * base_ms for k in range(per)]
         if all(s in rows for s in slots):
             part = [rows[s] for s in slots]
-            out[start] = _row(start, part[0][1], max(r[2] for r in part), min(r[3] for r in part), part[-1][4], sum(r[5] for r in part), H4_MS)
+            out[start] = _row(start, part[0][1], max(r[2] for r in part), min(r[3] for r in part), part[-1][4], sum(r[5] for r in part), target_ms)
     return out
 
 
-class _Group:
-    """Общее состояние одного набора MT5-символов: M15-хранилище, снимок на цикл опроса, фоновая задача."""
+def derive_h4(rows: Mapping[int, Row], m15_ms: int) -> dict[int, Row]:
+    """4-часовые свечи из строк `m15_ms` (имя и сигнатура прежние: любая кратная база - M15, M5)."""
+    return derive_tf(rows, m15_ms, H4_MS)
 
-    def __init__(self, source: CandleSource, broker_name: Callable[[str], str], symbols: tuple[str, ...], interval_ms: int, history_bars: int, htf_bars: int,
-                 clock_ms: Callable[[], int], poll_s: float, settle_s: float, max_failures: int, stale_gap_bars: int, warmup_bars: int):
+
+class _Group:
+    """Общее состояние одного набора MT5-символов: M5-хранилище, снимок на цикл опроса, фоновая задача."""
+
+    def __init__(self, source: CandleSource, broker_name: Callable[[str], str], symbols: tuple[str, ...], interval_ms: int, history_bars: int,
+                 windows: Mapping[int, int], clock_ms: Callable[[], int], poll_s: float, settle_s: float, max_failures: int, stale_gap_bars: int, warmup_bars: int):
+        """windows: интервал производного вида (мс) -> сколько его свечей нужно в истории; из них считается глубина M5-хранилища."""
         self.source, self.broker_name, self.symbols = source, broker_name, symbols
-        self.interval_ms, self.history, self.htf_bars = interval_ms, history_bars, htf_bars
+        self.interval_ms, self.history = interval_ms, history_bars
+        for target in windows:
+            if target <= interval_ms or target % interval_ms:
+                raise ConfigError(f"производный интервал {target} не кратен базовому {interval_ms}")
+        self.windows = dict(windows)
+        self.max_per = max([t // interval_ms for t in self.windows] or [1])
+        self.depth = max([history_bars, *(bars * (t // interval_ms) for t, bars in self.windows.items())])  # сколько базовых свечей нужно держать
         self.clock, self.poll_s, self.settle_ms = clock_ms, poll_s, int(settle_s * 1000)
         self.max_failures, self.stale_gap_bars, self.warmup_bars = max_failures, stale_gap_bars, warmup_bars
         self.store: dict[str, dict[int, Row]] = {s: {} for s in symbols}
         self.stale_until: dict[str, dict[int, bool]] = {s: {} for s in symbols}  # open_time -> «торговать нельзя»
         self.frozen: tuple[dict[str, dict[int, Row]], dict[str, dict[int, bool]]] | None = None
+        self.primaries: set[str] = {"m5"}  # первичные потребители снимка; он сбрасывается, когда его забрали все
+        self._taken: set[str] = set()
+        self._gaps_checked: dict[str, int] = {}  # символ -> до какого open_time пропуски уже заполнены
         self.ready = False
         self.task: asyncio.Task | None = None
         self.failures = 0
@@ -93,13 +129,13 @@ class _Group:
         return now - now % self.interval_ms - self.interval_ms
 
     async def bootstrap(self) -> None:
-        need = max(self.history, self.htf_bars * (H4_MS // self.interval_ms)) + 2 * (H4_MS // self.interval_ms)  # запас на неполный край и дыры
+        need = self.depth + 2 * self.max_per  # запас на неполный край и дыры
         for symbol in self.symbols:
             broker = self.broker_name(symbol)
             rows: list[tuple] = []
             start: datetime | None = None
             while len(rows) < need:
-                page = await self.source.get_candles(broker, "15m", CANDLES_PAGE, start_time=start)
+                page = await self.source.get_candles(broker, BASE_TIMEFRAME, CANDLES_PAGE, start_time=start)
                 fresh = [r for r in page if not rows or r[0] < min(x[0] for x in rows)]
                 if not fresh:
                     break  # история брокера кончилась
@@ -107,11 +143,11 @@ class _Group:
                 start = datetime.fromtimestamp(min(r[0] for r in rows) / 1000, tz=timezone.utc)
             self.merge(symbol, rows)
         self.ready = True
-        log.info("История MT5 M15 загружена: %s", {s: len(c) for s, c in self.store.items()})
+        log.info("История MT5 %s загружена: %s", BASE_TIMEFRAME, {s: len(c) for s, c in self.store.items()})
 
     async def refresh(self) -> None:
         for symbol in self.symbols:
-            page = await self.source.get_candles(self.broker_name(symbol), "15m", 8)
+            page = await self.source.get_candles(self.broker_name(symbol), BASE_TIMEFRAME, 8)
             self.merge(symbol, page)
 
     def merge(self, symbol: str, candles: list[tuple]) -> None:
@@ -125,7 +161,9 @@ class _Group:
                 continue  # формирующаяся или уже известная (закрытая свеча не меняется)
             store[t] = _row(t, o, h, lo, c, v, self.interval_ms)
         times = sorted(store)
-        for a, b in zip(times, times[1:]):
+        checked = self._gaps_checked.get(symbol)
+        begin = 0 if checked is None else max(0, bisect_left(times, checked) - 1)  # пропуски левее уже заполнены: проверяем только хвост
+        for a, b in zip(times[begin:], times[begin + 1:]):
             gap = (b - a) // self.interval_ms - 1
             if gap <= 0:
                 continue
@@ -137,16 +175,32 @@ class _Group:
             if gap >= self.stale_gap_bars:
                 for k in range(self.warmup_bars):
                     stale[b + k * self.interval_ms] = True
-        for t in sorted(store)[: max(0, len(store) - (self.htf_bars * (H4_MS // self.interval_ms) + 3 * (H4_MS // self.interval_ms) + 50))]:
+        if times:
+            self._gaps_checked[symbol] = times[-1]
+        keep = self.depth + 3 * self.max_per + 50
+        for t in sorted(store)[: max(0, len(store) - keep)]:
             del store[t]
             stale.pop(t, None)
 
     def freeze(self) -> tuple[dict[str, dict[int, Row]], dict[str, dict[int, bool]]]:
         self.frozen = ({s: dict(r) for s, r in self.store.items()}, {s: dict(r) for s, r in self.stale_until.items()})
+        self._taken = set()
         return self.frozen
 
-    def take_snapshot(self) -> tuple[dict[str, dict[int, Row]], dict[str, dict[int, bool]]]:
-        snap, self.frozen = (self.frozen or self.freeze()), None
+    def snapshot(self) -> tuple[dict[str, dict[int, Row]], dict[str, dict[int, bool]]]:
+        """Снимок цикла для производных видов (создаётся первым, кто спросил; не сбрасывается)."""
+        return self.frozen or self.freeze()
+
+    def take_snapshot(self, consumer: str = "m5") -> tuple[dict[str, dict[int, Row]], dict[str, dict[int, bool]]]:
+        """Снимок цикла для первичного фида `consumer`; когда его забрали все первичные фиды, снимок сбрасывается (следующий цикл - новый снимок)."""
+        if consumer not in self.primaries:
+            raise DataError(f"take_snapshot: {consumer!r} не зарегистрирован первичным потребителем ({sorted(self.primaries)})")
+        if self.frozen is not None and consumer in self._taken:
+            self.freeze()  # потребитель пришёл за вторым снимком, не дождавшись остальных: новый цикл
+        snap = self.snapshot()
+        self._taken.add(consumer)
+        if self._taken >= self.primaries:
+            self.frozen, self._taken = None, set()
         return snap
 
     async def run(self) -> None:
@@ -195,24 +249,37 @@ class _FeedBase:
 
 
 class Mt5KlineFeed(_FeedBase):
-    """Свечи M15 MT5-символов (контракт SmcKlineFeed.poll). Пара к нему - `htf_view()` (H4)."""
+    """Свечи M5 MT5-символов (контракт SmcKlineFeed.poll) - рабочий таймфрейм SMC_Pro_Trend. Производные виды: `m15_view()` (рабочий для остальных
+    стратегий), `h1_view()`, `htf_view()` (4h), `d1_view()` (старшие, их контексты идут в `MtfState`)."""
 
-    def __init__(self, source: CandleSource, engine: FeatureEngine, *, broker_name: Callable[[str], str], symbols: tuple[str, ...], interval: str = "15m",
-                 history_bars: int = 300, htf_history_bars: int = 110, clock_ms: Callable[[], int] = wall_clock_ms, poll_s: float = 5.0, settle_s: float = 3.0,
-                 max_failures: int = 20, stale_gap_bars: int = 4, warmup_bars: int = 20):
-        if interval != "15m":
-            raise ConfigError("Mt5KlineFeed: поддержан только M15 (H4 собирается из него)")
-        if history_bars < engine.min_bars or htf_history_bars < engine.min_bars:
-            raise ConfigError(f"history_bars/htf_history_bars меньше min_bars={engine.min_bars}")
-        interval_ms = 15 * 60_000
-        group = _Group(source, broker_name, tuple(symbols), interval_ms, history_bars, htf_history_bars, clock_ms, poll_s, settle_s, max_failures,
-                       stale_gap_bars, warmup_bars)
-        super().__init__(group, "m15")
-        self._engine, self._clock, self.interval, self.interval_ms = engine, clock_ms, interval, interval_ms
+    def __init__(self, source: CandleSource, engine: FeatureEngine, *, broker_name: Callable[[str], str], symbols: tuple[str, ...], interval: str = BASE_TIMEFRAME,
+                 history_bars: int = 300, htf_history_bars: int = 110, m15_history_bars: int = 300, h1_history_bars: int = D.MTF_STRUCT_HISTORY_BARS,
+                 d1_history_bars: int = D.MTF_BIAS_HISTORY_BARS, clock_ms: Callable[[], int] = wall_clock_ms, poll_s: float = 5.0, settle_s: float = 3.0,
+                 max_failures: int = 20, stale_gap_bars: int = 12, warmup_bars: int = 60, emit: bool = True):
+        """emit=False: M5 не отдаётся стратегиям (мульти-таймфреймовый режим выключен), но фид по-прежнему участвует в цикле снимков: без него снимок хранилища не сбрасывался бы."""
+        if interval != BASE_TIMEFRAME:
+            raise ConfigError("Mt5KlineFeed: поддержан только M5 (15m, 1h, 4h и 1d собираются из него)")
+        if history_bars < engine.min_bars:
+            raise ConfigError(f"history_bars меньше min_bars={engine.min_bars}")
+        interval_ms = M5_MS
+        windows = {M15_MS: m15_history_bars, H1_MS: h1_history_bars, H4_MS: htf_history_bars, D1_MS: d1_history_bars}
+        group = _Group(source, broker_name, tuple(symbols), interval_ms, history_bars, windows, clock_ms, poll_s, settle_s, max_failures, stale_gap_bars, warmup_bars)
+        super().__init__(group, "m5")
+        self._engine, self._clock, self.interval, self.interval_ms, self.emit = engine, clock_ms, interval, interval_ms, emit
+        self._bars = {"15m": m15_history_bars, "1h": h1_history_bars, "4h": htf_history_bars, "1d": d1_history_bars}
         self._last: dict[str, int | None] = {s: None for s in symbols}
 
+    def m15_view(self, engine: FeatureEngine | None = None) -> "Mt5M15View":
+        return Mt5M15View(self._g, engine or self._engine, self._bars["15m"])
+
+    def h1_view(self, engine: FeatureEngine | None = None) -> "Mt5H1View":
+        return Mt5H1View(self._g, engine or self._engine, self._bars["1h"])
+
     def htf_view(self, engine: FeatureEngine | None = None) -> "Mt5HtfView":
-        return Mt5HtfView(self._g, engine or self._engine)
+        return Mt5HtfView(self._g, engine or self._engine, self._bars["4h"])
+
+    def d1_view(self, engine: FeatureEngine | None = None) -> "Mt5D1View":
+        return Mt5D1View(self._g, engine or self._engine, self._bars["1d"])
 
     def check(self) -> None:
         self._check_task()
@@ -221,7 +288,7 @@ class Mt5KlineFeed(_FeedBase):
         self._check_task()
         if not self._g.ready:
             return []
-        store, stale = self._g.take_snapshot()
+        store, stale = self._g.take_snapshot("m5")
         out: list[FeatureContext] = []
         for symbol in self._g.symbols:
             rows = store[symbol]
@@ -231,34 +298,45 @@ class Mt5KlineFeed(_FeedBase):
             if last is None:  # история на старте не эмитится: последняя закрытая свеча - точка отсчёта
                 self._last[symbol] = last = max(rows)
                 continue
-            for t in sorted(x for x in rows if x > last):
-                if t != last + self.interval_ms:
-                    raise DataError(f"{symbol} {self.interval}: дыра в свечах между {last} и {t}")
-                out.append(await self._context(symbol, t, rows, stale[symbol].get(t, False)))
+            for t in range(last + self.interval_ms, max(rows) + 1, self.interval_ms):  # сетка непрерывна; не обходим всё хранилище (оно в десятки тысяч свечей)
+                if t not in rows:
+                    raise DataError(f"{symbol} {self.interval}: дыра в свечах после {last} (нет {t})")
+                if self.emit:
+                    out.append(await self._context(symbol, t, rows, stale[symbol].get(t, False)))
                 last = t
             self._last[symbol] = last
         return out
 
     async def _context(self, symbol: str, open_time: int, rows: dict[int, Row], stale: bool) -> FeatureContext:
-        times = sorted(t for t in rows if t <= open_time)[-self._g.history:]
+        iv = self.interval_ms
+        times = [t for t in range(open_time - (self._g.history - 1) * iv, open_time + 1, iv) if t in rows]  # последние `history` свечей непрерывной сетки
         candles = pl.DataFrame([rows[t] for t in times], schema=KLINE_SCHEMA, orient="row")
         close_ms = open_time + self.interval_ms
         received = close_ms + STALE_AFTER_MS if stale else max(self._clock(), close_ms)
         return await asyncio.to_thread(self._engine.build, symbol, self.interval, self.interval_ms, candles, received)
 
 
-class Mt5HtfView(_FeedBase):
-    """H4 из тех же M15-данных (контракт SmcKlineFeed.poll с `emit_latest_on_start`): на старте - последняя закрытая H4, затем каждая новая."""
+class Mt5DerivedView(_FeedBase):
+    """Свечи интервала `interval` (кратного M5), собранные из ТОГО ЖЕ снимка M5-хранилища (контракт SmcKlineFeed.poll).
 
-    interval = "4h"
+    `emit_latest=True` (старшие виды: 1h, 4h, 1d): на старте - последняя закрытая свеча с историей (состояние, как `emit_latest_on_start`), затем каждая новая.
+    `emit_latest=False` (первичный 15m): история на старте не эмитится, затем каждая новая свеча подряд; «опоздавшая» (stale) - если опоздала любая её M5.
+    Производные свечи кэшируются: закрытая старшая свеча не меняется, поэтому каждый цикл досчитывается только хвост (а не вся история)."""
 
-    def __init__(self, group: _Group, engine: FeatureEngine):
-        super().__init__(group, "h4")
-        self._engine = engine
-        self.interval_ms = H4_MS
+    def __init__(self, group: _Group, engine: FeatureEngine, interval: str, interval_ms: int, history_bars: int, *, emit_latest: bool):
+        super().__init__(group, interval)
+        if history_bars < engine.min_bars:
+            raise ConfigError(f"{interval}: history_bars={history_bars} меньше min_bars={engine.min_bars}")
+        if interval_ms not in group.windows or history_bars > group.windows[interval_ms]:
+            raise ConfigError(f"{interval}: глубина {history_bars} больше заложенной в хранилище ({group.windows.get(interval_ms)}): M5-история не покроет")
+        self._engine, self.interval, self.interval_ms, self._bars, self._emit_latest = engine, interval, interval_ms, history_bars, emit_latest
+        self._per = interval_ms // group.interval_ms
         self._last: dict[str, int | None] = {s: None for s in group.symbols}
+        self._cache: dict[str, dict[int, Row]] = {s: {} for s in group.symbols}
+        if not emit_latest:
+            group.primaries.add(interval)
 
-    def start(self) -> None:  # фоновую задачу владеет M15-фид
+    def start(self) -> None:  # фоновую задачу владеет M5-фид
         pass
 
     async def aclose(self) -> None:
@@ -267,44 +345,85 @@ class Mt5HtfView(_FeedBase):
     def check(self) -> None:
         self._check_task()
 
+    def _derived(self, symbol: str, rows: dict[int, Row]) -> dict[int, Row]:
+        cache = self._cache[symbol]
+        since = max(cache) + self.interval_ms if cache else None
+        cache.update(derive_tf(rows, self._g.interval_ms, self.interval_ms, since=since))
+        for t in sorted(cache)[: max(0, len(cache) - self._bars - 5)]:
+            del cache[t]
+        return cache
+
     async def poll(self) -> list[FeatureContext]:
         self._check_task()
         if not self._g.ready:
             return []
-        store, stale = self._g.freeze()  # снимок на цикл: M15-фид обработает тот же
+        store, stale = self._g.take_snapshot(self.interval) if not self._emit_latest else self._g.snapshot()
         out: list[FeatureContext] = []
         for symbol in self._g.symbols:
-            h4 = derive_h4(store[symbol], self._g.interval_ms)
-            if not h4:
+            derived = self._derived(symbol, store[symbol])
+            if not derived:
                 continue
-            last = self._last[symbol]
-            times = sorted(h4)
-            if last is None:  # старт: последняя закрытая H4 - контекст с историей (как emit_latest_on_start)
+            last, times = self._last[symbol], sorted(derived)
+            if last is None:
                 self._last[symbol] = times[-1]
-                out.append(await self._context(symbol, times[-1], h4, received_now=True))
+                if self._emit_latest:  # старт: последняя закрытая свеча - контекст с историей
+                    out.append(await self._context(symbol, times[-1], derived, stale[symbol], received_now=True))
                 continue
             for t in times:
                 if t <= last:
                     continue
-                if t != last + H4_MS:
-                    raise DataError(f"{symbol} 4h: дыра в производных свечах между {last} и {t}")
-                out.append(await self._context(symbol, t, h4, received_now=False))
+                if t != last + self.interval_ms:
+                    raise DataError(f"{symbol} {self.interval}: дыра в производных свечах между {last} и {t}")
+                out.append(await self._context(symbol, t, derived, stale[symbol], received_now=False))
                 last = t
             self._last[symbol] = last
         return out
 
-    async def _context(self, symbol: str, open_time: int, h4: dict[int, Row], *, received_now: bool) -> FeatureContext:
-        times = sorted(t for t in h4 if t <= open_time)[-self._g.htf_bars:]
-        # непрерывность сетки H4 гарантирована заполнением M15: берём только непрерывный хвост
+    async def _context(self, symbol: str, open_time: int, derived: dict[int, Row], stale: dict[int, bool], *, received_now: bool) -> FeatureContext:
+        times = sorted(t for t in derived if t <= open_time)[-self._bars:]
+        # непрерывность сетки гарантирована заполнением M5: берём только непрерывный хвост
         run = [times[-1]]
         for t in reversed(times[:-1]):
-            if run[-1] - t != H4_MS:
+            if run[-1] - t != self.interval_ms:
                 break
             run.append(t)
         times = sorted(run)
-        candles = pl.DataFrame([h4[t] for t in times], schema=KLINE_SCHEMA, orient="row")
-        received = max(self._g.clock(), open_time + H4_MS) if received_now else open_time + H4_MS + STALE_AFTER_MS
-        return await asyncio.to_thread(self._engine.build, symbol, "4h", H4_MS, candles, received)
+        candles = pl.DataFrame([derived[t] for t in times], schema=KLINE_SCHEMA, orient="row")
+        close_ms = open_time + self.interval_ms
+        if self._emit_latest:
+            received = max(self._g.clock(), close_ms) if received_now else close_ms + STALE_AFTER_MS
+        else:  # первичный 15m: как M5 - «опоздавшая» (плоские свечи, разогрев после дыры) не торгуется
+            late = any(stale.get(open_time + k * self._g.interval_ms, False) for k in range(self._per))
+            received = close_ms + STALE_AFTER_MS if late else max(self._g.clock(), close_ms)
+        return await asyncio.to_thread(self._engine.build, symbol, self.interval, self.interval_ms, candles, received)
+
+
+class Mt5M15View(Mt5DerivedView):
+    """15m (рабочий таймфрейм SMC_Counter_Trend, OBI_Breakout, ICT_Killzones, VWAP_Reversion) - первичный, обязан опрашиваться ПОСЛЕ старших видов."""
+
+    def __init__(self, group: _Group, engine: FeatureEngine, history_bars: int = 300):
+        super().__init__(group, engine, "15m", M15_MS, history_bars, emit_latest=False)
+
+
+class Mt5H1View(Mt5DerivedView):
+    """1h: структура и пул ликвидности SMC_Pro_Trend (контекст идёт в MtfState: свип считается на 1h)."""
+
+    def __init__(self, group: _Group, engine: FeatureEngine, history_bars: int = D.MTF_STRUCT_HISTORY_BARS):
+        super().__init__(group, engine, "1h", H1_MS, history_bars, emit_latest=True)
+
+
+class Mt5HtfView(Mt5DerivedView):
+    """4h (HTF Bias для 15m-стратегий): на старте - последняя закрытая 4h, затем каждая новая."""
+
+    def __init__(self, group: _Group, engine: FeatureEngine, history_bars: int = 110):
+        super().__init__(group, engine, "4h", H4_MS, history_bars, emit_latest=True)
+
+
+class Mt5D1View(Mt5DerivedView):
+    """1d (HTF Bias SMC_Pro_Trend)."""
+
+    def __init__(self, group: _Group, engine: FeatureEngine, history_bars: int = D.MTF_BIAS_HISTORY_BARS):
+        super().__init__(group, engine, "1d", D1_MS, history_bars, emit_latest=True)
 
 
 class Mt5TickFeed:
@@ -359,31 +478,6 @@ class Mt5TickFeed:
                 log.warning("MetaApi: сбой котировок (%d/%d): %s", failures, self._max, exc)
                 self._on_gap(self._clock())  # тики за сбой потеряны: активные сделки помечаются gap_affected
             await asyncio.sleep(self._poll_s)
-
-
-class MultiFeed:
-    """Несколько фидов с одним контрактом (Binance + MT5) как один: poll склеивает контексты, start/aclose/check - всем."""
-
-    def __init__(self, feeds: list[Any]):
-        self._feeds = feeds
-
-    def start(self) -> None:
-        for f in self._feeds:
-            f.start()
-
-    async def aclose(self) -> None:
-        for f in self._feeds:
-            await f.aclose()
-
-    def check(self) -> None:
-        for f in self._feeds:
-            f.check()
-
-    async def poll(self) -> list[FeatureContext]:
-        out: list[FeatureContext] = []
-        for f in self._feeds:
-            out += await f.poll()
-        return out
 
 
 async def connect_mt5_data(symbols: tuple[str, ...]):

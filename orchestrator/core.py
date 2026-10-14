@@ -1,9 +1,12 @@
 """Orchestrator: FeatureContext -> стратегии -> блокировка монеты -> маршрут (SHADOW | LIVE).
 
 Поток на каждую закрытую свечу (строго в таком порядке):
-  1. проверка порядка: свеча монеты обязана идти ровно за предыдущей (feed гарантирует непрерывность, иначе баг -> ошибка);
-  2. приёмники сообщают о закрытии свечи (сроки заявок, отмены, тайм-ауты; могут освободить монету);
-  3. каждая стратегия считает `detect(ctx)`; ошибка стратегии НЕ перехватывается: процесс падает, Docker перезапускает (R1);
+  1. проверка порядка: свеча монеты обязана идти ровно за предыдущей В СВОЁМ ТАЙМФРЕЙМЕ (ключ (монета, interval): 5m и 15m одной монеты - две независимые
+     цепочки; feed гарантирует непрерывность, иначе баг -> ошибка);
+  2. приёмники сообщают о закрытии свечи с её таймфреймом (сроки заявок, отмены, тайм-ауты; могут освободить монету): приёмник учитывает только сделки
+     этого таймфрейма (бар 15m не «стареет» заявку, поданную на 5m);
+  3. каждая стратегия СВОЕГО таймфрейма (`strategy.interval`; None - любого) считает `detect(ctx)`; ошибка стратегии НЕ перехватывается: процесс падает,
+     Docker перезапускает (R1). Закрытия 1h/1d сюда не попадают вовсе: они обновляют состояние старших таймфреймов (orchestrator/mtf.py);
   4. каждый сигнал: «устарел» (свеча закрылась давно: replay после обрыва) -> skipped_stale; монета занята ->
      skipped_due_to_lock (D4); приёмник отказал по риску -> skipped_risk, блокировка снимается; иначе -> signal_accepted.
 
@@ -85,10 +88,13 @@ class Orchestrator:
         self._last_bar[key] = ctx.bar_open_time
         bar = ctx.bar
         for sink in {id(r.sink): r.sink for r in self._routes.values()}.values():
-            sink.on_bar_closed(ctx.symbol, ctx.bar_open_time, ctx.last_close, ctx.received_ms, bar)
+            sink.on_bar_closed(ctx.symbol, ctx.bar_open_time, ctx.last_close, ctx.received_ms, bar, interval=ctx.interval)  # приёмник считает бары только своих сделок
         age = ctx.received_ms - ctx.bar_close_ms
         events: list[Event] = []
         for strategy in self._strategies:
+            want = getattr(strategy, "interval", None)
+            if want is not None and want != ctx.interval:
+                continue  # у стратегии свой рабочий таймфрейм (SMC_Pro_Trend - 5m, остальные - 15m): на чужой свече она не считается (гонка 1h/1d против 5m)
             if self._symbol_filter is not None and not self._symbol_filter(strategy.name, ctx.symbol):
                 continue  # стратегия на этом символе запрещена (напр. OBI_Breakout без L2-стакана): даже не считается
             analyze = getattr(strategy, "analyze", None)  # стратегия с автоматом состояний отдаёт и сигналы, и состояния за один расчёт

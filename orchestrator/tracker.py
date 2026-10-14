@@ -40,6 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+import config
 from features import defaults as D
 from orchestrator.journal import EventLog
 from orchestrator.risk import RiskSizer, Sizing, SizingRejected
@@ -66,7 +67,7 @@ class SignalSink(Protocol):
     """Приёмник сигналов маршрута: VirtualTracker (SHADOW) или LiveBarrier-адаптер (LIVE, Этап 4)."""
 
     def submit(self, signal: Signal, now_ms: int) -> Submission: ...
-    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: BarInfo | None = None) -> None: ...
+    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: BarInfo | None = None, interval: str | None = None) -> None: ...
     def add_close_listener(self, listener: Callable[[Any], None]) -> None: ...  # слушателю достаточно .trade_id (VirtualTrade | LiveTrade)
 
 
@@ -340,26 +341,38 @@ class VirtualTracker:
 
     # ------------------------------------------------------------------------------------------ свечи
 
-    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: BarInfo | None = None) -> None:
+    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: BarInfo | None = None, interval: str | None = None) -> None:
+        """Закрытие свечи. `interval` - её таймфрейм: сделка живёт по свечам СВОЕГО таймфрейма (сигнала), чужие (15m при сделке на 5m) пропускаются; None - любой (старые вызовы)."""
         for t in list(self._active.get(symbol, {}).values()):
+            if interval is not None and t.signal.interval != interval:
+                continue
             if bar_open_time <= t.signal.bar_open_time:
                 raise TrackerError(f"{t.trade_id}: закрытие свечи {bar_open_time} не позже сигнальной {t.signal.bar_open_time}")
             t.bars_closed += 1
             q = t.sgn * close
             if t.status == PENDING_MARKET:
                 raise TrackerError(f"{t.trade_id}: MARKET не исполнен за свечу - поток тиков {symbol} остановился?")
+            scale = self._bars_scale(t)
             if t.status == PENDING_LIMIT:
                 if q > t.inval_m:
                     self._cancel(t, "invalidated", now_ms)
-                elif t.bars_closed >= self._limit_ttl:
+                elif t.bars_closed >= self._limit_ttl * scale:
                     self._cancel(t, "ttl", now_ms)
-            elif t.bars_closed - t.fill_bar_no >= self._max_hold:
+            elif t.bars_closed - t.fill_bar_no >= self._max_hold * scale:
                 self._close_leg(t, "timeout", t.remaining, close, now_ms)
             else:
                 self._trail(t, bar, now_ms)
 
+    @staticmethod
+    def _bars_scale(t: VirtualTrade) -> int:
+        """Сроки (`limit_ttl_bars`, `max_hold_bars`) заданы в барах M15; на 5m умножаются на 3 - календарное время то же (features.defaults.bars_scale)."""
+        ms = config.INTERVAL_MS.get(t.signal.interval)
+        if ms is None:
+            raise ConfigError(f"{t.trade_id}: неизвестный таймфрейм сигнала {t.signal.interval!r}")
+        return D.bars_scale(ms)
+
     def _trail(self, t: VirtualTrade, bar: BarInfo | None, now_ms: int) -> None:
-        """Подтягивание стопа runner'а по закрытой свече (вступает в силу со следующего тика: без заглядывания вперёд)."""
+        """Подтягивание стопа runner'а по закрытой свече СВОЕГО таймфрейма (вступает в силу со следующего тика: без заглядывания вперёд)."""
         if bar is not None and bar.high is not None and bar.low is not None:
             t.recent_bars.append(bar)
         if not t.runner_active:

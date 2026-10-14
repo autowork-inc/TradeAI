@@ -428,7 +428,7 @@ class Primary:
         self.signals.append(s)
         return Submission(self.accept, None if self.accept else "exposure")
 
-    def on_bar_closed(self, symbol, bar_open_time, close, now_ms, bar=None):
+    def on_bar_closed(self, symbol, bar_open_time, close, now_ms, bar=None, interval=None):
         self.bars.append((symbol, close))
 
     def add_close_listener(self, listener):
@@ -638,3 +638,12 @@ def test_default_open_position_limit_is_four(tmp_path):
     assert config.LIVE_MAX_OPEN_POSITIONS == 4 and manager(tmp_path).max_open_positions == 4
     with pytest.raises(ConfigError):
         manager(tmp_path, max_open_positions=0)
+
+
+def test_build_on_the_5m_clock_for_pro_trend_and_vwap_with_calendar_equal_limits(build_env, monkeypatch):
+    """2026-10-15: SMC_Pro_Trend и VWAP_Reversion идут на одном 5m такте; сроки заявки и тайм-аута пересчитаны (x3), чужие таймфреймы движок пропускает."""
+    monkeypatch.setattr(config, "APPROVED_STRATEGIES", (STRATEGY, "VWAP_Reversion"))
+    engine = build(interval_ms=300_000)
+    assert engine.risk.approved == {STRATEGY, "VWAP_Reversion"}
+    assert engine._interval_ms == 300_000 and engine._ttl_bars == 30 and engine._max_hold == config.LIVE_MAX_HOLD_BARS * 3
+    engine.on_bar_closed(SYM, T0, 100.0, NOW, None, interval="15m")  # чужой таймфрейм: молча пропущен

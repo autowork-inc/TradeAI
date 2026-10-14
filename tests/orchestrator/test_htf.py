@@ -163,7 +163,7 @@ def test_missing_h4_stops_the_loop_instead_of_trading_blind_r1(tmp_path):
 def test_shadow_main_wires_the_filter_on_by_default():
     assert D.HTF_FILTER_ENABLED is True and D.HTF_INTERVAL == "4h" and config.INTERVAL_MS[D.HTF_INTERVAL] == H4
     src = inspect.getsource(shadow_run.shadow_main)
-    assert "build_strategies(names)" in src and "interval=D.HTF_INTERVAL" in src and "emit_latest_on_start=True" in src
+    assert "build_strategies(names, mtf=mtf, interval=opts.interval)" in src and "interval=D.HTF_INTERVAL" in src and "emit_latest_on_start=True" in src
     smc, counter = build_strategies(("SMC_Pro_Trend", "SMC_Counter_Trend"))
     assert smc.params.htf_filter is True and counter.name == "SMC_Counter_Trend"  # обе читают H4; боевой набор Shadow включает фильтр
     assert D.HTF_HISTORY_BARS >= 300  # хватает на 2+ подтверждённых свинга с каждой стороны (k = 5, амплитуда > 1.5 ATR)

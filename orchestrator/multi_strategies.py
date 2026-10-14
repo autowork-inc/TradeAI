@@ -20,6 +20,7 @@ from strategies.counter_trend import CounterTrendParams, detect_counter_trend
 from strategies.killzones import DAY_MS, HOUR_MS, KillzoneParams, detect_killzones
 from strategies.obi_breakout import DELTA_COLUMN, OBI_COLUMN, ObiParams, detect_obi_breakout
 from strategies.vwap_reversion import VwapParams, detect_vwap_reversion
+from utils.errors import DataError
 
 SMC_COUNTER_TREND = "SMC_Counter_Trend"
 OBI_BREAKOUT = "OBI_Breakout"
@@ -127,10 +128,14 @@ class StrategyKillzones:
 class StrategyVwapReversion:
     name = VWAP_REVERSION
 
-    def __init__(self, params: VwapParams | None = None):
+    def __init__(self, params: VwapParams | None = None, interval: str | None = None):
+        """interval - рабочий таймфрейм (Shadow/live: 5m, вместе с SMC_Pro_Trend); None - любой. Окна параметров по умолчанию - в барах M5."""
         self.params = params or VwapParams()
+        self.interval = interval
 
     def detect(self, ctx: FeatureContext) -> tuple[Signal, ...]:
+        if self.interval is not None and ctx.interval != self.interval:  # Оркестратор такой контекст не передаёт; прямой вызов - баг (R1)
+            raise DataError(f"{self.name}: стратегия считается только на {self.interval}, получен контекст {ctx.symbol} {ctx.interval}")
         det = detect_vwap_reversion(ctx.frame, self.params)
         last = _last(det)
         out = []

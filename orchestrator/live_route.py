@@ -219,7 +219,8 @@ class LiveBarrierSink:
         self._wake.set()
         return Submission(True)
 
-    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: Any = None) -> None:
+    def on_bar_closed(self, symbol: str, bar_open_time: int, close: float, now_ms: int, bar: Any = None, interval: str | None = None) -> None:
+        # `interval` принят ради протокола SignalSink (Оркестратор передаёт таймфрейм свечи); модуль заморожен (2026-10-10) и живёт по свечам одного таймфрейма
         t = self._trades.get(symbol)
         if t is None:
             return

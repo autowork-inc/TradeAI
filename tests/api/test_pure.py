@@ -303,3 +303,15 @@ def test_heartbeat_takes_the_freshest_of_shadow_and_live_dirs(tmp_path):
     assert 3 < freshest_heartbeat_age_s([shadow, live]) < 20 and freshest_heartbeat_age_s([shadow, None]) > 800
     s = load_settings({"DATABASE_URL": DSN, "API_KEY": KEY, "SHADOW_DATA_DIR": str(shadow), "LIVE_DATA_DIR": str(live)})
     assert s.live_data_dir == live and load_settings({"DATABASE_URL": DSN, "API_KEY": KEY}).live_data_dir is None
+
+
+def test_smc_reason_for_multi_timeframe_signals_names_the_sweep_and_working_timeframes():
+    meta = {"pool_level": 150.5, "sweep_time": 1_760_000_000_000, "bars_since_sweep": 7, "risk_pct": 0.004, "atr": 0.4, "interval": "5m",
+            "sweep_interval": "1h", "htf_interval": "1d", "htf_bias": -1, "htf_label": "Bearish"}
+    trade = {"strategy_id": "SMC_Pro_Trend", "strategy_name": "SMC_Pro_Trend", "side": "short", "coin": "SOLUSDT", "planned_entry": 150.0, "sl": 152.0, "tp": 144.0}
+    r = build_reason(trade, meta, [])
+    assert r["title"] == "SMC Pro Trend · шорт · SOLUSDT (1D: Bearish)"
+    lines = r["summary"].splitlines()
+    assert "против структуры 1D" in lines[0] and lines[1].startswith("1. Свип ликвидности на 1h:") and "FVG на 5m" in lines[2] and "CHoCH на 5m" in lines[3]
+    assert {"label": "Тренд 1D (HTF Bias)", "value": "Bearish"} in r["facts"] and {"label": "Таймфрейм свипа", "value": "1h"} in r["facts"]
+    assert {"label": "Таймфрейм", "value": "5m"} in r["facts"]

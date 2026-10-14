@@ -2,6 +2,8 @@
 историю - только минимальная и только после того, как система заработает. Параметры признаков - в SmcParams
 (features/smc.py), здесь параметры сделок. Детекторы Этапа 2 читают эти константы."""
 
+from utils.errors import ConfigError
+
 RISK_PER_TRADE = 0.01  # D10: строго 1% депозита на сделку
 MAX_EXPOSURE = 5.0  # О8/О12: |позиция| * цена / эквити; больше - сделку отклоняем и пишем в лог. Было 1.0; стоп 0.3% при риске 1% = плечо ~3.3x.
 # Намеренно НЕ равно config.LIVE_MAX_EXPOSURE (1.0): тот потолок - ML-контур live_run, его менять без отдельного решения нельзя.
@@ -25,3 +27,22 @@ TRAIL_WICK_BARS = 3  # режим "wick": стоп за экстремумом �
 HTF_INTERVAL = "4h"  # старший таймфрейм контекста
 HTF_FILTER_ENABLED = True  # включает ли Shadow фильтр (SmcSetupParams.htf_filter по умолчанию False: бэктест Этапа 2 идёт без H4)
 HTF_HISTORY_BARS = 300  # H4-свечей на монету: 50 суток, хватает на 2+ подтверждённых свинга с каждой стороны
+
+# Мульти-таймфреймовый SMC (2026-10-14, задание пользователя): 1d (HTF Bias) -> 1h (пул ликвидности и свип) -> 5m (FVG, CHoCH, вход).
+# Включает только `SMC_Pro_Trend`; остальные четыре стратегии остаются на 15m (и H4 у SMC_Counter_Trend) без изменений.
+MTF_ENABLED = True
+MTF_BASE_INTERVAL = "5m"  # рабочий таймфрейм: FVG, CHoCH, вход, сопровождение позиции
+MTF_STRUCT_INTERVAL = "1h"  # структура и свип пула ликвидности
+MTF_BIAS_INTERVAL = "1d"  # HTF Bias
+MTF_STRUCT_HISTORY_BARS = 300  # 1h-свечей на монету (12.5 суток)
+MTF_BIAS_HISTORY_BARS = 90  # 1d-свечей на монету (❓ выбор Claude: у MT5 цена - ~26 страниц REST истории M5 на символ при старте)
+
+# Сроки в барах заданы для M15 (D8, О24: 30 / 10 / 192). На более мелком таймфрейме они умножаются так, чтобы календарное время не изменилось.
+REFERENCE_BAR_MS = 900_000
+
+
+def bars_scale(interval_ms: int) -> int:
+    """Во сколько раз сроки в барах (setup_ttl_bars, LIMIT_TTL_BARS, max_hold_bars) длиннее на таймфрейме interval_ms, чем на M15 (5m -> 3; 15m и старше -> 1)."""
+    if isinstance(interval_ms, bool) or not isinstance(interval_ms, int) or interval_ms <= 0:
+        raise ConfigError(f"interval_ms должен быть положительным целым, получено {interval_ms!r}")
+    return max(1, REFERENCE_BAR_MS // interval_ms)

@@ -29,8 +29,9 @@ AVAIL_COLUMN = "htf_avail_ms"
 _NEEDED = ("open_time", "atr", "sh1_price", "sh2_price", "sl1_price", "sl2_price")
 
 
-def htf_bias_table(h4: pl.DataFrame, interval_ms: int) -> pl.DataFrame:
-    """H4-кадр с признаками (features.smc.add_features) -> таблица [htf_avail_ms, htf_bias] по возрастанию времени."""
+def htf_bias_table(h4: pl.DataFrame, interval_ms: int, *, avail_column: str = AVAIL_COLUMN, bias_column: str = BIAS_COLUMN) -> pl.DataFrame:
+    """H4-кадр с признаками (features.smc.add_features) -> таблица [htf_avail_ms, htf_bias] по возрастанию времени.
+    Имена колонок задаются (мульти-таймфреймовый режим: `1d_avail_ms` / `1d_bias`); определение bias от таймфрейма не зависит."""
     missing = [c for c in _NEEDED if c not in h4.columns]
     if missing:
         raise DataError(f"HTF: в H4-кадре нет колонок {missing} (сначала features.smc.add_features)")
@@ -45,23 +46,23 @@ def htf_bias_table(h4: pl.DataFrame, interval_ms: int) -> pl.DataFrame:
         .otherwise(NEUTRAL)
         .cast(pl.Int8)
     )
-    return h4.select((pl.col("open_time") + interval_ms).alias(AVAIL_COLUMN), bias.alias(BIAS_COLUMN))
+    return h4.select((pl.col("open_time") + interval_ms).alias(avail_column), bias.alias(bias_column))
 
 
-def attach_htf_bias(frame: pl.DataFrame, table: pl.DataFrame) -> pl.DataFrame:
-    """Добавить к M15-кадру колонки htf_bias и htf_avail_ms: последняя H4-свеча, закрывшаяся не позже open_time M15-свечи."""
-    clash = [c for c in (BIAS_COLUMN, AVAIL_COLUMN) if c in frame.columns]
+def attach_htf_bias(frame: pl.DataFrame, table: pl.DataFrame, *, avail_column: str = AVAIL_COLUMN, bias_column: str = BIAS_COLUMN) -> pl.DataFrame:
+    """Добавить к кадру младшего таймфрейма колонки htf_bias и htf_avail_ms: последняя старшая свеча, закрывшаяся не позже open_time его свечи."""
+    clash = [c for c in (bias_column, avail_column) if c in frame.columns]
     if clash:
         raise DataError(f"HTF: колонки {clash} уже есть в кадре")
     if "open_time" not in frame.columns:
         raise DataError("HTF: в кадре нет open_time")
-    return frame.join_asof(table, left_on="open_time", right_on=AVAIL_COLUMN, strategy="backward")
+    return frame.join_asof(table, left_on="open_time", right_on=avail_column, strategy="backward")
 
 
-def side_allowed(side: str) -> pl.Expr:
-    """Сторона сетапа разрешена структурой H4: шорт - не при Bullish, лонг - не при Bearish; null (нет bias) - запрет."""
+def side_allowed(side: str, column: str = BIAS_COLUMN) -> pl.Expr:
+    """Сторона сетапа разрешена структурой старшего таймфрейма: шорт - не при Bullish, лонг - не при Bearish; null (нет bias) - запрет."""
     if side == "short":
-        return (pl.col(BIAS_COLUMN) <= NEUTRAL).fill_null(False)
+        return (pl.col(column) <= NEUTRAL).fill_null(False)
     if side == "long":
-        return (pl.col(BIAS_COLUMN) >= NEUTRAL).fill_null(False)
+        return (pl.col(column) >= NEUTRAL).fill_null(False)
     raise DataError(f"HTF: неизвестная сторона {side!r}")

@@ -14,10 +14,11 @@ import polars as pl
 
 from features import defaults as D
 from features.htf import BIAS_COLUMN, BIAS_LABELS
+from features.mtf import D1_BIAS, H1_OPEN
 from orchestrator.types import Direction, FeatureContext, Kind, Signal, geometry
 from strategies.breakout import BreakoutParams, detect_breakout
 from strategies.smc_setups import SIDES, SmcSetupParams, detect_smc
-from utils.errors import DataError
+from utils.errors import ConfigError, DataError
 
 
 class Strategy(Protocol):
@@ -30,10 +31,11 @@ def _signal_id(strategy: str, ctx: FeatureContext, direction: Direction) -> str:
     return f"{strategy}:{ctx.symbol}:{ctx.interval}:{ctx.bar_open_time}:{direction.value}"
 
 
-def _htf_meta(last: dict) -> dict:
-    """Контекст H4 на сигнале (если оркестратор присоединил htf_bias): +1 Bullish / 0 Neutral / -1 Bearish. Попадает в снапшот и в причину входа."""
-    bias = last.get(BIAS_COLUMN)
-    return {} if bias is None else {"htf_interval": D.HTF_INTERVAL, "htf_bias": int(bias), "htf_label": BIAS_LABELS[int(bias)]}
+def _htf_meta(last: dict, column: str = BIAS_COLUMN, interval: str = D.HTF_INTERVAL) -> dict:
+    """Контекст старшего таймфрейма на сигнале (если оркестратор присоединил колонку bias; H4 или, в MTF-режиме, 1d): +1 Bullish / 0 Neutral / -1 Bearish.
+    Попадает в снапшот и в причину входа."""
+    bias = last.get(column)
+    return {} if bias is None else {"htf_interval": interval, "htf_bias": int(bias), "htf_label": BIAS_LABELS[int(bias)]}
 
 
 SMC_PRO_TREND = "SMC_Pro_Trend"
@@ -45,16 +47,23 @@ class StrategySMC:
 
     name = SMC_PRO_TREND
 
-    def __init__(self, params: SmcSetupParams | None = None, name: str | None = None):
+    def __init__(self, params: SmcSetupParams | None = None, name: str | None = None, interval: str | None = None):
+        """interval - рабочий таймфрейм стратегии: Оркестратор считает её ТОЛЬКО на закрытии свечи этого таймфрейма (None - на любой, как раньше).
+        С `params.mtf=True` обязателен: автомат ждёт кадр 5m, обогащённый колонками 1h/1d, и на другом таймфрейме работать не может."""
         self.params = params or SmcSetupParams()
+        if self.params.mtf and interval is None:
+            raise ConfigError("StrategySMC: с mtf=True нужен рабочий interval (например '5m')")
         if name is not None:
             self.name = name
+        self.interval = interval
 
     def detect(self, ctx: FeatureContext) -> tuple[Signal, ...]:
         return self.analyze(ctx)[0]
 
     def analyze(self, ctx: FeatureContext) -> tuple[tuple[Signal, ...], dict[str, dict]]:
         """Сигналы на закрытой свече и состояния автомата сетапа по сторонам ({side: {state, reject}}) - за ОДИН расчёт детектора."""
+        if self.interval is not None and ctx.interval != self.interval:  # Оркестратор такой контекст не передаёт; прямой вызов - баг (R1)
+            raise DataError(f"{self.name}: стратегия считается только на {self.interval}, получен контекст {ctx.symbol} {ctx.interval}")
         det = detect_smc(ctx.frame, self.params)
         last = det.row(det.height - 1, named=True)
         out = []
@@ -70,9 +79,11 @@ class StrategySMC:
         sweep_idx = last[f"{side}_sweep_idx"]
         if sweep_idx is None:
             raise DataError(f"{ctx.symbol}: сигнал без бара свипа (side={side})")
-        sweep_t = int(det["open_time"][sweep_idx])
+        mtf = self.params.mtf
+        # MTF: свип - событие 1h-свечи; на графике он стоит на её open_time (а строка автомата - первая 5m после её закрытия)
+        sweep_t = int(det[H1_OPEN][sweep_idx]) if mtf else int(det["open_time"][sweep_idx])
         pool, extreme = last[f"{side}_pool_level"], last[f"{side}_sweep_extreme"]
-        ttl_end = close_ms + D.LIMIT_TTL_BARS * iv
+        ttl_end = close_ms + D.LIMIT_TTL_BARS * D.bars_scale(iv) * iv  # срок лимитки в календарном времени не зависит от таймфрейма (трекер считает так же)
         geo = (
             geometry("zone", last[f"{side}_fvg_t1"], ttl_end, last[f"{side}_fvg_hi"], last[f"{side}_fvg_lo"], "FVG"),
             geometry("line", last[f"{side}_pool_time"], sweep_t, pool, pool, "пул ликвидности"),
@@ -87,7 +98,8 @@ class StrategySMC:
             direction=direction, kind=Kind.LIMIT, bar_open_time=ctx.bar_open_time, bar_close_ms=close_ms,
             entry=last[f"{side}_entry"], sl=last[f"{side}_sl"], tp=last[f"{side}_tp"], inval=extreme, geometry=geo,
             meta={"pool_level": pool, "sweep_time": sweep_t, "bars_since_sweep": det.height - 1 - sweep_idx,
-                  "risk_pct": last[f"{side}_risk_pct"], "atr": last["atr"], **_htf_meta(last)},
+                  "risk_pct": last[f"{side}_risk_pct"], "atr": last["atr"],
+                  **({"sweep_interval": D.MTF_STRUCT_INTERVAL, **_htf_meta(last, D1_BIAS, D.MTF_BIAS_INTERVAL)} if mtf else _htf_meta(last))},
         )
 
 

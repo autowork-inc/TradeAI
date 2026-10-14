@@ -197,7 +197,7 @@ def test_shadow_main_uses_the_registry_and_wires_micro_and_depth():
     from scripts import shadow_run
 
     src = inspect.getsource(shadow_run.shadow_main)
-    assert "build_strategies(names)" in src and "plans_for(names)" in src and "DepthFeed(" in src and "NEEDS_MICRO" in src
+    assert "build_strategies(names, mtf=mtf, interval=opts.interval)" in src and "plans_for(names)" in src and "DepthFeed(" in src and "NEEDS_MICRO" in src
     assert "depth_feed.start()" in src and "depth_feed.aclose()" in src and "micro.on_tick(tick)" in src and 'mark_gap("trade")' in src
 
 

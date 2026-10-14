@@ -139,6 +139,7 @@ class MicroStructure:
     """Агрегатор + присоединение сводки к контексту M15. `on_tick` - приёмник тиков ленты (из TickFeed)."""
 
     def __init__(self, symbols: tuple[str, ...], interval_ms: int, **kwargs: Any):
+        self.interval_ms = interval_ms  # свечи ЭТОГО таймфрейма получают ms_obi / ms_delta (окна агрегатора кратны ему); другие (5m) ShadowRun не присоединяет
         self.aggregator = MicroAggregator(symbols, interval_ms, **kwargs)
 
     def on_tick(self, tick: Tick) -> None:

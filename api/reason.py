@@ -43,21 +43,26 @@ def _smc(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[st
     risk_pct = _num(meta, "risk_pct")
     extreme = "Swing High" if short else "Swing Low"
     htf_tag, htf_label = _htf(meta)
+    tf = "H4" if htf_tag is None else htf_tag.split(":")[0]  # H4 у одно-таймфреймового автомата, 1D - у мульти-таймфреймового
+    sweep_tf = meta.get("sweep_interval")  # есть только у MTF-сигналов: свип найден на 1h, FVG и CHoCH - на рабочем таймфрейме
+    on_sweep_tf = f" на {sweep_tf}" if isinstance(sweep_tf, str) else ""
+    on_work_tf = f" на {interval}" if isinstance(sweep_tf, str) else ""
     htf_step = [] if htf_tag is None else [
         f"0. Контекст старшего таймфрейма ({htf_tag}): "
         + ("структура нейтральная (HH+HL / LH+LL нет), фильтр сторону не запрещает." if htf_label == "Neutral"
-           else f"{'шорт' if short else 'лонг'} по тренду - сетап против структуры H4 не открывается.")]
+           else f"{'шорт' if short else 'лонг'} по тренду - сетап против структуры {tf} не открывается.")]
     steps = htf_step + [
-        f"1. Свип ликвидности: цена {'проколола вверх' if short else 'проколола вниз'} уровень последнего неснятого {extreme} {fmt_price(pool)} "
+        f"1. Свип ликвидности{on_sweep_tf}: цена {'проколола вверх' if short else 'проколола вниз'} уровень последнего неснятого {extreme} {fmt_price(pool)} "
         f"и закрылась обратно {'ниже' if short else 'выше'} него ({fmt_ms(sweep_t)}"
         + (f", {int(bars)} бар. назад" if bars is not None else "") + ").",
-        f"2. {'Медвежий' if short else 'Бычий'} FVG: импульс {'вниз' if short else 'вверх'} оставил разрыв в цене на трёх свечах.",
-        f"3. CHoCH: закрытие {'ниже' if short else 'выше'} последнего подтверждённого {'Swing Low' if short else 'Swing High'} "
+        f"2. {'Медвежий' if short else 'Бычий'} FVG{on_work_tf}: импульс {'вниз' if short else 'вверх'} оставил разрыв в цене на трёх свечах.",
+        f"3. CHoCH{on_work_tf}: закрытие {'ниже' if short else 'выше'} последнего подтверждённого {'Swing Low' if short else 'Swing High'} "
         f"после свипа - смена характера рынка.",
         f"4. Заявка LIMIT на 50% FVG = {fmt_price(trade.get('planned_entry'))}; SL {fmt_price(trade.get('sl'))} за экстремум свипа с буфером по ATR; "
         f"TP (3R) {fmt_price(trade.get('tp'))}.",
     ]
-    facts = [("Таймфрейм", interval)] + ([] if htf_tag is None else [("Тренд H4 (HTF Bias)", htf_label)]) + [
+    facts = [("Таймфрейм", interval)] + ([] if htf_tag is None else [(f"Тренд {tf} (HTF Bias)", htf_label)]) + [
+             *([("Таймфрейм свипа", sweep_tf)] if isinstance(sweep_tf, str) else []),
              ("Уровень пула ликвидности", fmt_price(pool)), ("Время свипа", fmt_ms(sweep_t)),
              ("Баров от свипа до сигнала", "—" if bars is None else str(int(bars))),
              ("Расстояние до SL, % от цены", "—" if risk_pct is None else f"{risk_pct * 100:.2f}"),
