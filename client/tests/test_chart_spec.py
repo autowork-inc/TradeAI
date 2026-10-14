@@ -39,7 +39,7 @@ def test_closed_smc_short_has_all_drawings(fx):
     assert any(x.startswith("SL") for x in texts) and any(x.startswith("TP") for x in texts) and any(x.startswith("Вход") for x in texts)
     assert any(x.startswith("+1R") for x in texts) and not any(x.startswith("+3R") for x in texts)
     sl = next(h for h in sp["hlines"] if h["text"].startswith("SL"))
-    assert sl["price"] == t["sl"] and sl["color"] == "#ef5350" and sl["style"] == "dashed"
+    assert sl["price"] == t["sl"] and sl["color"] == "#ff3d3d" and sl["style"] == "solid" and sl["title"] == "SL"
     assert next(h for h in sp["hlines"] if h["text"].startswith("TP"))["price"] == t["tp"]
     # зона FVG закрашивается прямоугольником: верхняя цена выше нижней, время зоны внутри сетки
     assert len(sp["boxes"]) == 1 and sp["boxes"][0]["label"] == "FVG" and sp["boxes"][0]["p1"] > sp["boxes"][0]["p2"]

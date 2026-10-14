@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-BG, TEXT, GRID = "#0e1117", "#c9d1d9", "rgba(255,255,255,0.05)"
+BG, TEXT, GRID = "#0e1117", "#e6e9ef", "rgba(255,255,255,0.035)"
+FONT_PX = 15  # крупный шрифт: подписи шкалы цены и легенда читаются с первого взгляда
 UP, DOWN = "#26a69a", "#ef5350"
 INVISIBLE = "rgba(0,0,0,0)"
 INNER_WIDTH = 0.64  # доля окна под сам график; остальное - боковая HTML-панель (карточки «Результат», «Разбор сделки», «Причина входа»)
@@ -34,16 +35,30 @@ def _frame(rows: list[dict[str, Any]], columns: dict[str, str]):
     return df
 
 
+_STYLE_ID = {"solid": 0, "dotted": 1, "dashed": 2}  # LineStyle lightweight-charts
+
+
+def _price_line(chart: Any, h: dict[str, Any]) -> None:
+    """Уровень цены нативной линией lightweight-charts (createPriceLine): толстая, сплошной цвет, а цена - на шкале справа в непрозрачной плашке
+    цвета линии (библиотечный horizontal_line рисовал тонкую линию и мелкий текст без подложки, который сливался со свечами)."""
+    import json
+    title = json.dumps(h["title"], ensure_ascii=True)  # json: безопасная вставка текста в JS
+    chart.run_script(f"""
+    ;{chart.id}.series.createPriceLine({{price: {float(h["price"])!r}, color: {json.dumps(h["color"])}, lineWidth: {min(4, int(h["width"]) + 1)},
+        lineStyle: {_STYLE_ID[h["style"]]}, axisLabelVisible: true, title: {title}}})""")
+
+
 def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
     """Рисует spec (см. chart_spec.build_chart_spec) на `chart`: свечи, зона FVG, линии SL/TP/входа, маркеры, панели с текстом."""
     import pandas as pd
 
     bars = spec["bars"]
-    chart.layout(background_color=BG, text_color=TEXT, font_size=12)
+    chart.layout(background_color=BG, text_color=TEXT, font_size=FONT_PX, font_family="Segoe UI, Arial, sans-serif")
     chart.grid(color=GRID)
     chart.candle_style(up_color=UP, down_color=DOWN, border_up_color=UP, border_down_color=DOWN, wick_up_color=UP, wick_down_color=DOWN)
-    chart.volume_config(up_color="rgba(38,166,154,0.35)", down_color="rgba(239,83,80,0.35)")
-    chart.legend(visible=True, ohlc=True, percent=False, lines=False, font_size=12)
+    chart.volume_config(scale_margin_top=0.9, up_color="rgba(38,166,154,0.35)", down_color="rgba(239,83,80,0.35)")  # объём - узкой полосой внизу, не поверх уровней
+    chart.price_line(label_visible=False, line_visible=False)  # без «последней цены» свечного ряда: пунктир и плашка перекрывали линии входа
+    chart.legend(visible=True, ohlc=True, percent=False, lines=False, font_size=FONT_PX)
     chart.precision(spec["digits"])
     chart.set(_frame(bars, {"open": "o", "high": "h", "low": "l", "close": "c", "volume": "v"}))
 
@@ -55,7 +70,7 @@ def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
     for box in spec["boxes"]:
         chart.box(_ts(box["t1"]), box["p1"], _ts(box["t2"]), box["p2"], color=box["color"], fill_color=box["fill"], width=1)
     for h in spec["hlines"]:
-        chart.horizontal_line(h["price"], color=h["color"], width=h["width"], style=h["style"], text=h["text"], axis_label_visible=True)
+        _price_line(chart, h)
     for i, seg in enumerate(spec["segments"]):
         line = chart.create_line(name=f"seg{i}", color=seg["color"], style="dashed", width=1, price_line=False, price_label=False)
         line.set(pd.DataFrame({"time": pd.DatetimeIndex([_ts(seg["t1"]), _ts(max(seg["t2"], seg["t1"] + spec["interval_ms"]))]).astype("datetime64[ns]"),
@@ -94,7 +109,7 @@ _PANEL_CSS = """
 """
 
 _PANEL_JS = """
-(function(d){
+;(function(d){
   var old=document.getElementById('tradeai-panel'); if(old){old.remove();}
   var st=document.createElement('style'); st.textContent=%(css)s; document.head.appendChild(st);
   var root=document.createElement('div'); root.id='tradeai-panel'; document.body.appendChild(root);
@@ -123,7 +138,7 @@ def _panels(chart: Any, spec: dict[str, Any]) -> None:
     css = json.dumps(_PANEL_CSS % {"w": PANEL_WIDTH_PCT})
     # json.dumps не экранирует U+2028/2029 и '</': ASCII-режим снимает вопрос
     data = json.dumps(spec["panel"], ensure_ascii=True)
-    chart.run_script(_PANEL_JS % {"css": css, "data": data})
+    chart.run_script(_PANEL_JS % {"css": css, "data": data}, run_last=True)  # после остальных скриптов окна; ведущая `;` - см. _PANEL_JS
 
 
 def run_chart_window(spec: dict[str, Any]) -> None:

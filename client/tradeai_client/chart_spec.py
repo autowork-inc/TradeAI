@@ -15,6 +15,7 @@ from typing import Any
 from tradeai_client import fmt, retro
 
 UP, DOWN, AMBER, BLUE, VIOLET, GREY = "#26a69a", "#ef5350", "#ffb300", "#4aa3ff", "#b388ff", "#9aa3b2"
+LINE_SL, LINE_TP, LINE_ENTRY = "#ff3d3d", "#00d26a", "#2f8cff"  # цвета линий уровней: ярче свечей (UP/DOWN), чтобы линия не сливалась со свечой
 MAX_GRID_BARS = 900
 PANEL_WIDTH_CHARS = 44  # ширина боковой панели ~31% окна (см. chart_window.PANEL_WIDTH)
 _UNIT_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
@@ -149,13 +150,13 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
     sl, tp = trade.get("sl"), trade.get("tp")
     planned, entry = trade.get("planned_entry"), trade.get("entry_price")
     if sl is not None:
-        hlines.append({"price": sl, "color": DOWN, "style": "dashed", "text": f"SL {fmt.fmt_price(sl)}", "width": 3})
+        hlines.append({"price": sl, "color": LINE_SL, "style": "solid", "text": f"SL {fmt.fmt_price(sl)}", "title": "SL", "width": 3})
     if tp is not None:
-        hlines.append({"price": tp, "color": UP, "style": "dashed", "text": f"TP {fmt.fmt_price(tp)}", "width": 3})
+        hlines.append({"price": tp, "color": LINE_TP, "style": "solid", "text": f"TP {fmt.fmt_price(tp)}", "title": "TP", "width": 3})
     if entry is not None:
-        hlines.append({"price": entry, "color": BLUE, "style": "solid", "text": f"Вход {fmt.fmt_price(entry)}", "width": 3})
-    if planned is not None and (entry is None or abs(planned - entry) > 1e-12 * max(1.0, abs(entry))):
-        hlines.append({"price": planned, "color": BLUE, "style": "dotted", "text": f"План входа {fmt.fmt_price(planned)}", "width": 2})
+        hlines.append({"price": entry, "color": LINE_ENTRY, "style": "solid", "text": f"Вход {fmt.fmt_price(entry)}", "title": "ВХОД", "width": 3})
+    if planned is not None and (entry is None or abs(planned - entry) > 1e-5 * max(1.0, abs(entry))):
+        hlines.append({"price": planned, "color": BLUE, "style": "dotted", "text": f"План входа {fmt.fmt_price(planned)}", "title": "ПЛАН", "width": 2})
     base, risk = (entry if entry is not None else planned), None
     if base is not None and sl is not None:
         risk = abs(base - sl)
@@ -165,7 +166,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
             price = base + k * risk if long else base - k * risk
             if tp is not None and abs(price - tp) <= 1e-9 * max(1.0, abs(tp)):
                 continue  # совпадает с TP - не дублируем
-            hlines.append({"price": price, "color": UP, "style": "dotted", "text": f"+{k:g}R ({frac * 100:.0f}%)", "width": 2})
+            hlines.append({"price": price, "color": UP, "style": "dotted", "text": f"+{k:g}R ({frac * 100:.0f}%)", "title": f"+{k:g}R", "width": 2})
 
     # вспомогательный невидимый ряд: продлевает ось времени за последнюю свечу (маркеры/зоны/линии не должны пропадать)
     by_bar: dict[int, float] = {}

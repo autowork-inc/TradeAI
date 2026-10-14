@@ -39,7 +39,7 @@ def test_pandas_time_resolution_cannot_break_the_time_axis():
 def test_all_drawings_reach_the_chart_script(fx):
     snap, spec = make_spec(fx)
     html = static_html(spec)
-    for needle in ("Причина входа", "Результат", "FVG", "SL ", "TP ", "Сигнал", "свип", "CHoCH", "пул ликвидности", "Вход ", "Трейлинг"):
+    for needle in ("Причина входа", "Результат", "FVG", "createPriceLine",  "Сигнал", "свип", "CHoCH", "пул ликвидности", "Вход ", "Трейлинг"):
         assert needle in html or json.dumps(needle)[1:-1] in html, needle  # тексты маркеров библиотека кладёт в JSON с \uXXXX-экранированием
     # данные свечей ушли с корректными секундами эпохи (не 1970 год)
     first = spec["bars"][0]["t"] // 1000
@@ -67,3 +67,12 @@ def test_side_panel_is_plain_html_without_python_callbacks(fx):
     html = static_html(spec)
     assert "Lib.Table" not in html and "tradeai-panel" in html and "Разбор сделки" in html and "textContent" in html
     assert "+214.00 USDT" in html
+
+
+def test_panel_script_cannot_be_glued_to_the_previous_statement(fx):
+    """Скрипты окна склеиваются через перевод строки без `;`: панель, начатая с `(`, превращалась в ВЫЗОВ предыдущего выражения - справа была пустота."""
+    from tradeai_client.chart_window import _PANEL_JS
+
+    assert _PANEL_JS.lstrip().startswith(";(function")
+    _, spec = make_spec(fx)
+    assert "tradeai-panel" in static_html(spec)
