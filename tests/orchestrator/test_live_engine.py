@@ -614,3 +614,27 @@ def test_no_error_suppression_in_live_modules_r1():
         code = "\n".join(line.split("#")[0] for line in f.read_text(encoding="utf-8").splitlines())
         assert not banned.search(code), f.name
     assert CLOSED == "closed"
+
+
+def test_open_position_limit_sends_extra_signals_to_shadow_only(tmp_path):
+    """Лимит одновременных боевых позиций: сверх него сигнал отклоняется боевым контуром (`max_open_positions`), а Shadow-трекер его всё равно получил."""
+    env = Env(tmp_path, risk_kw={"max_open_positions": 1})
+    primary = Primary()
+    sink = LiveMirrorSink(primary, env.engine)
+    first, second = signal(symbol="SOLUSDT", n=1), signal(symbol="XRPUSDT", n=2)
+    assert sink.submit(first, NOW).accepted and sink.submit(second, NOW).accepted
+    assert primary.signals == [first, second]  # виртуальный учёт идёт по обоим
+    run(env.engine.step())
+    run(env.engine.step())
+    rej = env.event("live_rejected")
+    assert rej.detail["reason"] == "max_open_positions" and rej.detail["max"] == 1 and rej.symbol == "XRPUSDT"
+    assert [o["symbol"] for o in env.posts("MARKET")] == ["SOLUSDT"]  # на биржу ушёл только первый
+    # место освободилось - следующий сигнал снова боевой
+    env.risk.release("SOLUSDT", first.signal_id)
+    assert env.risk.gate(signal(symbol="XRPUSDT", n=3), NOW) is None
+
+
+def test_default_open_position_limit_is_four(tmp_path):
+    assert config.LIVE_MAX_OPEN_POSITIONS == 4 and manager(tmp_path).max_open_positions == 4
+    with pytest.raises(ConfigError):
+        manager(tmp_path, max_open_positions=0)

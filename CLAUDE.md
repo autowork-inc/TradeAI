@@ -297,6 +297,7 @@ stdio-сервер `tradeai-risk-analyst` (пакет `mcp>=1.9,<2`) для Curs
 
 | Дата | Что сделано |
 |---|---|
+| 2026-10-14 | Лимит одновременных боевых позиций: `config.LIVE_MAX_OPEN_POSITIONS` (по умолчанию 4, env `LIVE_MAX_OPEN_POSITIONS`), проверка в `LiveRiskManager.gate` (отказ `max_open_positions`; считаются занятые монеты = позиции + заявки до исполнения). Сверх лимита сигнал остаётся виртуальным: Shadow-трекер получает все сигналы всегда (`LiveMirrorSink`). Отдельный compose-сервис `live` **не добавлен** (правка заблокирована проверкой прав, ждёт решения пользователя); боевой режим не включён |
 | 2026-10-14 | Второй прогон `test_live_order.py` (testnet): О18 подтверждена. Исправлено: цена входа из `positionRisk`, если в ответе MARKET нет `avgPrice` (в движке был бы `fill_price=0`); скрипт ждёт терминальный статус отменённого стопа; тесты изолированы от `USE_TESTNET` в локальном `.env` (один из них при заданном `.env` реально запускал скрипт в сеть testnet) |
 | 2026-10-14 | Первый прогон `test_live_order.py` на testnet: подпись, фильтры, баланс (4617.86), mark price — PASS; упал на `positionRisk: []` (нет позиции). Исправлено в `BinanceLiveClient.get_position`: пустой список = нулевая позиция; не-список по-прежнему `DataError` |
 | 2026-10-14 | `LIVE_BINANCE_SYMBOLS` расширен до 8 крипто (= крипта `SHADOW_SYMBOLS`); MT5 в live выключен, `TRADE_MODE=shadow` по умолчанию, **не задеплоено**; боевой режим не включён (нужны `TRADE_MODE=live`, `LIVE_ALLOW_MAINNET=true`, прогон `test_live_order.py` на testnet) |

@@ -98,6 +98,7 @@ class LiveRiskManager:
         pnl_max_age_s: float = config.LIVE_PNL_MAX_AGE_S,
         plans: Mapping[str, ScaleOutPlan] | None = None,
         venues: Collection[str] = ("binance",),
+        max_open_positions: int = config.LIVE_MAX_OPEN_POSITIONS,
     ):
         if not (margin_usdt > 0 and isinstance(leverage, int) and 1 <= leverage <= 125 and daily_loss_limit_usdt > 0):
             raise ConfigError("LiveRiskManager: margin_usdt > 0, leverage целое 1..125, daily_loss_limit_usdt > 0")
@@ -106,6 +107,9 @@ class LiveRiskManager:
         approved = tuple(approved_strategies)
         if not approved or len(set(approved)) != len(approved):
             raise ConfigError(f"LiveRiskManager: approved_strategies пуст или с дублями: {approved}")
+        if not (isinstance(max_open_positions, int) and max_open_positions >= 1):
+            raise ConfigError(f"LiveRiskManager: max_open_positions - целое >= 1, сейчас {max_open_positions!r}")
+        self.max_open_positions = max_open_positions
         self._filters = dict(filters)
         self.approved = frozenset(approved)
         self.margin_usdt, self.leverage, self.daily_loss_limit = float(margin_usdt), leverage, float(daily_loss_limit_usdt)
@@ -193,7 +197,7 @@ class LiveRiskManager:
         return strategy in self.approved
 
     def gate(self, signal: Signal, now_ms: int) -> LiveRejected | None:
-        """Общие для всех площадок ворота: стратегия одобрена, нет блокировки по суточному лимиту (ОДНА на все площадки), свежий PnL ВСЕХ
+        """Общие для всех площадок ворота: стратегия одобрена, не больше `max_open_positions` одновременных позиций (остальные сигналы остаются виртуальными в Shadow), нет блокировки по суточному лимиту (ОДНА на все площадки), свежий PnL ВСЕХ
         площадок, монета свободна. Резерв не ставит. None - можно считать размер (на своей площадке)."""
         if not self.is_approved(signal.strategy):
             return LiveRejected("strategy_not_approved")
@@ -205,6 +209,8 @@ class LiveRiskManager:
                 v: (None if v not in self._venue_pnl else now_ms - self._venue_pnl[v][1]) for v in stale}})
         if signal.symbol in self._busy:
             return LiveRejected("symbol_busy", {"held_by": self._busy[signal.symbol]})
+        if len(self._busy) >= self.max_open_positions:  # занятые монеты = открытые позиции + заявки до исполнения, по всем площадкам
+            return LiveRejected("max_open_positions", {"open": len(self._busy), "max": self.max_open_positions})
         return None
 
     def reserve(self, symbol: str, signal_id: str) -> None:

@@ -935,6 +935,7 @@ async def build_live_engine(
         {s: client.filters(s) for s in symbols}, approved_strategies=config.APPROVED_STRATEGIES, margin_usdt=config.LIVE_MARGIN_USDT,
         leverage=config.LIVE_LEVERAGE, daily_loss_limit_usdt=config.LIVE_DAILY_LOSS_LIMIT_USDT,
         state_path=config.DATA_DIR / config.LIVE_RISK_STATE_NAME, plans=plans, venues=router.venues,
+        max_open_positions=config.LIVE_MAX_OPEN_POSITIONS,
     )
     clock = now_ms or (lambda: int(time.time() * 1000))
     engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush,

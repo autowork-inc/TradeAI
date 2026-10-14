@@ -159,6 +159,7 @@ LIVE_ALLOW_MAINNET = _env_bool("LIVE_ALLOW_MAINNET")  # без него live н�
 APPROVED_STRATEGIES = tuple(s.strip() for s in os.environ.get("APPROVED_STRATEGIES", "SMC_Pro_Trend").split(",") if s.strip())
 LIVE_MARGIN_USDT = _env_float("LIVE_MARGIN_USDT", 10.0)  # фиксированная маржа на сделку (изолированная)
 LIVE_LEVERAGE = int(_env_float("LIVE_LEVERAGE", 10.0))  # плечо: размер позиции = маржа * плечо
+LIVE_MAX_OPEN_POSITIONS = int(_env_float("LIVE_MAX_OPEN_POSITIONS", 4.0))  # одновременно открытых боевых позиций (и заявок) по всем площадкам; сверх лимита сигнал остаётся только виртуальным (Shadow)
 LIVE_DAILY_LOSS_LIMIT_USDT = _env_float("LIVE_DAILY_LOSS_LIMIT_USDT", 50.0)  # суточный убыток (UTC) -> полная блокировка до 00:00 UTC
 LIVE_LIQ_SAFETY = 0.8  # стоп обязан лежать ближе, чем эта доля от расстояния до ликвидации (1/плечо)
 LIVE_MAX_HOLD_BARS = 192  # тайм-аут позиции (как у VirtualTracker): закрытие по рынку
@@ -294,6 +295,8 @@ def validate() -> None:
         raise ConfigError("LIVE_MARGIN_USDT > 0, LIVE_LEVERAGE 1..125, LIVE_DAILY_LOSS_LIMIT_USDT > 0")
     if not (0 < LIVE_LIQ_SAFETY <= 1 and LIVE_PNL_MAX_AGE_S > 0 and LIVE_MAX_HOLD_BARS >= 1 and 0 < LIVE_MAX_ENTRY_DEVIATION < 1):
         raise ConfigError("LIVE_LIQ_SAFETY в (0, 1], LIVE_PNL_MAX_AGE_S > 0, LIVE_MAX_HOLD_BARS >= 1, LIVE_MAX_ENTRY_DEVIATION в (0, 1)")
+    if LIVE_MAX_OPEN_POSITIONS < 1:
+        raise ConfigError(f"LIVE_MAX_OPEN_POSITIONS должен быть >= 1, сейчас {LIVE_MAX_OPEN_POSITIONS}")
     if len(set(APPROVED_STRATEGIES)) != len(APPROVED_STRATEGIES):
         raise ConfigError(f"APPROVED_STRATEGIES содержит дубли: {APPROVED_STRATEGIES}")
     if TRADE_MODE == "live" and not APPROVED_STRATEGIES:
