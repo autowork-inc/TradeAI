@@ -7,7 +7,7 @@ import pytest
 from aiohttp import web
 
 from tradeai_client.api import ApiClient, ApiError, LiveStateStream
-from tradeai_client.binance import BinanceError, fetch_klines, parse_klines
+from tradeai_client.binance import BinanceError, BinanceNoData, fetch_klines, parse_klines
 from tradeai_client.settings import ClientSettings
 
 KEY = "k" * 40
@@ -271,3 +271,27 @@ def test_fetch_klines_maps_http_errors_and_network_failures():
 
     ok, blocked, down = run(body())
     assert ok[0]["c"] == 1.5 and "451" in str(blocked) and "блокировка региона" in str(blocked) and "недоступен" in str(down)
+
+
+@pytest.mark.parametrize("status", [400, 404])
+def test_fetch_klines_400_404_is_no_data_not_an_error(status):
+    """Символа нет на Binance Futures (Forex/металлы из MT5): отдельное исключение, интерфейс покажет снимок из БД без ошибки."""
+    async def body():
+        async def gone(request):
+            return web.json_response({"code": -1121, "msg": "Invalid symbol."}, status=status)
+
+        app = web.Application()
+        app.router.add_get("/fapi/v1/klines", gone)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        base = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                await fetch_klines(session, base, "EURUSD", "15m", 0, 10**9, interval_ms=900_000, now_ms=10**12)
+        finally:
+            await runner.cleanup()
+
+    with pytest.raises(BinanceNoData):
+        run(body())

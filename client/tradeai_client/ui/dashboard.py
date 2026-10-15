@@ -6,11 +6,20 @@ from tradeai_client import fmt
 from tradeai_client.ui import widgets as w
 
 SIDE_ARROW = {"short": "▼", "long": "▲"}
+# колонок на ширине окна (ResponsiveRow, 12 колонок): крипта 4 в ряд (4x2 для 8 монет), MT5 - 3 в ряд; узкое окно - 2 / 1
+CRYPTO_COL = {"xs": 12, "sm": 6, "md": 3}
+MT5_COL = {"xs": 12, "sm": 6, "md": 4}
+
+
+def split_coins(coins: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Крипта (Binance, тикеры на USDT) и Forex / металлы (MT5: EURUSD, XAUUSD, XAGUSD). Любой не-USDT символ - в MT5-группу."""
+    crypto = [c for c in coins if c["coin"].endswith("USDT")]
+    return crypto, [c for c in coins if not c["coin"].endswith("USDT")]
 
 
 class DashboardView:
     def __init__(self) -> None:
-        self._cards = ft.Row(wrap=True, spacing=14, run_spacing=14, vertical_alignment=ft.CrossAxisAlignment.START)
+        self._cards = ft.Column(spacing=10)
         self._events = ft.Column(spacing=2, tight=True)
         self._head = ft.Row(spacing=12)
         self._error = ft.Container(visible=False)
@@ -43,10 +52,23 @@ class DashboardView:
         pulse_color = w.MUTED if alive is None else (w.GREEN if alive else w.RED)
         self._head.controls = [w.dot(pulse_color), ft.Text(pulse, color=pulse_color, size=13, weight=ft.FontWeight.W_600),
                                ft.Text(f"обновлено {fmt.fmt_local(s['server_time'])}", color=w.MUTED, size=12)]
-        self._cards.controls = [self._coin_card(c) for c in s["coins"]]
+        crypto, mt5 = split_coins(s["coins"])
+        self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (MT5)", mt5, MT5_COL)]
         self._events.controls = [self._event_row(e) for e in s["events"]] or [w.label("Событий пока нет")]
 
     # ------------------------------------------------------------------------------------------ карточки
+
+    def _section(self, name: str, coins: list[dict], col: dict) -> list[ft.Control]:
+        if not coins:
+            return []
+        cards = []
+        for c in coins:
+            card = self._coin_card(c)
+            card.col = col
+            cards.append(card)
+        return [ft.Row([w.title(f"{name} · {len(coins)}", 15), ft.Container(expand=True, height=1, bgcolor=w.BORDER)], spacing=10,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.ResponsiveRow(cards, spacing=14, run_spacing=14, vertical_alignment=ft.CrossAxisAlignment.START)]
 
     def _coin_card(self, c: dict) -> ft.Control:
         active = max((x["state"] for x in c["setups"]), default=0)
@@ -61,7 +83,7 @@ class DashboardView:
         for p in c["positions"]:
             rows.append(ft.Divider(height=8, color=w.BORDER))
             rows.append(self._position(p))
-        return w.card(ft.Column(rows, spacing=8), width=370, border_color=fmt.STATE_COLORS[active] if active else w.BORDER)
+        return w.card(ft.Column(rows, spacing=8), border_color=fmt.STATE_COLORS[active] if active else w.BORDER)
 
     @staticmethod
     def _position(p: dict) -> ft.Control:

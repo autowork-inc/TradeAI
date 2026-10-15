@@ -5,6 +5,7 @@
 таймфрейма, по которым работает Shadow (mainnet USDⓈ-M, `GET /fapi/v1/klines`). Они НЕ сохраняются в БД и не влияют на статистику.
 
 Если Binance недоступен с вашего ПК (гео-блок, сеть) - `BinanceError`, график строится по снапшоту, маркеры привязываются к сетке времени.
+Ответ 400/404 (нет такого символа: Forex/металлы идут из MT5) - `BinanceNoData`: без сообщения об ошибке, только снимок из БД.
 """
 
 import asyncio
@@ -17,6 +18,10 @@ MAX_LIMIT = 1500  # максимум свечей за запрос у Binance
 
 class BinanceError(Exception):
     """Публичные свечи получить не удалось (текст показывается пользователю)."""
+
+
+class BinanceNoData(BinanceError):
+    """Binance ответил 400/404: символа или диапазона у него нет (например EURUSD / XAUUSD с MT5). Это не сбой: график строится по снимку из БД."""
 
 
 def parse_klines(rows: Any, *, now_ms: int, interval_ms: int) -> list[dict[str, float]]:
@@ -40,6 +45,8 @@ async def fetch_klines(session: aiohttp.ClientSession, base_url: str, symbol: st
     params = {"symbol": symbol, "interval": interval, "startTime": str(start_ms), "endTime": str(end_ms), "limit": str(MAX_LIMIT)}
     try:
         async with session.get(f"{base_url.rstrip('/')}/fapi/v1/klines", params=params, timeout=aiohttp.ClientTimeout(total=timeout_s)) as resp:
+            if resp.status in (400, 404):
+                raise BinanceNoData(f"Binance ответил HTTP {resp.status}")
             if resp.status != 200:
                 hint = " (возможна блокировка региона)" if resp.status in (403, 418, 429, 451) else ""
                 raise BinanceError(f"Binance ответил HTTP {resp.status}{hint}")

@@ -120,6 +120,29 @@ def test_setup_text_includes_reject_reason():
 
 def test_strategy_filters_cover_the_five_shadow_strategies_and_legacy_names():
     ids = ["SMC_Pro_Trend", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "VWAP_Reversion"]
-    assert [k for k, _ in fmt.STRATEGY_OPTIONS][:6] == ["all"] + ids
+    assert sorted(k for k, _ in fmt.STRATEGY_OPTIONS[1:6]) == sorted(ids)  # пять активных стратегий идут перед архивом
     assert {"smc", "breakout"} <= set(fmt.STRATEGY_RU)  # сделки до мульти-стратегийного релиза остаются видны в фильтрах
     assert all(fmt.STRATEGY_RU[i] for i in ids) and {"SOLUSDT", "LINKUSDT", "BTCUSDT"} <= set(fmt.COINS) and fmt.EXIT_RU["scale_2r"]
+
+
+def test_strategy_filter_groups_live_shadow_archive_in_that_order():
+    opts = fmt.STRATEGY_OPTIONS
+    assert [k for k, _ in opts] == ["all", "SMC_Pro_Trend", "VWAP_Reversion", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "smc", "breakout"]
+    labels = dict(opts)
+    assert labels["SMC_Pro_Trend"] == "🟢 [LIVE] SMC Pro Trend" and labels["VWAP_Reversion"].startswith("🟢 [LIVE]")
+    assert all(labels[k].startswith("🟡 [SHADOW]") for k in ("OBI_Breakout", "SMC_Counter_Trend", "ICT_Killzones"))
+    assert labels["smc"] == "⚪ [АРХИВ] SMC Swing (до 11.10)" and labels["breakout"].startswith("⚪ [АРХИВ]")
+    assert fmt.strategy_label("UNKNOWN") == "⚪ [АРХИВ] UNKNOWN"
+    assert [k for k, _ in fmt.MODE_OPTIONS] == ["all", "live", "shadow"] and fmt.MODE_OPTIONS[1][1] == "🟢 Только LIVE"
+
+
+def test_account_plaque_and_default_mode():
+    live = {"available": True, "balance": 1234.5, "equity": 1250.0}
+    assert fmt.account_text(live) == "Баланс: $1,234.50 USDT | Эквити: $1,250.00 USDT" and fmt.default_mode(live) == "live"
+    for none in (None, {}, {"available": False, "balance": None, "equity": None}, {"available": True, "balance": None, "equity": 1}):
+        assert fmt.account_text(none) == "Shadow Mode (Тест)"
+    assert fmt.default_mode(None) == "shadow" and fmt.default_mode({"available": False}) == "shadow"
+
+
+def test_restart_status_is_human_readable():
+    assert fmt.EXIT_RU["process_restart"] == "Прервана (Рестарт бота)" and "в WinRate не входит" in fmt.RESTART_HINT

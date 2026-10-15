@@ -315,3 +315,29 @@ def test_smc_reason_for_multi_timeframe_signals_names_the_sweep_and_working_time
     assert "против структуры 1D" in lines[0] and lines[1].startswith("1. Свип ликвидности на 1h:") and "FVG на 5m" in lines[2] and "CHoCH на 5m" in lines[3]
     assert {"label": "Тренд 1D (HTF Bias)", "value": "Bearish"} in r["facts"] and {"label": "Таймфрейм свипа", "value": "1h"} in r["facts"]
     assert {"label": "Таймфрейм", "value": "5m"} in r["facts"]
+
+
+def test_read_account_returns_fresh_snapshot_and_hides_stale_or_broken(tmp_path):
+    import json
+    import time
+
+    from api.livestate import ACCOUNT_STALE_S, read_account
+
+    now = time.time()
+    assert read_account([tmp_path, None]) == {"available": False, "balance": None, "equity": None, "currency": None, "age_s": None}
+    path = tmp_path / ".live_account.json"
+    snap = {"updated_ms": int((now - 10) * 1000), "currency": "USDT", "venues": {"binance": {"balance": 90.0, "equity": 95.0}}, "balance": 90.0, "equity": 95.0}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    ok = read_account([tmp_path], now=now)
+    assert ok["available"] and ok["balance"] == 90.0 and ok["equity"] == 95.0 and 9 < ok["age_s"] < 11 and ok["venues"]["binance"]["equity"] == 95.0
+    old = read_account([tmp_path], now=now + ACCOUNT_STALE_S + 5)
+    assert not old["available"] and old["balance"] is None  # устаревший снимок (движок остановлен) = «Shadow Mode»
+    path.write_text("{broken", encoding="utf-8")
+    assert not read_account([tmp_path], now=now)["available"]  # нечитаемый файл не роняет API
+
+
+def test_where_clause_all_mode_does_not_filter_by_contour():
+    from api.main import where_clause
+
+    where, args = where_clause("t.", "all", None, ["BTCUSDT"], None, None)
+    assert args[0] == "all" and "t.mode = $1 OR $1 = 'all'" in where and "t.coin = ANY($2::text[])" in where

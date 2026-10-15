@@ -268,3 +268,23 @@ def test_single_venue_engine_without_router_keeps_the_old_behaviour(tmp_path):
     eng = LiveExecutionEngine(client, risk, MemoryEventLog(), SafeMode(tmp_path / ".sm"), now_ms=lambda: NOW, interval_ms=BAR, post_only=False)
     run(eng.execute(sol(), NOW))
     assert [p["type"] for p in rest.calls("POST", "/fapi/v1/order")] == ["MARKET"] and risk.venues == ("binance",)
+
+
+def test_account_snapshot_sums_binance_and_mt5_for_the_api(tmp_path):
+    """Движок пишет снимок счетов (Binance USDT + MT5) в файл: API отдаёт его клиенту для плашки «Баланс / Эквити»."""
+    import json
+
+    e = Env(tmp_path, equity=1000.0)
+    path = tmp_path / ".live_account.json"
+    e.engine._account_path = path
+    run(e.engine.refresh_pnl(NOW))
+    snap = json.loads(path.read_text(encoding="utf-8"))
+    b = run(e.binance.get_balance())
+    assert snap["updated_ms"] == NOW and snap["currency"] == "USDT"
+    assert snap["venues"]["binance"] == {"balance": b.wallet, "equity": b.margin_balance} and snap["venues"]["mt5"]["equity"] == 1000.0
+    assert snap["balance"] == pytest.approx(b.wallet + snap["venues"]["mt5"]["balance"]) and snap["equity"] == pytest.approx(b.margin_balance + 1000.0)
+
+
+def test_account_snapshot_is_not_written_without_a_path(env, tmp_path):
+    run(env.engine.refresh_pnl(NOW))
+    assert not list(tmp_path.glob(".live_account.json"))

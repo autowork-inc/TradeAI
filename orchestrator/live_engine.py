@@ -208,6 +208,7 @@ class LiveExecutionEngine:
         be_trigger_r: float = D.BE_TRIGGER_R,
         max_entry_deviation: float | None = None,
         router: ExecutionRouter | None = None,
+        account_path: Path | None = None,
     ):
         if not (interval_ms > 0 and limit_ttl_bars >= 1 and poll_interval_s > 0 and pnl_refresh_s > 0 and max_hold_bars >= 1 and be_trigger_r > 0):
             raise ConfigError("LiveExecutionEngine: interval_ms > 0, limit_ttl_bars >= 1, poll_interval_s > 0, pnl_refresh_s > 0, "
@@ -224,6 +225,7 @@ class LiveExecutionEngine:
         self._prepared: set[str] = set()  # монеты, где уже выставлены ISOLATED и плечо
         self._queue: asyncio.Queue[tuple[Signal, int]] = asyncio.Queue()
         self._pnl_at_ms = 0
+        self._account_path = account_path  # куда писать снимок счетов (None - не писать)
         self._task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------------- вход из Оркестратора
@@ -343,6 +345,7 @@ class LiveExecutionEngine:
         else:
             by_venue = await self.router.realized_pnl(start)
         self._pnl_at_ms = now_ms
+        await self._publish_account(now_ms)
         tripped = False
         for venue, pnl in by_venue.items():
             tripped = self.risk.update_venue_pnl(venue, pnl, now_ms) or tripped
@@ -357,6 +360,19 @@ class LiveExecutionEngine:
                 for mt in await self.router.cancel_pending_mt5():
                     self.risk.release(mt.symbol, mt.signal_id)
                     self._emit(now_ms, "live_trade_cancelled", mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", "reason": "risk_blocked"})
+
+    async def _publish_account(self, now_ms: int) -> None:
+        """Снимок баланса/эквити (Binance USDT + MT5 в USD) в файл для API: только чтение счетов, ордеров не касается."""
+        if self._account_path is None:
+            return
+        b = await self.client.get_balance()
+        venues: dict[str, dict[str, float]] = {Venue.BINANCE.value: {"balance": b.wallet, "equity": b.margin_balance}}
+        if self.router is not None and self.router.mt5 is not None:
+            info = await self.router.mt5.get_account_info()
+            venues[Venue.MT5.value] = {"balance": info.balance, "equity": info.equity}
+        snapshot = {"updated_ms": now_ms, "currency": "USDT", "venues": venues,
+                    "balance": sum(v["balance"] for v in venues.values()), "equity": sum(v["equity"] for v in venues.values())}
+        atomic_write_text(self._account_path, json.dumps(snapshot))
 
     async def execute(self, signal: Signal, now_ms: int) -> None:
         if self._safe.active:
@@ -953,6 +969,7 @@ async def build_live_engine(
     clock = now_ms or (lambda: int(time.time() * 1000))
     # сроки в барах (10 / 192) заданы для M15; на каждой сделке они умножаются по её таймфрейму (5m x3): календарное время то же, что у VirtualTracker
     engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush,
-                                 store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router)
+                                 store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router,
+                                 account_path=config.DATA_DIR / config.LIVE_ACCOUNT_NAME)
     await engine.recover(symbols)
     return engine

@@ -32,6 +32,7 @@ def texts(c) -> list[str]:
 class Host:
     def __init__(self, client=None):
         self.client, self.opened, self.ran = client, [], []
+        self.default_mode = "shadow"
 
     def run(self, coro):
         self.ran.append(coro)
@@ -136,3 +137,41 @@ def test_closing_the_window_terminates_the_whole_process(monkeypatch):
     monkeypatch.setattr(os, "_exit", lambda code: calls.append(("exit", code)))
     app_main._shutdown()
     assert calls == ["charts", ("exit", 0)]
+
+
+def test_dashboard_splits_crypto_and_mt5_into_sections():
+    from tradeai_client.ui.dashboard import CRYPTO_COL, MT5_COL, split_coins
+
+    coins = [{"coin": c} for c in ("BTCUSDT", "EURUSD", "ETHUSDT", "XAUUSD", "XAGUSD")]
+    crypto, mt5 = split_coins(coins)
+    assert [c["coin"] for c in crypto] == ["BTCUSDT", "ETHUSDT"] and [c["coin"] for c in mt5] == ["EURUSD", "XAUUSD", "XAGUSD"]
+    assert 12 // CRYPTO_COL["md"] == 4 and 12 // MT5_COL["md"] == 3  # 4 в ряд (8 крипто = 2 ровных ряда), 3 в ряд (3 MT5 = 1 ровный ряд)
+
+
+def test_dashboard_renders_two_labelled_sections(fx):
+    v = DashboardView()
+    msg = fx("live_state.json")
+    v.on_message(msg)
+    t = texts(v._cards)
+    assert any(x.startswith("Крипта (Binance)") for x in t)
+
+
+def test_stats_and_history_explain_filters_and_follow_active_mode(fx):
+    v = StatsView(Host())
+    t = texts(ft.Column(v._render(fx("stats.json"))))
+    assert any("учитываются только завершённые сделки (по TP/SL/BE)" in x and "отфильтрованы" in x for x in t)
+    assert any(x.startswith("В расчёте:") for x in t)
+    assert v._filters()["mode"] == "shadow" and v.follow_default_mode("live") and v._filters()["mode"] == "live"
+    v._mode_touched = True
+    assert not v.follow_default_mode("shadow") and v._filters()["mode"] == "live"  # выбор пользователя не перезаписывается
+    h = HistoryView(Host())
+    assert h._mode.value == "shadow" and h.follow_default_mode("live") and h._mode.value == "live"
+
+
+def test_history_row_marks_restart_with_readable_status_and_tooltip():
+    h = HistoryView(Host())
+    base = {"id": "a", "signal_time": "2026-10-10T12:00:00Z", "coin": "BTCUSDT", "strategy_name": "OBI_Breakout", "mode": "shadow", "side": "long",
+            "status": "aborted", "entry_price": 100.0, "exit_price": None, "r_multiple": None, "pnl": None, "exit_reason": "process_restart",
+            "gap_affected": False, "has_snapshot": False}
+    row = h._row(base).content
+    assert "Прервана (Рестарт бота)" in texts(row) and "SHADOW" in texts(row) and row.tooltip.endswith("в WinRate не входит")

@@ -70,6 +70,32 @@ def freshest_heartbeat_age_s(dirs: "list[Path | None]", now: float | None = None
     return min(ages) if ages else None
 
 
+ACCOUNT_STALE_S = 180.0  # снимок счёта старше - баланс «недоступен» (движок обновляет его раз в ~30 с)
+
+
+def read_account(dirs: "list[Path | None]", now: float | None = None) -> dict[str, Any]:
+    """Баланс/эквити боевого счёта из `.live_account.json` (его пишет боевой движок; в режиме Shadow файла нет).
+    Всегда словарь: `available=False`, если файла нет, он нечитаем или устарел - клиент тогда показывает «Shadow Mode»."""
+    now = time.time() if now is None else now
+    best: dict[str, Any] | None = None
+    for d in dirs:
+        path = None if d is None else d / ".live_account.json"
+        if path is None or not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            snap = {"updated": float(data["updated_ms"]) / 1000.0, "balance": float(data["balance"]), "equity": float(data["equity"]),
+                    "currency": str(data.get("currency", "USDT")), "venues": data.get("venues", {})}
+        except (OSError, ValueError, KeyError, TypeError):
+            continue  # нечитаемый снимок = нет данных (API только читает и не должен падать из-за файла)
+        if best is None or snap["updated"] > best["updated"]:
+            best = snap
+    if best is None or now - best["updated"] > ACCOUNT_STALE_S:
+        return {"available": False, "balance": None, "equity": None, "currency": None, "age_s": None if best is None else now - best["updated"]}
+    return {"available": True, "balance": best["balance"], "equity": best["equity"], "currency": best["currency"],
+            "age_s": max(0.0, now - best["updated"]), "venues": best["venues"]}
+
+
 def parse_setup_row(row: Any) -> dict[str, Any]:
     m = _STATE_RE.match(row["to_state"] or "")
     if m is None or m.group(1) != row["side"]:

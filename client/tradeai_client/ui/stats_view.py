@@ -9,6 +9,8 @@ from tradeai_client.api import ApiError
 from tradeai_client.ui import widgets as w
 
 COINS = fmt.COINS
+STATS_NOTE = ("В статистике учитываются только завершённые сделки (по TP/SL/BE). "
+              "Прерванные рестартом и незавершённые сделки отфильтрованы.")
 PERIODS = {"all": ("Всё время", None), "30d": ("30 дней", 30), "7d": ("7 дней", 7), "1d": ("24 часа", 1)}
 COIN_COLS = [26, 90, 300, 70, 80, 60, 90]
 
@@ -22,24 +24,37 @@ class StatsView:
     def __init__(self, host) -> None:
         self.host = host
         self._coin = _dropdown("Монета", [("all", "Все")] + [(c, fmt.coin_short(c)) for c in COINS], 130, self._changed)
-        self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 170, self._changed)
+        self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 230, self._changed)
+        self._mode = _dropdown("Режим", fmt.MODE_OPTIONS, 180, self._mode_changed)
+        self._mode.value, self._mode_touched = self.host.default_mode, False
         self._side = _dropdown("Сторона", [("all", "Все"), ("long", "Лонг"), ("short", "Шорт")], 120, self._changed)
         self._period = _dropdown("Период", [(k, v[0]) for k, v in PERIODS.items()], 170, self._changed)
         self._stamp = ft.Text("", size=12, color=w.MUTED)
         self._body = ft.Column(spacing=14)
         self.control = ft.Column(
-            [ft.Container(height=2), ft.Row([self._coin, self._strategy, self._side, self._period,
+            [ft.Container(height=2), ft.Row([self._mode, self._coin, self._strategy, self._side, self._period,
                      ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp], spacing=10),
              self._body], expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
 
     async def _changed(self, _=None) -> None:
         await self.refresh()
 
+    async def _mode_changed(self, _=None) -> None:
+        self._mode_touched = True
+        await self.refresh()
+
+    def follow_default_mode(self, mode: str) -> bool:
+        """Активный контур сменился: переключить фильтр, если пользователь его не трогал. True - значение изменилось."""
+        if self._mode_touched or self._mode.value == mode:
+            return False
+        self._mode.value = mode
+        return True
+
     def _filters(self) -> dict:
         pick = lambda d: None if d.value in (None, "all") else [d.value]
         days = PERIODS[self._period.value or "all"][1]
         since = None if days is None else (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return {"coins": pick(self._coin), "strategies": pick(self._strategy), "sides": pick(self._side), "since": since}
+        return {"coins": pick(self._coin), "strategies": pick(self._strategy), "sides": pick(self._side), "since": since, "mode": self._mode.value or "shadow"}
 
     async def refresh(self) -> None:
         client = self.host.client
@@ -58,9 +73,10 @@ class StatsView:
     # ------------------------------------------------------------------------------------------ отрисовка
 
     def _render(self, d: dict) -> list[ft.Control]:
-        o, out = d["overall"], []
+        o, out = d["overall"], [w.banner(STATS_NOTE, w.ACCENT, ft.Icons.INFO_OUTLINE)]
         if d["significance"]["note"]:
             out.append(w.banner(d["significance"]["note"], w.AMBER))
+        out.append(self._excluded_note(d["counts"], o["trades"]))
         pf = fmt.fmt_pf(o)
         se = f"± {o['avg_r_stderr']:.2f}" if o["avg_r_stderr"] is not None else None
         pf_color = w.MUTED if pf == fmt.DASH else (w.GREEN if pf == "∞" or float(pf) >= 1 else w.RED)
@@ -109,6 +125,15 @@ class StatsView:
         return w.card(ft.Column([*head, ft.Column(rows, spacing=2, scroll=ft.ScrollMode.AUTO)], spacing=10))
 
     @staticmethod
+    def _excluded_note(c: dict, counted: int) -> ft.Control:
+        """Почему сделок в расчёте мало: сколько и каких не вошло (без этого «1 сделка» выглядит как ошибка)."""
+        parts = [(c.get("aborted", 0), "прервано рестартом"), (c.get("open", 0), "открыто"), (c.get("pending", 0), "ждут входа"),
+                 (c.get("cancelled", 0), "отменено"), (c.get("closed_gap_affected", 0), "закрыто с обрывом потока")]
+        shown = ", ".join(f"{n} {name}" for n, name in parts if n)
+        text = f"В расчёте: {counted}. Не вошли: {shown}." if shown else f"В расчёте: {counted}. Исключённых сделок нет."
+        return w.label(text, size=12)
+
+    @staticmethod
     def _breakdown(title: str, items: list[tuple[str, dict]]) -> ft.Control:
         lines: list[ft.Control] = [w.title(title, 15)]
         for name, x in items:
@@ -133,6 +158,6 @@ class StatsView:
     def _counts(c: dict) -> ft.Control:
         rows = [("Закрыто (в статистике)", c.get("closed", 0)), ("Закрыто с обрывом потока (исключены)", c.get("closed_gap_affected", 0)),
                 ("Открыто", c.get("open", 0)), ("Ждут входа", c.get("pending", 0)), ("Отменено", c.get("cancelled", 0)),
-                ("Прервано перезапуском", c.get("aborted", 0))]
+                ("Прервано рестартом бота", c.get("aborted", 0))]
         body = [ft.Row([ft.Text(n, size=12, color=w.MUTED, expand=True), ft.Text(str(v), size=13)]) for n, v in rows]
         return w.card(ft.Column([w.title("Все сделки по статусам", 15), *body], spacing=6), width=330)

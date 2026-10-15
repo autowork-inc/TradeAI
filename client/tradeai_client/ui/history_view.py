@@ -10,7 +10,7 @@ PAGE = 50
 COINS = fmt.COINS
 STATUS_FILTERS = {"all": ("Все", None), "closed": ("Закрытые", ["closed"]), "active": ("Открытые и ждущие", ["open", "pending_limit", "pending_market"]),
                   "cancelled": ("Отменённые", ["cancelled"]), "aborted": ("Прерванные", ["aborted"])}
-COLS = [("Сигнал", 96), ("Монета", 78), ("Стратегия", 92), ("Сторона", 70), ("Статус", 130), ("Вход", 96), ("Выход", 96), ("Итог R", 80),
+COLS = [("Сигнал", 96), ("Монета", 78), ("Стратегия", 110), ("Режим", 70), ("Сторона", 70), ("Статус", 170), ("Вход", 96), ("Выход", 96), ("Итог R", 80),
         ("PnL USDT", 84), ("Выход по", 110), ("", 44)]
 WIDTHS = [x for _, x in COLS]
 
@@ -29,7 +29,9 @@ class HistoryView:
         self._boxes: dict[str, ft.Container] = {}  # id сделки -> контейнер строки (подсветка выбранной без пересборки таблицы)
         self._status = _dropdown("Статус", [(k, v[0]) for k, v in STATUS_FILTERS.items()], 190, self._filter_changed)
         self._coin = _dropdown("Монета", [("all", "Все")] + [(c, fmt.coin_short(c)) for c in COINS], 130, self._filter_changed)
-        self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 170, self._filter_changed)
+        self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 230, self._filter_changed)
+        self._mode = _dropdown("Режим", fmt.MODE_OPTIONS, 180, self._mode_changed)
+        self._mode.value, self._mode_touched = self.host.default_mode, False  # пока пользователь не выбрал сам, режим следует за активным контуром
         self._info = ft.Text("", size=12, color=w.MUTED)
         self._prev = ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Новее", on_click=self._prev_page, disabled=True)
         self._next = ft.IconButton(icon=ft.Icons.ARROW_FORWARD, tooltip="Старше", on_click=self._next_page, disabled=True)
@@ -38,7 +40,7 @@ class HistoryView:
         header = w.table_row([w.cell(t, color=w.MUTED, size=12, align_right=t in ("Итог R", "PnL USDT")) for t, _ in COLS], widths=WIDTHS, height=28)
         self.control = ft.Column([
             ft.Container(height=2),
-            ft.Row([self._status, self._coin, self._strategy, ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy,
+            ft.Row([self._mode, self._status, self._coin, self._strategy, ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy,
                     ft.Container(expand=True), self._info, self._prev, self._next], spacing=10),
             w.label("Двойной клик по строке — график сделки (свечи снапшота, вход/выход, SL/TP, зона FVG, причина входа). Либо кнопка справа в строке.", size=12),
             ft.Row([header], scroll=ft.ScrollMode.AUTO),
@@ -50,6 +52,17 @@ class HistoryView:
     async def _filter_changed(self, _=None) -> None:
         self._offset = 0
         await self.refresh()
+
+    async def _mode_changed(self, _=None) -> None:
+        self._mode_touched = True
+        await self._filter_changed()
+
+    def follow_default_mode(self, mode: str) -> bool:
+        """Активный контур сменился (боевой счёт появился/пропал): переключить фильтр, если пользователь его не трогал. True - значение изменилось."""
+        if self._mode_touched or self._mode.value == mode:
+            return False
+        self._mode.value = mode
+        return True
 
     async def _reload(self, _=None) -> None:
         await self.refresh()
@@ -71,7 +84,7 @@ class HistoryView:
         self.control.update()
         try:
             data = await client.trades(limit=PAGE, offset=self._offset, statuses=STATUS_FILTERS[self._status.value or "all"][1], coins=pick(self._coin),
-                                       strategies=pick(self._strategy))
+                                       strategies=pick(self._strategy), mode=self._mode.value or "shadow")
         except ApiError as exc:
             self._rows.controls = [w.banner(str(exc), w.RED, ft.Icons.ERROR)]
             self._busy.visible = False
@@ -97,17 +110,23 @@ class HistoryView:
     def _row(self, t: dict) -> ft.Control:
         r, pnl = t["r_multiple"], t["pnl"]
         exit_label = fmt.EXIT_RU.get(t["exit_reason"], t["exit_reason"] or fmt.DASH)
+        restart = t["exit_reason"] == "process_restart"
         status = fmt.STATUS_RU.get(t["status"], t["status"]) + (" ⚠" if t["gap_affected"] else "")
+        if restart:
+            status = exit_label  # «Прервана (Рестарт бота)» вместо голого «Прервана»
         side_color = w.GREEN if t["side"] == "long" else w.RED
         cells = [w.cell(fmt.fmt_local(t["signal_time"])), w.cell(fmt.coin_short(t["coin"]), weight=ft.FontWeight.W_700),
-                 w.cell(fmt.STRATEGY_RU.get(t["strategy_name"], t["strategy_name"])), w.cell(fmt.SIDE_RU[t["side"]], color=side_color),
+                 w.cell(fmt.STRATEGY_RU.get(t["strategy_name"], t["strategy_name"])),
+                 w.cell(t["mode"].upper(), color=w.GREEN if t["mode"] == "live" else w.AMBER, size=12), w.cell(fmt.SIDE_RU[t["side"]], color=side_color),
                  w.cell(status, color=w.MUTED if t["status"] in ("cancelled", "aborted") else w.TEXT),
                  w.cell(fmt.fmt_price(t["entry_price"])), w.cell(fmt.fmt_price(t["exit_price"])),
                  w.cell(fmt.fmt_r(r), color=fmt.r_color(r), weight=ft.FontWeight.W_600, align_right=True),
-                 w.cell(fmt.DASH if pnl is None else f"{pnl:+.2f}".replace("-", "−"), color=fmt.r_color(pnl), align_right=True), w.cell(exit_label, color=w.MUTED),
+                 w.cell(fmt.DASH if pnl is None else f"{pnl:+.2f}".replace("-", "−"), color=fmt.r_color(pnl), align_right=True), w.cell(fmt.DASH if restart else exit_label, color=w.MUTED),
                  ft.IconButton(icon=ft.Icons.CANDLESTICK_CHART, tooltip="Открыть график" if t["has_snapshot"] else "У сделки нет снапшота", icon_size=18,
                                disabled=not t["has_snapshot"], on_click=lambda e, tr=t: self.host.run(self.host.open_trade_chart(tr)))]
         row = w.table_row(cells, widths=WIDTHS, bgcolor=w.CARD_HI if t["id"] == self._selected else w.CARD)
+        if restart:
+            row.tooltip = fmt.RESTART_HINT
         self._boxes[t["id"]] = row
         return ft.GestureDetector(content=row, mouse_cursor=ft.MouseCursor.CLICK, on_tap=lambda e, tr=t: self._select(tr),
                                   on_double_tap=lambda e, tr=t: self.host.run(self.host.open_trade_chart(tr)))

@@ -8,7 +8,7 @@ import flet as ft
 
 from tradeai_client import APP_NAME, __version__, fmt
 from tradeai_client.api import ApiClient, ApiError, LiveStateStream
-from tradeai_client.binance import BinanceError, fetch_klines
+from tradeai_client.binance import BinanceError, BinanceNoData, fetch_klines
 from tradeai_client.chart_spec import ChartDataError, build_chart_spec, interval_to_ms
 from tradeai_client.chart_window import open_chart
 from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings
@@ -20,6 +20,7 @@ from tradeai_client.ui.stats_view import StatsView
 log = logging.getLogger("tradeai_client")
 STATUS_COLORS = {"connected": w.GREEN, "connecting": w.AMBER, "reconnecting": w.AMBER, "auth": w.RED, "throttled": w.RED, "error": w.RED, "idle": w.MUTED}
 TAB_DASHBOARD, TAB_STATS, TAB_HISTORY = 0, 1, 2
+ACCOUNT_REFRESH_S = 30.0  # как часто обновлять баланс в шапке (движок пишет снимок счёта раз в ~30 с)
 POST_BARS_MARGIN = 5  # свечей после выхода, которые показываем за последним маркером
 
 
@@ -35,9 +36,13 @@ class Shell:
             self._settings_error = None
         except SettingsError as exc:
             self.settings, self._settings_error = ClientSettings(), str(exc)
+        self.default_mode = "shadow"  # активный контур: live, пока боевой счёт присылает баланс (фильтры History / Statistics стартуют с него)
+        self._account_at = 0.0
         self.dashboard, self.stats, self.history = DashboardView(), StatsView(self), HistoryView(self)
         self._dot = w.dot(w.MUTED, 12)
         self._status_text = ft.Text("Не подключено", size=13, color=w.MUTED)
+        self._account = ft.Text(fmt.SHADOW_ACCOUNT_TEXT, size=13, color=w.AMBER, weight=ft.FontWeight.W_600,
+                                tooltip="Баланс и эквити боевого счёта (Binance + MT5). В режиме Shadow ордера не отправляются.")
         self._build()
 
     # ------------------------------------------------------------------------------------------ каркас
@@ -51,7 +56,7 @@ class Shell:
         p.on_error = lambda e: log.error("Необработанная ошибка интерфейса: %s", getattr(e, "data", e))
         p.window.width, p.window.height, p.window.min_width, p.window.min_height = 1280, 820, 980, 600
         header = ft.Row([ft.Icon(ft.Icons.CANDLESTICK_CHART, color=w.ACCENT), ft.Text(APP_NAME, size=20, weight=ft.FontWeight.W_700), ft.Container(expand=True),
-                         self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
+                         self._account, ft.VerticalDivider(width=12, color=w.BORDER), self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
                         spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         tabs = ft.Tabs(length=3, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label="Dashboard", icon=ft.Icons.DASHBOARD), ft.Tab(label="Statistics", icon=ft.Icons.BAR_CHART),
@@ -84,6 +89,24 @@ class Shell:
         self._dot.update()
         self._status_text.update()
 
+    async def _refresh_account(self) -> None:
+        """Баланс боевого счёта в шапку (GET /api/info) и активный контур для фильтров. Ошибка сети уже видна в статусе связи: плашку не трогаем."""
+        client = self.client
+        if client is None:
+            return
+        try:
+            info = await client.info()
+        except ApiError:
+            return
+        account = info.get("account")
+        live = bool(account and account.get("available"))
+        self._account.value = fmt.account_text(account)
+        self._account.color = w.GREEN if live else w.AMBER
+        self._account.update()
+        self.default_mode = fmt.default_mode(account)
+        if self.stats.follow_default_mode(self.default_mode) | self.history.follow_default_mode(self.default_mode):
+            await self._refresh_tab()
+
     async def connect(self) -> None:
         await self.disconnect()
         try:
@@ -96,6 +119,7 @@ class Shell:
         self.dashboard.show_placeholder("Подключение к серверу…")
         self.dashboard.control.update()
         self.page.run_task(self._stream.run)
+        await self._refresh_account()
         await self._refresh_tab()
 
     async def disconnect(self) -> None:
@@ -116,6 +140,9 @@ class Shell:
     async def _on_message(self, msg: dict) -> None:
         self.dashboard.on_message(msg)
         self.dashboard.control.update()
+        if time.monotonic() - self._account_at >= ACCOUNT_REFRESH_S:
+            self._account_at = time.monotonic()
+            await self._refresh_account()
         if msg.get("type") == "state":  # сделка закрылась/появилась: статистика и история на открытой вкладке устарели
             latest = tuple((e["ts"], e["kind"]) for e in msg["events"][:3])
             changed, self._events_seen = latest != self._events_seen and bool(self._events_seen), latest
@@ -225,6 +252,8 @@ class Shell:
     async def _post_candles(self, snap: dict, iv: int, now_ms: int) -> tuple[list[dict] | None, str | None]:
         """Свечи после сигнала из публичного REST Binance (без ключа API мониторинга!). Недоступно - график строится по снапшоту, причина в панели."""
         t = snap["trade"]
+        if not t["coin"].endswith("USDT"):
+            return None, None  # Forex/металлы (MT5): на Binance Futures их нет, запрос дал бы 400
         start = snap["candles"][-1]["open_time"] + iv
         end = (fmt.to_ms(t["exit_time"]) or now_ms) + POST_BARS_MARGIN * iv
         if start >= min(end, now_ms):
@@ -233,6 +262,9 @@ class Shell:
             try:
                 klines = await fetch_klines(session, self.settings.binance_rest, t["coin"], snap["meta"]["interval"], start, min(end, now_ms),
                                             interval_ms=iv, now_ms=now_ms)
+            except BinanceNoData as exc:
+                log.info("Свечи после сигнала %s: %s - график по снимку из БД", t["coin"], exc)
+                return None, None
             except BinanceError as exc:
                 return None, f"Свечи после сигнала не загружены: {exc}."
         return klines, ("Свечи после сигнала — публичные данные Binance (в БД не хранятся)." if klines else None)

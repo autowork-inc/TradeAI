@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, WebSo
 from fastapi.responses import JSONResponse
 from pydantic import StringConstraints
 
-from api.livestate import SETUP_STRATEGIES, LiveStateHub, freshest_heartbeat_age_s
+from api.livestate import SETUP_STRATEGIES, LiveStateHub, freshest_heartbeat_age_s, read_account
 from api.reason import build_reason
 from api.security import FailureThrottle, check_key
 from api.serialize import DataIntegrityError, close_out, event_out, iso, trade_out
@@ -30,7 +30,7 @@ from api.stats import compute_stats, counts_from_rows
 
 log = logging.getLogger("api")
 
-Mode = Literal["live", "shadow"]
+Mode = Literal["live", "shadow", "all"]  # all - оба контура вместе
 Status = Literal["pending_limit", "pending_market", "open", "closed", "cancelled", "aborted"]
 Side = Literal["long", "short"]
 Token = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,40}$")]
@@ -60,8 +60,8 @@ STATS_SQL = """
 SELECT id, coin, strategy_id, side, exit_reason, r_multiple, exit_time FROM trades
  WHERE status = 'closed' AND NOT gap_affected AND {where} ORDER BY exit_time, id
 """
-COUNTS_SQL = "SELECT status, gap_affected, count(*) AS n FROM trades WHERE mode = $1 GROUP BY status, gap_affected"
-STRATEGIES_SQL = "SELECT DISTINCT strategy_id FROM trades WHERE mode = $1 ORDER BY strategy_id"
+COUNTS_SQL = "SELECT status, gap_affected, count(*) AS n FROM trades WHERE (mode = $1 OR $1 = 'all') GROUP BY status, gap_affected"
+STRATEGIES_SQL = "SELECT DISTINCT strategy_id FROM trades WHERE (mode = $1 OR $1 = 'all') ORDER BY strategy_id"
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -89,7 +89,7 @@ def where_clause(prefix: str, mode: str, statuses=None, coins=None, strategies=N
                  since_column: str = "signal_time") -> tuple[str, list[Any]]:
     """WHERE по общим фильтрам. Значения - только параметрами ($n), в текст SQL попадают лишь имена колонок из кода."""
     args: list[Any] = [mode]
-    parts = [f"{prefix}mode = $1"]
+    parts = [f"({prefix}mode = $1 OR $1 = 'all')"]
     for column, values in (("status", statuses), ("coin", coins), ("strategy_id", strategies), ("side", sides)):
         if values:
             args.append(list(values))
@@ -159,7 +159,7 @@ def create_app(settings: Settings) -> FastAPI:
         hb = freshest_heartbeat_age_s([settings.shadow_data_dir, settings.live_data_dir])
         return {"server_time": iso(datetime.now(timezone.utc)), "mode": mode, "schema_version": version, "coins": list(settings.coins),
                 "strategies": sorted({*DEFAULT_STRATEGIES, *seen}),  # настроенные + все, по которым есть сделки (в т.ч. прежние smc / breakout)
-                "counts": counts_from_rows(rows),
+                "counts": counts_from_rows(rows), "account": read_account([settings.live_data_dir]),
                 "shadow": {"heartbeat_age_s": hb, "alive": None if hb is None else hb < 120.0}}
 
     @app.get("/api/stats", dependencies=[Depends(auth)])

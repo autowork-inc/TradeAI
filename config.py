@@ -171,6 +171,7 @@ TESTNET_REST_URL = "https://testnet.binancefuture.com"
 LIVE_REST_URL = TESTNET_REST_URL if USE_TESTNET else REST_BASE_URL  # базовый адрес клиента ордеров (exchange/binance_live.py)
 PREMIUM_INDEX_PATH = "/fapi/v1/premiumIndex"  # публичный: markPrice
 LIVE_PNL_MAX_AGE_S = 120.0  # PnL за сутки старше этого возраста для допуска новой сделки не годится (fail-closed)
+LIVE_ACCOUNT_NAME = ".live_account.json"  # снимок баланса/эквити счетов для API и клиента (пишет боевой движок, API читает)
 LIVE_RISK_STATE_NAME = ".live_risk_state.json"  # защёлка блокировки по суточному лимиту (переживает рестарт)
 # Мульти-биржевой боевой контур (решение пользователя 2026-10-13, вариант А): какой символ исполняется на какой площадке. Любой другой символ
 # получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - MetaApiLiveClient (MT5).

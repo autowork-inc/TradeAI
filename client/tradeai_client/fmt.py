@@ -5,19 +5,48 @@ from datetime import datetime, timezone
 DASH = "—"
 STATUS_RU = {"closed": "Закрыта", "open": "Открыта", "pending_limit": "Ждёт лимитку", "pending_market": "Ждёт рынок",
              "cancelled": "Отменена", "aborted": "Прервана"}
-EXIT_RU = {"sl": "Стоп", "be": "Безубыток", "trail": "Трейлинг", "tp": "Тейк", "timeout": "Таймаут", "process_restart": "Перезапуск",
+EXIT_RU = {"sl": "Стоп", "be": "Безубыток", "trail": "Трейлинг", "tp": "Тейк", "timeout": "Таймаут", "process_restart": "Прервана (Рестарт бота)",
            "scale_1r": "+1R (50%)", "scale_2r": "+2R", "scale_3r": "+3R (40%)", "ttl": "Срок заявки", "invalidated": "Сетап отменён", "tp_before_fill": "Цена ушла до входа"}
 SIDE_RU = {"long": "Лонг", "short": "Шорт"}
 # strategy_id -> подпись. Пять стратегий мульти-стратегийного Shadow (с 2026-10-11) и прежние имена («smc», «breakout») - сделки до этой даты.
 STRATEGY_RU = {"SMC_Pro_Trend": "SMC Pro Trend", "SMC_Counter_Trend": "SMC Counter Trend", "OBI_Breakout": "OBI Breakout",
                "ICT_Killzones": "ICT Killzones", "VWAP_Reversion": "VWAP Reversion", "smc": "SMC Swing (до 11.10)", "breakout": "Breakout (до 11.10)"}
-STRATEGY_OPTIONS = [("all", "Все")] + [(k, v) for k, v in STRATEGY_RU.items()]  # для фильтров History / Statistics
+# контур стратегии: боевая (одобрена к live, `config.APPROVED_STRATEGIES`), теневая (только виртуальные сделки) или архивная (прежние имена до 11.10)
+STRATEGY_KIND = {"SMC_Pro_Trend": "live", "VWAP_Reversion": "live", "OBI_Breakout": "shadow", "SMC_Counter_Trend": "shadow", "ICT_Killzones": "shadow",
+                 "smc": "archive", "breakout": "archive"}
+KIND_TAG = {"live": "🟢 [LIVE]", "shadow": "🟡 [SHADOW]", "archive": "⚪ [АРХИВ]"}
+
+
+def strategy_label(strategy_id: str) -> str:
+    """«🟢 [LIVE] SMC Pro Trend»; неизвестная стратегия - как архивная (чужое имя не прячем, но и не выдаём за активную)."""
+    return f"{KIND_TAG[STRATEGY_KIND.get(strategy_id, 'archive')]} {STRATEGY_RU.get(strategy_id, strategy_id)}"
+
+
+# фильтры History / Statistics: сначала LIVE, затем SHADOW, архив - в самом конце
+STRATEGY_OPTIONS = [("all", "Все")] + [(k, strategy_label(k)) for kind in ("live", "shadow", "archive")
+                                       for k in STRATEGY_RU if STRATEGY_KIND[k] == kind]
+# контур торговли (поле `mode` сделки): «Все» | только боевые | только виртуальные
+MODE_OPTIONS = [("all", "Все"), ("live", "🟢 Только LIVE"), ("shadow", "🟡 Только SHADOW")]
+SHADOW_ACCOUNT_TEXT = "Shadow Mode (Тест)"
+RESTART_HINT = "Сделка остановлена из-за перезапуска сервера. Не рискует деньгами, в WinRate не входит"
 # монеты фильтров: текущий пул Shadow (config.SHADOW_SYMBOLS, с 2026-10-14) и прежние пулы - сделки по ним остаются в БД
 COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "EURUSD", "XAUUSD", "XAGUSD",
          "LTCUSDT", "ZECUSDT", "DOTUSDT", "DOGEUSDT", "1000PEPEUSDT")
 STATE_COLORS = {0: "#5b6372", 1: "#d9a441", 2: "#4c9be8", 3: "#c0622f", 4: "#2bb673"}  # S0..S4
 
 GREEN, RED, MUTED, TEXT = "#2bb673", "#e5534b", "#8b93a3", "#e6e9ef"
+
+
+def account_text(account: dict | None) -> str:
+    """Плашка шапки: «Баланс: $X.XX USDT | Эквити: $Y.YY USDT»; без боевого счёта (Shadow, нет данных) - «Shadow Mode (Тест)»."""
+    if not account or not account.get("available") or account.get("balance") is None or account.get("equity") is None:
+        return SHADOW_ACCOUNT_TEXT
+    return f"Баланс: ${account['balance']:,.2f} USDT | Эквити: ${account['equity']:,.2f} USDT"
+
+
+def default_mode(account: dict | None) -> str:
+    """Активный контур по умолчанию: боевой счёт жив - live, иначе shadow."""
+    return "live" if account and account.get("available") else "shadow"
 
 
 def fmt_r(v: float | None, digits: int = 2) -> str:
