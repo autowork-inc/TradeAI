@@ -13,6 +13,9 @@ async def flet_main(page: ft.Page) -> None:
     # окно закрыто / соединение с окном потеряно -> приложение завершается ЦЕЛИКОМ (раньше процесс оставался висеть в фоне:
     # фоновые задачи опроса API и WebSocket не дают интерпретатору выйти сами)
     page.on_close = lambda e: _shutdown()
+    # крестик окна: перехватываем сами (prevent_close) и гасим процесс - не полагаемся на то, что Flet завершит приложение за нас
+    page.window.prevent_close = True
+    page.window.on_event = lambda e: _shutdown() if e.type == ft.WindowEventType.CLOSE else None
     page.on_disconnect = lambda e: _shutdown()
     await shell.start()
 
