@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timezone
 
 import pytest
 
@@ -173,3 +174,15 @@ def test_chart_labels_are_one_or_two_characters_and_details_go_to_the_timeline(f
     texts = " | ".join(e["text"] for e in tl)
     assert "Сигнал стратегии" in texts and "Вход " in texts and "свип" in texts and "CHoCH" in texts and "Трейлинг" in texts
     assert all(e["time"].endswith("UTC") for e in tl) and len(tl) == len(sp["trade_markers"]) + len(sp["setup_markers"]) + 1
+
+
+def test_aborted_trade_gets_a_restart_marker_and_candles_continue_to_now(fx):
+    snap = copy.deepcopy(fx("snapshot_smc_short.json"))
+    snap["closes"] = []
+    last = snap["candles"][-1]["open_time"]
+    snap["trade"].update(status="aborted", exit_reason="process_restart", exit_time=datetime.fromtimestamp((last + 2 * IV) / 1000, tz=timezone.utc).isoformat())
+    post = post_klines(snap, 200)  # свечи идут намного дальше момента рестарта
+    sp = spec_for(snap, post, now_offset_bars=400)
+    assert any(m["text"] == "Р" and m["ts"] is not None for m in sp["trade_markers"])  # точка прерывания
+    assert sp["bars"][-1]["t"] == post[-1]["t"]  # график дотянут до последней загруженной свечи (до сейчас)
+    assert sp["visible"][1] < sp["bars"][-1]["t"]  # стартовое окно у точки прерывания, остальное - прокруткой вправо

@@ -255,7 +255,8 @@ class Shell:
         if not t["coin"].endswith("USDT"):
             return None, None  # Forex/металлы (MT5): на Binance Futures их нет, запрос дал бы 400
         start = snap["candles"][-1]["open_time"] + iv
-        end = (fmt.to_ms(t["exit_time"]) or now_ms) + POST_BARS_MARGIN * iv
+        # прерванная рестартом сделка «закрыта» моментом рестарта, но график должен идти дальше - до сейчас (можно мотать вправо); остальные - до выхода + запас
+        end = now_ms if t["status"] == "aborted" else (fmt.to_ms(t["exit_time"]) or now_ms) + POST_BARS_MARGIN * iv
         if start >= min(end, now_ms):
             return None, None
         async with aiohttp.ClientSession() as session:  # отдельная сессия: заголовок X-API-Key к Binance не отправляется никогда

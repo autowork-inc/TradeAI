@@ -16,7 +16,7 @@ from tradeai_client import fmt, retro
 
 UP, DOWN, AMBER, BLUE, VIOLET, GREY = "#26a69a", "#ef5350", "#ffb300", "#4aa3ff", "#b388ff", "#9aa3b2"
 LINE_SL, LINE_TP, LINE_ENTRY = "#ff3d3d", "#00d26a", "#2f8cff"  # цвета линий уровней: ярче свечей (UP/DOWN), чтобы линия не сливалась со свечой
-MAX_GRID_BARS = 900
+MAX_GRID_BARS = 1600  # снимок (~100) + один запрос Binance (1500): прерванная сделка тянется до сегодняшнего дня
 PANEL_WIDTH_CHARS = 44  # ширина боковой панели ~31% окна (см. chart_window.PANEL_WIDTH)
 _UNIT_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
 _PLAN_LABEL = re.compile(r"^(SL|TP|вход)", re.IGNORECASE)  # линии плана сделки: рисуются из полей сделки
@@ -133,6 +133,13 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         trade_markers.append({"t": snap_t(ts), "price": c["price"], "position": "above" if long else "below",
                               "shape": "square" if trade["status"] == "closed" and i == len(close_events) - 1 else "circle", "color": color,
                               "text": _EXIT_CODE.get(c["reason"], "З"), "full": f"{label} @ {fmt.fmt_price(c['price'])}  {fmt.fmt_r(net)}", "ts": ts})
+    aborted = trade["status"] == "aborted" and exit_ms is not None
+    if aborted and not close_events:  # точка момента прерывания (рестарт бота): дальше свечи идут «как есть» до сейчас
+        at = snap_t(exit_ms)
+        bar_at = next((b for b in bars if b["t"] == at), None)
+        if bar_at is not None:
+            trade_markers.append({"t": at, "price": bar_at["c"], "position": "above" if long else "below", "shape": "circle", "color": GREY, "text": "Р",
+                                  "full": clean_text(fmt.EXIT_RU.get("process_restart", "Прервана")), "ts": exit_ms})
     trade_markers = [m for m in trade_markers if m["t"] <= grid_end]
 
     # геометрия сетапа
@@ -247,7 +254,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         "trade_id": trade["id"], "interval_ms": iv, "snapshot_last_t": snapshot_last,
         "bars": bars, "helper": helper, "trade_markers": trade_markers, "setup_markers": setup_markers,
         "boxes": boxes, "segments": segments, "hlines": hlines, "vlines": vlines,
-        "visible": [max(first_t, (snap_t(signal_ms) if signal_ms else snapshot_last) - 45 * iv), grid_end + 2 * iv],
+        "visible": [max(first_t, (snap_t(signal_ms) if signal_ms else snapshot_last) - 45 * iv), (min(grid_end, snap_t(exit_ms) + 40 * iv) if aborted else grid_end) + 2 * iv],
         "panel": panel, "digits": fmt.price_digits(ref_price),
         "reason_lines": reason_lines, "result_lines": [x for r in result for x in _wrap(r)],
     }
