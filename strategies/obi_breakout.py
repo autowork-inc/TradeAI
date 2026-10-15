@@ -15,6 +15,15 @@
   Достаточно одного из двух (OBI ИЛИ дельта). Нет данных микроструктуры (null) - подтверждения нет, сигнала нет.
 Стратегию нельзя проверить на истории свечей: стакана и ленты в истории нет, поэтому она набирает статистику только в Shadow.
 Вход MARKET, SL = экстремум пробойной свечи -+ 0.2*ATR, управление - Scale Out по умолчанию.
+
+Защита от входа «на дне / пике» импульса (2026-10-15). MARKET по закрытию аномально большой свечи (дамп на 4%+) - это вход в конце движения: стоп за экстремум свечи
+огромный, +1R недостижим. Поэтому пробой отклоняется, если:
+  * перерастянут: |close - уровень BOS| > max_bos_distance_atr (1.5) * ATR[j-1] - цена уже далеко от пробитого уровня, поздно входить;
+  * свеча истощения: тело > max_body_atr (2.5) * ATR[j-1].
+ATR берётся ДО пробойной свечи (как у порога импульса): ATR[j] включает истинный диапазон самой аномальной свечи и ослаблял бы собственный фильтр.
+Опционально (`require_buildup`, по умолчанию выключено - меняет частоту сигналов) пробою должно предшествовать поджатие у уровня: хотя бы buildup_touches (2) бара из последних
+buildup_lookback (16) баров с экстремумом в пределах buildup_touch_atr (0.3) * ATR[j-1] от уровня (сам свинг-бар считается касанием) ИЛИ сжатие волатильности
+ATR[j-1] <= buildup_atr_ratio (0.9) * ATR[j-1-buildup_lookback]. Окно касаний - сумма сдвигов на константные смещения (как скользящие средние в features/smc.py), не итерация по строкам.
 """
 
 from dataclasses import dataclass
@@ -38,38 +47,73 @@ class ObiParams:
     delta_min: float = 0.30
     delta_volume_mult: float = 1.5
     sl_buffer_atr: float = D.SL_BUFFER_ATR
+    max_bos_distance_atr: float = 1.5  # Max BOS Distance Guard: закрытие дальше 1.5 ATR от пробитого уровня - пробой перерастянут
+    max_body_atr: float = 2.5  # Max Candle Body Guard: тело пробойной свечи больше 2.5 ATR - свеча истощения
+    require_buildup: bool = False  # опциональная проверка поджатия перед пробоем (см. докстринг модуля)
+    buildup_lookback: int = 16
+    buildup_touches: int = 2
+    buildup_touch_atr: float = 0.3
+    buildup_atr_ratio: float = 0.9
 
     def __post_init__(self) -> None:
-        for name in ("impulse_atr_mult", "obi_min", "delta_min", "delta_volume_mult", "sl_buffer_atr"):
+        for name in ("impulse_atr_mult", "obi_min", "delta_min", "delta_volume_mult", "sl_buffer_atr", "max_bos_distance_atr", "max_body_atr",
+                     "buildup_touch_atr", "buildup_atr_ratio"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
                 raise ConfigError(f"ObiParams.{name} должен быть положительным числом, получено {value!r}")
         if self.obi_min >= 1 or self.delta_min >= 1:
             raise ConfigError("ObiParams: obi_min и delta_min - доли в (0, 1)")
+        if not isinstance(self.require_buildup, bool):
+            raise ConfigError(f"ObiParams.require_buildup должен быть bool, получено {self.require_buildup!r}")
+        for name, low in (("buildup_lookback", 2), ("buildup_touches", 1)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < low:
+                raise ConfigError(f"ObiParams.{name} должен быть целым >= {low}, получено {value!r}")
+        if self.buildup_touches > self.buildup_lookback:
+            raise ConfigError("ObiParams: buildup_touches не может превышать buildup_lookback")
 
 
 def signal_columns(side: str) -> tuple[str, ...]:
     return tuple(f"obi_{side}_{n}" for n in ("signal", "level", "sl", "via_obi", "via_delta"))
 
 
+def _touches(level: pl.Expr, extreme: str, atr_before: pl.Expr, p: ObiParams) -> pl.Expr:
+    """Сколько из последних buildup_lookback баров ДО пробойного имели экстремум (`high` для лонга, `low` для шорта) в пределах buildup_touch_atr * ATR от уровня.
+    Сумма по константным смещениям 1..lookback (не по строкам): значение в строке j зависит только от строк < j (R3)."""
+    tol = p.buildup_touch_atr * atr_before
+    total = pl.lit(0, dtype=pl.Int64)
+    for s in range(1, p.buildup_lookback + 1):
+        total = total + ((pl.col(extreme).shift(s) - level).abs() <= tol).fill_null(False).cast(pl.Int64)
+    return total
+
+
 def _detect_side(df: pl.DataFrame, side: str, p: ObiParams) -> pl.DataFrame:
     col = pl.col
+    atr_before = col("atr").shift(1)
     if side == "long":
         level = col("sh1_price").shift(1)
         crossed = (col("close") > level) & (col("close").shift(1) <= level)
-        impulse = (col("close") - col("open")) > p.impulse_atr_mult * col("atr").shift(1)
+        body = col("close") - col("open")
         obi_ok = col(OBI_COLUMN) >= p.obi_min
         delta_ok = col(DELTA_COLUMN) >= p.delta_min
         sl = col("low") - p.sl_buffer_atr * col("atr")
+        extreme = "high"
     else:
         level = col("sl1_price").shift(1)
         crossed = (col("close") < level) & (col("close").shift(1) >= level)
-        impulse = (col("open") - col("close")) > p.impulse_atr_mult * col("atr").shift(1)
+        body = col("open") - col("close")
         obi_ok = col(OBI_COLUMN) <= -p.obi_min
         delta_ok = col(DELTA_COLUMN) <= -p.delta_min
         sl = col("high") + p.sl_buffer_atr * col("atr")
+        extreme = "low"
+    impulse = body > p.impulse_atr_mult * atr_before
+    not_overstretched = (col("close") - level).abs() <= p.max_bos_distance_atr * atr_before  # Max BOS Distance Guard
+    not_exhausted = body <= p.max_body_atr * atr_before  # Max Candle Body Guard
     delta_spike = delta_ok & (col("vol_ratio") >= p.delta_volume_mult)
-    bos = (crossed & impulse).fill_null(False)
+    bos = (crossed & impulse & not_overstretched & not_exhausted).fill_null(False)
+    if p.require_buildup:
+        squeezed = atr_before <= p.buildup_atr_ratio * col("atr").shift(1 + p.buildup_lookback)
+        bos = bos & ((_touches(level, extreme, atr_before, p) >= p.buildup_touches) | squeezed).fill_null(False)
     via_obi, via_delta = obi_ok.fill_null(False), delta_spike.fill_null(False)
     signal = bos & (via_obi | via_delta)
     return df.select(
