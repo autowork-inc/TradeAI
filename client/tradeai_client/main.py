@@ -3,6 +3,9 @@
 import asyncio
 import logging
 import os
+import subprocess
+import sys
+import time
 
 import flet as ft
 
@@ -14,8 +17,7 @@ async def flet_main(page: ft.Page) -> None:
     # окно закрыто / соединение с окном потеряно -> приложение завершается ЦЕЛИКОМ (раньше процесс оставался висеть в фоне:
     # фоновые задачи опроса API и WebSocket не дают интерпретатору выйти сами)
     page.on_close = lambda e: _shutdown()
-    # крестик окна: перехватываем сами (prevent_close) и гасим процесс - не полагаемся на то, что Flet завершит приложение за нас
-    page.window.prevent_close = True
+    # prevent_close НЕ включаем: иначе при мёртвой Python-стороне окно (flet.exe) вообще не закрывается крестиком
     page.window.on_event = lambda e: _shutdown() if e.type == ft.WindowEventType.CLOSE else None
     page.on_disconnect = lambda e: _shutdown()
     await shell.start()
@@ -31,6 +33,10 @@ def _shutdown() -> None:
         pass
     terminate_all()
     logging.shutdown()
+    if sys.platform == "win32":  # окно Flet (flet.exe) - дочерний процесс: os._exit его не гасит и оно остаётся висеть с «Working...»
+        subprocess.Popen(["taskkill", "/F", "/T", "/PID", str(os.getpid())], creationflags=subprocess.CREATE_NO_WINDOW,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)  # taskkill убьёт и нас вместе с деревом; если не успел - выходим сами
     os._exit(0)
 
 
