@@ -129,14 +129,20 @@ def test_history_row_shows_gap_warning_and_signs(fx):
 def test_closing_the_window_terminates_the_whole_process(monkeypatch):
     """Закрытие окна = выход процесса: окна графиков закрываются, затем os._exit(0) (иначе приложение висело в фоне)."""
     import os
+    import subprocess
+    import sys
+    import time
 
     from tradeai_client import chart_window, main as app_main
 
     calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: calls.append(("kill_tree", cmd[:3], cmd[-1] == str(os.getpid()))))  # иначе taskkill убил бы сам pytest
+    monkeypatch.setattr(time, "sleep", lambda s: None)
     monkeypatch.setattr(chart_window, "terminate_all", lambda: calls.append("charts"))
     monkeypatch.setattr(os, "_exit", lambda code: calls.append(("exit", code)))
     app_main._shutdown()
-    assert calls == ["charts", ("exit", 0)]
+    assert calls[0] == "charts" and calls[-1] == ("exit", 0)
+    assert ("kill_tree", ["taskkill", "/F", "/T"], True) in calls or sys.platform != "win32"  # дерево процессов (с окном flet.exe) гасится целиком
 
 
 def test_dashboard_splits_crypto_and_mt5_into_sections():
