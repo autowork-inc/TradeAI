@@ -1,5 +1,6 @@
 """Точка входа клиента: `python app.py` (разработка) или собранный .exe (`flet pack`, см. client/README.md)."""
 
+import asyncio
 import logging
 import os
 
@@ -23,6 +24,11 @@ async def flet_main(page: ft.Page) -> None:
 def _shutdown() -> None:
     """Закрыть окна графиков этой сессии и немедленно завершить процесс (os._exit: без ожидания фоновых задач и потоков)."""
     from tradeai_client.chart_window import terminate_all
+    try:
+        for task in asyncio.all_tasks():  # опрос API, WebSocket, таймеры: отменяем, чтобы ничто не держало выход (сессии умрут вместе с процессом)
+            task.cancel()
+    except RuntimeError:  # вызов вне работающего цикла (после ft.run): задач уже нет
+        pass
     terminate_all()
     logging.shutdown()
     os._exit(0)
