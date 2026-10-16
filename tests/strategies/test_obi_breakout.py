@@ -8,10 +8,17 @@ import random
 import polars as pl
 import pytest
 
-from strategies.obi_breakout import ObiParams, detect_obi_breakout
+from dataclasses import replace
+
+from strategies.obi_breakout import ObiParams
+from strategies.obi_breakout import detect_obi_breakout as _detect
 from tests.features.test_smc import assert_truncation_invariant, random_walk
-from tests.strategies.test_multi_strategies import FP, idx, obi_scenario, pipeline_features, with_micro
+from tests.strategies.test_multi_strategies import LEGACY, FP, idx, obi_scenario, pipeline_features, with_micro
 from utils.errors import ConfigError
+
+
+def detect_obi_breakout(df, params=None):
+    return _detect(df, LEGACY if params is None else params)
 
 
 def long_signals(**kw) -> list[int]:
@@ -48,8 +55,8 @@ def test_short_overstretched_close_is_rejected_symmetrically():
 
 def test_distance_limit_is_configurable_and_scales_with_atr_before_the_breakout_bar():
     far = {"open": {20: 104.6}, "close": {20: 106.6}, "high": {20: 106.8}}
-    assert idx(detect_obi_breakout(obi_scenario(**far), ObiParams(max_bos_distance_atr=2.0)), "obi_long_signal") == [20]
-    assert idx(detect_obi_breakout(obi_scenario(**far), ObiParams(max_bos_distance_atr=1.0)), "obi_long_signal") == []
+    assert idx(detect_obi_breakout(obi_scenario(**far), replace(LEGACY, max_bos_distance_atr=2.0)), "obi_long_signal") == [20]
+    assert idx(detect_obi_breakout(obi_scenario(**far), replace(LEGACY, max_bos_distance_atr=1.0)), "obi_long_signal") == []
     # ATR самой аномальной свечи (бар 20) раздут её диапазоном и не должен ослаблять собственный фильтр: берётся ATR[j-1] = 1.0
     inflated = obi_scenario(**far).with_columns(pl.when(pl.int_range(pl.len()) == 20).then(4.0).otherwise(pl.col("atr")).alias("atr"))
     assert idx(detect_obi_breakout(inflated), "obi_long_signal") == []
@@ -69,24 +76,27 @@ def test_dump_style_candle_is_rejected_by_both_guards_short_side():
     """Дамп на несколько ATR: тело и удаление от уровня превышают пределы - сигнала нет, хотя стакан и импульс подтверждают."""
     s = short_scenario(open={20: 96.0}, close={20: 91.0}, low={20: 90.8}, high={20: 96.1})
     assert short_signals(s) == []
-    assert short_signals(s, ObiParams(max_bos_distance_atr=10.0, max_body_atr=10.0)) == [20]  # без защит - прежнее поведение
+    assert short_signals(s, replace(LEGACY, max_bos_distance_atr=10.0, max_body_atr=10.0)) == [20]  # без защит - прежнее поведение
 
 
 def test_body_limit_is_configurable():
     big = {"open": {20: 103.4}, "close": {20: 106.0}, "low": {20: 103.3}}
-    assert idx(detect_obi_breakout(obi_scenario(**big), ObiParams(max_body_atr=3.0)), "obi_long_signal") == [20]
+    assert idx(detect_obi_breakout(obi_scenario(**big), replace(LEGACY, max_body_atr=3.0)), "obi_long_signal") == [20]
 
 
 # --------------------------------------------------------------------------------- опциональное поджатие (Buildup)
 
 
-def test_buildup_is_off_by_default_and_changes_nothing_for_the_basic_scenario():
-    assert ObiParams().require_buildup is False
-    assert long_signals() == [20]
+def test_new_defaults_are_tight_and_buildup_is_on():
+    p = ObiParams()
+    assert (p.require_buildup, p.max_bos_distance_atr, p.max_body_atr) == (True, 1.0, 1.5)
+    assert long_signals() == [20]  # LEGACY-сценарий без поджатия
+    assert idx(_detect(obi_scenario()), "obi_long_signal") == []  # дефолты: нет касаний уровня и сжатия ATR - сигнала нет
+    assert idx(_detect(obi_scenario(high={15: 104.9, 17: 105.2}, open={20: 104.7}, close={20: 105.95}, low={20: 104.6})), "obi_long_signal") == [20]
 
 
 def test_buildup_requires_two_touches_of_the_level_within_the_lookback_window():
-    on = ObiParams(require_buildup=True)
+    on = replace(LEGACY, require_buildup=True)
     assert long_signals(params=on) == []  # касаний нет, ATR не сжимался (отношение 1.0 > 0.9)
     one = {"high": {17: 104.9}}
     assert idx(detect_obi_breakout(obi_scenario(**one), on), "obi_long_signal") == []  # одно касание
@@ -97,7 +107,7 @@ def test_buildup_requires_two_touches_of_the_level_within_the_lookback_window():
 
 
 def test_buildup_window_is_the_last_n_bars_before_the_breakout_bar():
-    on = ObiParams(require_buildup=True)  # окно 16 баров: бары 4..19
+    on = replace(LEGACY, require_buildup=True)  # окно 16 баров: бары 4..19
     inside = {"high": {4: 105.0, 19: 105.0}}
     outside = {"high": {3: 105.0, 19: 105.0}}  # бар 3 уже за окном: засчитано одно касание
     assert idx(detect_obi_breakout(obi_scenario(**inside), on), "obi_long_signal") == [20]
@@ -107,7 +117,7 @@ def test_buildup_window_is_the_last_n_bars_before_the_breakout_bar():
 
 
 def test_buildup_is_also_satisfied_by_volatility_compression():
-    on = ObiParams(require_buildup=True)
+    on = replace(LEGACY, require_buildup=True)
     squeezed = obi_scenario().with_columns(pl.when(pl.int_range(pl.len()) == 19).then(0.8).otherwise(pl.col("atr")).alias("atr"))  # ATR[j-1] = 0.8 <= 0.9 * ATR[j-17] = 0.9
     assert idx(detect_obi_breakout(squeezed, on), "obi_long_signal") == [20]
     mild = obi_scenario().with_columns(pl.when(pl.int_range(pl.len()) == 19).then(0.95).otherwise(pl.col("atr")).alias("atr"))
@@ -115,7 +125,7 @@ def test_buildup_is_also_satisfied_by_volatility_compression():
 
 
 def test_buildup_short_side_counts_touches_of_the_low_side_level():
-    on = ObiParams(require_buildup=True)
+    on = replace(LEGACY, require_buildup=True)
     assert short_signals(short_scenario(), on) == []
     assert short_signals(short_scenario(low={15: 95.2, 17: 94.9}), on) == [20]
 

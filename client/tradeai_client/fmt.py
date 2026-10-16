@@ -30,7 +30,7 @@ MODE_OPTIONS = [("all", "Все"), ("live", "🟢 Только LIVE"), ("shadow"
 SHADOW_ACCOUNT_TEXT = "Shadow Mode (Тест)"
 RESTART_HINT = "Сделка остановлена из-за перезапуска сервера. Не рискует деньгами, в WinRate не входит"
 # монеты фильтров: текущий пул Shadow (config.SHADOW_SYMBOLS, с 2026-10-14) и прежние пулы - сделки по ним остаются в БД
-COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "EURUSD", "XAUUSD", "XAGUSD",
+COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT", "EURUSD", "XAUUSD", "XAGUSD",
          "LTCUSDT", "ZECUSDT", "DOTUSDT", "DOGEUSDT", "1000PEPEUSDT")
 STATE_COLORS = {0: "#5b6372", 1: "#d9a441", 2: "#4c9be8", 3: "#c0622f", 4: "#2bb673"}  # S0..S4
 

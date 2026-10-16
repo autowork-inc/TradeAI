@@ -10,6 +10,8 @@ Fail-Fast (R1). Ошибка записи (БД упала, строка не п
 
 Состояние Shadow в памяти при перезапуске не восстанавливается (О17), поэтому `start()` помечает «висящие» сделки прошлого
 запуска (заявка/позиция) как `aborted`/`process_restart` - в БД не остаётся вечно открытых виртуальных позиций.
+Это касается ТОЛЬКО режима рекордера (`mode`, по умолчанию 'shadow'): боевые строки (mode='live') не трогаются - их состояние живёт в файле
+`live_engine_state.json` и после рестарта восстанавливается движком (upsert строки, закрытий и снапшота).
 """
 
 import asyncio
@@ -97,6 +99,11 @@ class PgRecorder:
     def snapshot(self, row: Row) -> None:
         self._put("snapshot", row)
 
+    def snapshot_copy(self, trade_id: str, source_trade_id: str, *, required: bool = True) -> None:
+        """Снапшот боевой сделки = копия снапшота теневой (одним INSERT ... SELECT внутри БД). Строка боевой сделки должна быть поставлена в очередь РАНЬШЕ
+        (внешний ключ); очередь FIFO это гарантирует. required=False - только для восстановления после рестарта (см. `_copy_snapshot`)."""
+        self._put("snapshot_copy", {"trade_id": trade_id, "source_trade_id": source_trade_id, "required": required})
+
     def state_event(self, row: Row) -> None:
         self._put("state", row)
 
@@ -156,11 +163,34 @@ class PgRecorder:
         while True:
             kind, row = await self._queue.get()
             try:
-                sql, columns = _TABLES[kind]
-                args = to_args(row, columns)
-                async with self._db.pool.acquire() as conn:
-                    async with conn.transaction():
-                        await conn.execute(sql, *args)
+                if kind == "snapshot_copy":
+                    await self._copy_snapshot(row)
+                else:
+                    sql, columns = _TABLES[kind]
+                    args = to_args(row, columns)
+                    async with self._db.pool.acquire() as conn:
+                        async with conn.transaction():
+                            await conn.execute(sql, *args)
                 self.written += 1
             finally:
                 self._queue.task_done()
+
+    async def _copy_snapshot(self, row: Row) -> None:
+        """INSERT ... SELECT снапшота теневой сделки под id боевой. Ноль скопированных строк - не исключение БД, а значение, которое проверяем явно:
+        снапшот боевой сделки уже есть (повторная запись при восстановлении) - нормально; источника нет и копия не существует -
+        при required=True это DataError (Fail-Fast, писатель падает, процесс перезапускается), при required=False (восстановление
+        открытой позиции после рестарта) - предупреждение в лог: живую позицию из-за пустого графика ронять нельзя. Ошибки самой БД
+        (обрыв, нарушение ключа) поднимаются всегда."""
+        trade_id = convert("text", row["trade_id"], "trade_id")
+        source = convert("text", row["source_trade_id"], "source_trade_id")
+        required = convert("bool", row["required"], "required")
+        async with self._db.pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.execute(schema.COPY_SNAPSHOT, trade_id, source)
+                copied = int(status.rsplit(" ", 1)[-1])  # ответ вида "INSERT 0 1"
+                exists = copied > 0 or await conn.fetchval(schema.SNAPSHOT_EXISTS, trade_id) is not None
+        if exists:
+            return
+        if required:
+            raise DataError(f"Снапшот-источник {source} для боевой сделки {trade_id} не найден: у боевой сделки не будет графика")
+        log.warning("Снапшот-источник %s для боевой сделки %s не найден (восстановление): сделка продолжается без графика", source, trade_id)

@@ -27,6 +27,15 @@
   * Позиция без стопа недопустима (R6): не удалось поставить/заменить защиту -> Safe Mode, reduce-only закрытие, падение.
     «Стоп уже за ценой» при переносе (-2021) - обычный исход: выход по рынку без Safe Mode (как BE-выход в Shadow).
   * Идемпотентность: client id детерминированы от `signal_id` (роль + SHA-1); неизвестный исход запроса выясняется по `GET`.
+  * Запись в PostgreSQL (2026-10-16): боевые сделки пишутся через `TradeRecorder` (PgRecorder) под id `<signal_id>:live` и `mode='live'` -
+    отдельно от теневой сделки с тем же signal_id (иначе upsert затёр бы её строку). Вход: после подтверждения исполнения и постановки защиты
+    (стопы на бирже раньше записи, R6) - строка `trades` с ФАКТИЧЕСКОЙ ценой входа и копия снапшота сигнала (`snapshot_copy`). Каждое закрытие
+    (уровень Scale Out, стоп/безубыток/трейлинг, тайм-аут, аварийное) - строка `trade_closes`; итог - `trades.status='closed'`, PnL в USDT, комиссия,
+    `r_multiple`. Цены выхода берутся из ответов биржи, уже полученных движком (`actualPrice` algo-ордера, `avgPrice` рыночного закрытия) - лишних
+    запросов нет; нет цены от биржи -> цена срабатывания / последний тик, и это видно в `plan.exit_price_source`. Комиссия считается по ставкам
+    (taker 0.05%, maker 0.02% для post-only лимитки на входе), `plan.fees_estimated=true`. После рестарта строки сделок из файла состояния
+    записываются заново (upsert: статус `open`, закрытия идемпотентны), недостающий снапшот не роняет подъём позиции. Ошибка записи
+    поднимается наверх (R1), глухих `try/except` нет.
 
 Ограничения (честно): ❓ гипотеза О18 (биржа принимает SL на весь объём и TP-уровни одновременно, сумма reduceOnly > позиции)
 не проверена на живой бирже - её проверяет `scripts/test_live_order.py` на testnet; best price для трейлинга и mark price для
@@ -54,6 +63,7 @@ from orchestrator.journal import EventLog
 from orchestrator.live_risk import LiveOrderPlan, LiveRejected, LiveRiskManager, split_levels, utc_day_start_ms
 from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan, Submission
 from orchestrator.types import BarInfo, Direction, Event, Kind, Signal, Tick
+from persistence.recorder import NullRecorder, TradeRecorder
 from utils.errors import ConfigError, DataError, HttpServerError, NetworkError, TradingInfraError
 from utils.storage import atomic_write_text
 
@@ -66,6 +76,8 @@ ERR_UNKNOWN_ORDER = (-2011, -2013)  # ордера нет / уже не акти
 UNKNOWN_OUTCOME = (NetworkError, HttpServerError)  # запрос мог дойти до биржи
 TRIGGERED = ("TRIGGERING", "TRIGGERED", "FINISHED")  # algo-ордер сработал (порождённый ордер исполняется/исполнен)
 STATE_VERSION = 1
+LIVE_ID_SUFFIX = ":live"  # id боевой сделки в БД = `<signal_id>:live`: у теневой сделки с тем же signal_id своя строка (mode='shadow'), upsert её не затрёт
+LEG_SOURCES = ("unknown", "last_tick", "trigger", "exchange")  # источник цены выхода, от худшего к лучшему; у сделки - худший из источников её закрытий
 MT5_EVENT_KINDS = {"opened": "live_entry_filled", "protected": "live_protected", "partial_close": "live_partial_close", "be_armed": "live_be_armed",
                    "trail_moved": "live_trail_moved", "closed": "live_closed", "cancelled": "live_trade_cancelled",
                    "deferred": "live_mt5_deferred", "replayed": "live_mt5_replayed"}  # события сопровождения MT5-позиций -> журнал
@@ -73,6 +85,22 @@ MT5_EVENT_KINDS = {"opened": "live_entry_filled", "protected": "live_protected",
 
 class LiveExecutionError(TradingInfraError):
     """Боевой контур остановлен: состояние биржи и бота нельзя считать согласованным (Safe Mode включён)."""
+
+
+def live_trade_id(signal_id: str) -> str:
+    """id боевой сделки в БД (trades.id, trade_closes.trade_id, trade_snapshots.trade_id)."""
+    return f"{signal_id}{LIVE_ID_SUFFIX}"
+
+
+def leg_pnl(side: float, fill: float, price: float, qty: float, fee_in_rate: float, fee_out_rate: float) -> tuple[float, float, float]:
+    """Результат одного закрытия в USDT: (грязный PnL, комиссия, чистый PnL).
+
+    side = +1 для лонга, -1 для шорта: лонг зарабатывает на росте цены, шорт - на падении, поэтому грязный PnL = side * (выход - вход) * объём.
+    Комиссия = ставка входа * цена входа * объём части + ставка выхода * цена выхода * объём части (комиссия входа делится по долям закрытий).
+    Чистый PnL = грязный - комиссия."""
+    gross = side * (price - fill) * qty
+    fees = fee_in_rate * fill * qty + fee_out_rate * price * qty
+    return gross, fees, gross - fees
 
 
 # ------------------------------------------------------------------------------------------ состояние
@@ -120,10 +148,20 @@ class LiveTrade:
     cancel_reason: str | None = None  # запрошена отмена лимитки: invalidated | tp_before_fill | ttl | risk_blocked
     adopted: bool = False
     interval: str | None = None  # таймфрейм сигнала (SMC_Pro_Trend - 5m, VWAP_Reversion - 15m): сделка живёт по барам СВОЕГО таймфрейма; None - запасной таймфрейм движка
+    signal_ms: int | None = None  # время закрытия сигнальной свечи (trades.signal_time); None - время принятия сигнала движком (`created_ms`)
+    fill_ms: int | None = None  # время подтверждения исполнения входа (trades.entry_time)
+    legs: list[dict[str, Any]] = field(default_factory=list)  # закрытия: {seq, ts, reason, qty, price, source}; сумма объёмов = filled_qty, когда сделка закрыта
+    legs_put: int = 0  # сколько закрытий уже поставлено в очередь записи в БД
+    db_open: bool = False  # строка сделки поставлена в очередь записи (после рестарта сбрасывается: пишем заново)
+    recovered: bool = False  # сделка поднята из файла состояния: отсутствие исходного снапшота не роняет процесс
 
     @property
     def trade_id(self) -> str:
         return self.plan.signal_id
+
+    @property
+    def db_id(self) -> str:
+        return live_trade_id(self.plan.signal_id)
 
     @property
     def sgn(self) -> float:
@@ -209,6 +247,7 @@ class LiveExecutionEngine:
         max_entry_deviation: float | None = None,
         router: ExecutionRouter | None = None,
         account_path: Path | None = None,
+        recorder: TradeRecorder | None = None,
     ):
         if not (interval_ms > 0 and limit_ttl_bars >= 1 and poll_interval_s > 0 and pnl_refresh_s > 0 and max_hold_bars >= 1 and be_trigger_r > 0):
             raise ConfigError("LiveExecutionEngine: interval_ms > 0, limit_ttl_bars >= 1, poll_interval_s > 0, pnl_refresh_s > 0, "
@@ -219,6 +258,10 @@ class LiveExecutionEngine:
         self._poll_s, self._pnl_refresh_ms = poll_interval_s, int(pnl_refresh_s * 1000)
         self._post_only = config.LIVE_POST_ONLY if post_only is None else post_only
         self._flush, self._store = flush, store
+        self._rec: TradeRecorder = recorder or NullRecorder()  # запись боевых сделок в БД (PgRecorder); без рекордера - как раньше, только файл состояния
+        self._maker, self._taker = config.LIVE_MAKER_FEE_RATE, config.LIVE_TAKER_FEE_RATE
+        self._last_price: dict[str, float] = {}  # последняя цена сделок по символу (запасная цена выхода, если биржа её не прислала)
+        self._recovering = False
         self._max_hold, self._be_r = max_hold_bars, be_trigger_r
         self._max_dev = config.LIVE_MAX_ENTRY_DEVIATION if max_entry_deviation is None else max_entry_deviation
         self._trades: dict[str, LiveTrade] = {}  # монета -> сделка (одна на монету: LiveRiskManager.busy)
@@ -251,6 +294,8 @@ class LiveExecutionEngine:
         """Те же тики, что получает VirtualTracker: лучшая цена (трейлинг) - по сделкам, безубыток +1R - по mark price (D11)."""
         if self.router is not None:
             self.router.on_tick(tick)  # MT5-позиции: тот же поток тиков (безубыток по mark price, лучшая цена для трейлинга)
+        if tick.kind != "mark":
+            self._last_price[tick.symbol] = tick.price
         t = self._trades.get(tick.symbol)
         if t is None or t.status != OPEN or t.best_q is None:
             return
@@ -396,7 +441,8 @@ class LiveExecutionEngine:
         if isinstance(plan, LiveRejected):
             self._emit_signal(now_ms, "live_rejected", signal, {"reason": plan.reason, **(plan.detail or {})})
             return
-        trade = LiveTrade(plan, now_ms, entry_cid=client_id(self.client.id_prefix, "E", plan.signal_id), interval=signal.interval)
+        trade = LiveTrade(plan, now_ms, entry_cid=client_id(self.client.id_prefix, "E", plan.signal_id), interval=signal.interval,
+                          signal_ms=signal.bar_close_ms)
         self._trades[plan.symbol] = trade
         res: OrderResult | None = None
         ok = False
@@ -518,9 +564,11 @@ class LiveExecutionEngine:
                 avg = (await self.client.get_position(trade.plan.symbol)).entry_price
                 if avg <= 0:
                     raise LiveExecutionError(f"{trade.trade_id}: ордер исполнен ({res.executed_qty}), но цена входа неизвестна (avgPrice и entryPrice = 0)")
-            trade.filled_qty, trade.fill_price = res.executed_qty, avg
+            trade.filled_qty, trade.fill_price, trade.fill_ms = res.executed_qty, avg, self._now()
             self._emit_trade(trade, "live_entry_filled", {"qty": res.executed_qty, "avg_price": avg, "status": res.status})
             await self._protect(trade)
+            if trade.status == OPEN:  # защита уже на бирже (R6): теперь запись в БД; при сбое записи позицию подхватит recover() и допишет строку
+                self._sync_db(trade)
         elif res.done:
             self._finish(trade, CANCELLED, f"entry_{res.status.lower()}", now)
         else:
@@ -609,8 +657,11 @@ class LiveExecutionEngine:
         pos = await self.client.get_position_amt(p.symbol)
         if abs(pos) > _EPS:
             close_side = "SELL" if pos > 0 else "BUY"
-            await self.client.market_order(p.symbol, close_side, self.client.round_qty(p.symbol, abs(pos)), reduce_only=True,
-                                           client_id=client_id(self.client.id_prefix, "X", p.signal_id))
+            res = await self.client.market_order(p.symbol, close_side, self.client.round_qty(p.symbol, abs(pos)), reduce_only=True,
+                                                 client_id=client_id(self.client.id_prefix, "X", p.signal_id))
+            if trade.filled_qty > _EPS:
+                price, source = (res.avg_price, "exchange") if res.avg_price > 0 else self._fallback_price(trade)
+                self._add_leg(trade, f"emergency_{why}", min(abs(pos), trade.filled_qty), price, source)
         for cid in self._all_cids(trade):  # позиция уже закрыта: чистка вторична, Safe Mode включён
             try:
                 await self._cancel_algo(cid)
@@ -695,6 +746,7 @@ class LiveExecutionEngine:
             if amt <= _EPS:
                 await self._finish_closed(trade, self._exit_reason(trade, stop_hit), now)
                 return
+            self._sync_db(trade)  # частичное закрытие (уровень Scale Out): обновлённая строка сделки и новые закрытия - в БД
         if trade.levels_done >= 1 and p.exit_plan.be_after_first and not trade.be_armed:
             trade.be_pending = True
         if trade.timeout_pending:
@@ -703,13 +755,17 @@ class LiveExecutionEngine:
         await self._apply_stop(trade, amt)
 
     async def _sync_exits(self, trade: LiveTrade, amt: float) -> bool:
-        """Какие algo-ордера сработали с прошлого опроса: уровни помечаются выполненными (+ журнал), возвращает «сработал стоп»."""
+        """Какие algo-ордера сработали с прошлого опроса: уровни помечаются выполненными (+ журнал), возвращает «сработал стоп».
+        Каждое закрытие фиксируется в `trade.legs` (в БД уйдёт `_sync_db`): цена - `actualPrice` сработавшего algo-ордера (источник `exchange`), а если
+        биржа её не прислала - цена срабатывания (`trigger`). Остаток уменьшения позиции сверх сработавших уровней - это стоп (или `unknown`, если
+        позицию закрыли вне бота)."""
         plan = trade.plan.exit_plan
-        stop_hit = False
+        stop_hit, stop_state = False, None
         if trade.stop_cid is not None:
-            stop_hit = (await self.client.get_algo_order(trade.stop_cid)).status in TRIGGERED
+            stop_state = await self.client.get_algo_order(trade.stop_cid)
+            stop_hit = stop_state.status in TRIGGERED
         last = len(trade.levels) - 1
-        fired = False
+        fired, fired_qty = False, 0.0
         for i, lvl in enumerate(trade.levels):
             if lvl.done:
                 continue
@@ -717,11 +773,22 @@ class LiveExecutionEngine:
             if state.status in TRIGGERED:
                 fired = lvl.done = True
                 trade.levels_done += 1
+                fired_qty += lvl.qty
                 reason = "tp" if i == last and plan.runner_frac <= _EPS else f"scale_{lvl.r:g}r"
-                self._emit_trade(trade, "live_partial_close", {"reason": reason, "qty": lvl.qty, "price": state.actual_price or lvl.price,
-                                                               "remaining": amt})
+                price, source = (state.actual_price, "exchange") if state.actual_price > 0 else (lvl.price, "trigger")
+                self._emit_trade(trade, "live_partial_close", {"reason": reason, "qty": lvl.qty, "price": price, "remaining": amt})
+                self._add_leg(trade, reason, lvl.qty, price, source)
         if amt > _EPS and not stop_hit and not fired and amt < trade.remaining - _EPS:
             self._emit_trade(trade, "live_position_changed", {"expected": trade.remaining, "actual": amt})  # закрыли часть вне бота
+        rest = trade.remaining - amt - fired_qty  # уменьшение позиции, не объяснённое сработавшими уровнями
+        if rest > _EPS:
+            if stop_hit:
+                reason = trade.stop_kind
+                price, source = (stop_state.actual_price, "exchange") if stop_state.actual_price > 0 else (trade.stop_price, "trigger")
+            else:
+                reason = "unknown"
+                price, source = self._fallback_price(trade)
+            self._add_leg(trade, reason, rest, price, source)
         return stop_hit
 
     def _exit_reason(self, trade: LiveTrade, stop_hit: bool) -> str:
@@ -746,6 +813,8 @@ class LiveExecutionEngine:
         if price == trade.stop_price and abs(trade.stop_qty - amt) <= f.step_size / 2:
             trade.be_armed = trade.be_armed or be_done
             trade.be_pending, trade.trail_target = False, None
+            if be_done:
+                self._sync_db(trade)  # безубыток взведён без переноса стопа (стоп уже стоял на входе): be_armed в БД
             return
         if not await self._replace_stop(trade, price, kind, amt):
             return  # замена не состоялась (позиция закрыта по рынку или неизвестный исход): прежний стоп/нет позиции
@@ -757,6 +826,7 @@ class LiveExecutionEngine:
             trade.trail_target = None
             if kind == "trail":
                 self._emit_trade(trade, "live_trail_moved", {"stop": trade.stop_price, "mode": trade.plan.exit_plan.trail_mode})
+        self._sync_db(trade)  # новый стоп / безубыток / трейлинг: актуальная строка сделки (stop_price, be_armed) в БД
 
     async def _replace_stop(self, trade: LiveTrade, price: float, kind: str, qty: float) -> bool:
         """POST нового стопа, затем DELETE старого: позиция ни на мгновение не остаётся без стопа (О18). False - замена не состоялась."""
@@ -790,10 +860,16 @@ class LiveExecutionEngine:
     async def _close_market(self, trade: LiveTrade, reason: str) -> None:
         """Закрыть остаток по рынку (reduce-only): тайм-аут, выход при «стоп за ценой», план не делится."""
         p = trade.plan
-        pos = await self.client.get_position_amt(p.symbol)
-        if abs(pos) > _EPS:
-            await self.client.market_order(p.symbol, p.close_side, self.client.round_qty(p.symbol, abs(pos)), reduce_only=True,
-                                           client_id=client_id(self.client.id_prefix, "X", trade.trade_id))
+        amt = abs(await self.client.get_position_amt(p.symbol))
+        if amt < trade.remaining - _EPS:  # пока мы решали, часть позиции закрыли биржевые ордера: сначала учесть их (иначе объём закрытий разойдётся)
+            await self._sync_exits(trade, amt)
+            trade.remaining = amt
+        if amt > _EPS:
+            res = await self.client.market_order(p.symbol, p.close_side, self.client.round_qty(p.symbol, amt), reduce_only=True,
+                                                 client_id=client_id(self.client.id_prefix, "X", trade.trade_id))
+            price, source = (res.avg_price, "exchange") if res.avg_price > 0 else self._fallback_price(trade)  # testnet avgPrice не присылает
+            self._add_leg(trade, reason, amt, price, source)
+            trade.remaining = 0.0
         await self._finish_closed(trade, reason, self._now())
 
     async def _finish_closed(self, trade: LiveTrade, reason: str, now: int) -> None:
@@ -808,8 +884,10 @@ class LiveExecutionEngine:
     async def recover(self, symbols: Collection[str]) -> None:
         """Старт: поднять сделки из файла состояния и сверить их с биржей; найти чужие позиции и висячие ордера на монетах пула."""
         now = self._now()
+        self._recovering = True  # снапшоты поднимаемых сделок: отсутствие источника - предупреждение, а не падение
         for rec in self._store.load() if self._store is not None else []:
             t = LiveTrade.from_record(rec)
+            t.recovered = True
             if t.plan.symbol in self._trades:
                 raise DataError(f"В файле состояния две сделки по {t.plan.symbol}")
             self.risk.adopt_busy(t.plan.symbol, t.trade_id)
@@ -824,6 +902,8 @@ class LiveExecutionEngine:
                     self._finish(t, CANCELLED, "never_sent", now)  # упали до отправки входа
             elif t.status == OPEN:
                 await self._place_orders(t, check_first=True)  # план записан, но защиту могли не успеть выставить
+                t.db_open, t.legs_put = False, 0  # строки могли не дойти до БД или остаться 'aborted' (упали посреди записи): пишем заново, upsert идемпотентен
+                self._sync_db(t)
                 await self._manage(t, now)
         for symbol in symbols:
             if symbol not in self._trades:
@@ -841,6 +921,7 @@ class LiveExecutionEngine:
                             "managed": mt.exit is not None or not mt.adopted})
             for mt in self.router.offline_closed:
                 self._emit(now, "live_closed_offline", mt.symbol, mt.strategy, mt.signal_id, {"venue": "mt5", "reason": "no_position_no_order_at_broker"})
+        self._recovering = False
         self._save()
 
     async def _adopt_or_clean(self, symbol: str, now: int) -> None:
@@ -881,11 +962,116 @@ class LiveExecutionEngine:
         self._trades[symbol] = t
         self._emit_trade(t, "live_adopted", {"amt": pos.amt, "entry": pos.entry_price, "stop": stop.trigger_price,
                                              "levels": [[v.r, v.qty, v.price] for v in levels]})
+        t.fill_ms = now
+        self._sync_db(t)  # позиция без записи: строка в БД (стратегия `adopted`, без снапшота - сигнала у неё нет)
+
+    # ------------------------------------------------------------------------------------- запись в БД
+
+    def _fallback_price(self, trade: LiveTrade) -> tuple[float, str]:
+        """Цена выхода, когда биржа её не прислала: последняя цена сделок (оценка, `last_tick`); тиков не было - цена входа и источник `unknown`."""
+        px = self._last_price.get(trade.plan.symbol)
+        return (px, "last_tick") if px is not None else (trade.fill_price, "unknown")
+
+    def _add_leg(self, trade: LiveTrade, reason: str, qty: float, price: float, source: str) -> None:
+        if not (qty > _EPS and 0 < price < float("inf")):
+            raise DataError(f"{trade.trade_id}: некорректное закрытие {reason!r}: объём {qty}, цена {price}")
+        trade.legs.append({"seq": len(trade.legs) + 1, "ts": self._now(), "reason": reason, "qty": qty, "price": price, "source": source})
+
+    def _fee_rates(self, trade: LiveTrade) -> tuple[float, float]:
+        """(ставка входа, ставка выхода): вход post-only лимиткой - maker 0.02%, иначе taker 0.05%; выход всегда taker (стоп/тейк - рыночные, закрытие - рынок)."""
+        entry = self._maker if trade.plan.kind is Kind.LIMIT and self._post_only else self._taker
+        return entry, self._taker
+
+    @staticmethod
+    def _risk_unit(trade: LiveTrade) -> float | None:
+        """R в единицах цены: |фактический вход - SL|. У подобранной с биржи сделки со стопом на входе (безубыток) исходный риск неизвестен -> None."""
+        r = trade.risk if trade.risk > _EPS else abs(trade.fill_price - trade.plan.sl)
+        return r if r > _EPS else None
+
+    def _leg_row(self, trade: LiveTrade, leg: dict[str, Any]) -> dict[str, Any]:
+        side = 1.0 if trade.plan.direction is Direction.LONG else -1.0
+        gross, fees, net = leg_pnl(side, trade.fill_price, leg["price"], leg["qty"], *self._fee_rates(trade))
+        unit = self._risk_unit(trade)
+        ra = None if unit is None else trade.filled_qty * unit
+
+        def r(x: float) -> float:
+            return x / ra if ra else 0.0
+
+        return {"trade_id": trade.db_id, "seq": leg["seq"], "ts": leg["ts"], "reason": leg["reason"], "frac": leg["qty"] / trade.filled_qty,
+                "qty": leg["qty"], "price": leg["price"], "gross_r": r(gross), "fees_r": r(fees), "net_r": r(net), "pnl": net, "fees": fees}
+
+    def _trade_row(self, trade: LiveTrade, exit_reason: str | None) -> dict[str, Any]:
+        p, qty = trade.plan, trade.filled_qty
+        closed = trade.status == CLOSED
+        side = 1.0 if p.direction is Direction.LONG else -1.0
+        unit = self._risk_unit(trade)
+        ra = None if unit is None else qty * unit
+        gross = fees = net = 0.0
+        for leg in trade.legs:
+            g, f, n = leg_pnl(side, trade.fill_price, leg["price"], leg["qty"], *self._fee_rates(trade))
+            gross, fees, net = gross + g, fees + f, net + n
+        done = bool(trade.legs)
+        sources = [leg["source"] for leg in trade.legs]
+        worst = next((s for s in LEG_SOURCES if s in sources), None)
+        fee_in, fee_out = self._fee_rates(trade)
+        plan_json: dict[str, Any] = {**p.exit_plan.describe(), "live": True, "fees_estimated": True, "fee_rates": {"entry": fee_in, "exit": fee_out}}
+        if trade.adopted:
+            plan_json["adopted"] = True
+        if worst is not None:
+            plan_json["exit_price_source"] = worst  # exchange | trigger (биржа не прислала actualPrice) | last_tick | unknown
+            plan_json["exit_price_sources"] = sources
+        if ra is None:
+            plan_json["r_undefined"] = True  # исходный риск неизвестен (подобранная позиция со стопом на входе): R не считается, сделка вне R-статистики
+        mfe = None
+        if trade.best_q is not None and unit is not None:
+            mfe = max((trade.sgn * trade.fill_price - trade.best_q) / unit, 0.0)  # лучшая цена с входа в единицах R (по тикам сделок)
+        return {
+            "id": trade.db_id, "strategy_name": p.strategy, "strategy_id": p.strategy, "coin": p.symbol, "side": p.direction.value, "kind": p.kind.value,
+            "mode": "live", "status": CLOSED if closed else OPEN, "qty": qty, "remaining_frac": 0.0 if closed else trade.remaining / qty,
+            "signal_time": trade.signal_ms if trade.signal_ms is not None else trade.created_ms,
+            "entry_time": trade.fill_ms if trade.fill_ms is not None else trade.created_ms,
+            "exit_time": trade.legs[-1]["ts"] if closed and trade.legs else None,
+            "planned_entry": p.entry if p.kind is Kind.LIMIT else None, "entry_price": trade.fill_price,
+            "exit_price": sum(l["qty"] * l["price"] for l in trade.legs) / sum(l["qty"] for l in trade.legs) if closed and trade.legs else None,
+            "sl": p.sl, "tp": trade.levels[-1].price if trade.levels else p.tp,
+            "stop_price": None if closed else trade.stop_price, "risk": unit, "risk_amount": ra,
+            "pnl": net if done else None, "fees": fees if done else None,
+            "r_multiple": net / ra if done and ra else None, "gross_r": gross / ra if done and ra else None,
+            "mfe_r": mfe, "mae_r": None,  # MAE у боевого движка не отслеживается
+            "exit_reason": exit_reason if closed else None, "be_armed": trade.be_armed,
+            "gap_affected": ra is None or "unknown" in sources,  # цена выхода неизвестна вовсе / R не определён: в R-статистику не входит
+            "client_order_id": trade.entry_cid, "plan": plan_json,
+        }
+
+    def _sync_db(self, trade: LiveTrade, exit_reason: str | None = None) -> None:
+        """Строка сделки (upsert) -> копия снапшота при первой записи -> новые закрытия. Порядок важен: очередь FIFO, а закрытия и снапшот ссылаются
+        на строку сделки внешним ключом. Метод синхронный (кладёт записи в очередь): ждать БД в движке не нужно; ошибка писателя поднимется здесь
+        или в `check()` основного цикла (R1)."""
+        first = not trade.db_open
+        self._rec.trade(self._trade_row(trade, exit_reason))
+        trade.db_open = True
+        if first and not trade.adopted:  # у подобранной позиции сигнала (и снапшота) нет
+            self._rec.snapshot_copy(trade.db_id, trade.trade_id, required=not (self._recovering or trade.recovered))
+        for leg in trade.legs[trade.legs_put:]:
+            self._rec.close_leg(self._leg_row(trade, leg))
+        trade.legs_put = len(trade.legs)
+
+    def _record_close(self, trade: LiveTrade, reason: str) -> None:
+        """Сделка закрыта: добить закрытием `unknown` объём, который не удалось объяснить ни одним ордером (страховка: сумма закрытий = объёму входа),
+        и записать итог. Причина выхода пишется как есть (в т.ч. `unknown`, `plan_not_representable`, `emergency_*`)."""
+        unexplained = trade.filled_qty - sum(leg["qty"] for leg in trade.legs)
+        if unexplained > _EPS:
+            price, source = self._fallback_price(trade)
+            self._add_leg(trade, "unknown", unexplained, price, source)
+        trade.remaining = 0.0
+        self._sync_db(trade, reason)
 
     # ------------------------------------------------------------------------------------------ прочее
 
     def _finish(self, trade: LiveTrade, status: str, reason: str, now: int) -> None:
         trade.status = status
+        if status == CLOSED and trade.filled_qty > _EPS:  # исполненная сделка закрыта (любая причина, в т.ч. аварийная): итог в БД ДО снятия с учёта
+            self._record_close(trade, reason)
         self._trades.pop(trade.plan.symbol, None)
         self.risk.release(trade.plan.symbol, trade.plan.signal_id)
         self._save()
@@ -933,7 +1119,7 @@ class LiveMirrorSink:
 async def build_live_engine(
     session: aiohttp.ClientSession, journal: EventLog, *, symbols: Collection[str], strategy_names: Collection[str], interval_ms: int,
     flush: Callable[[], Awaitable[None]] | None = None, now_ms: Callable[[], int] | None = None,
-    plans: Mapping[str, ScaleOutPlan] | None = None,
+    plans: Mapping[str, ScaleOutPlan] | None = None, recorder: TradeRecorder | None = None,
 ) -> LiveExecutionEngine:
     """Собирает боевой контур при TRADE_MODE=live. Любое сомнение (режим, ключи, mainnet без подтверждения, Safe Mode, неизвестная
     стратегия в APPROVED_STRATEGIES, позиция без стопа) - ConfigError / LiveExecutionError ДО первого нового ордера.
@@ -970,6 +1156,6 @@ async def build_live_engine(
     # сроки в барах (10 / 192) заданы для M15; на каждой сделке они умножаются по её таймфрейму (5m x3): календарное время то же, что у VirtualTracker
     engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush,
                                  store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router,
-                                 account_path=config.DATA_DIR / config.LIVE_ACCOUNT_NAME)
+                                 account_path=config.DATA_DIR / config.LIVE_ACCOUNT_NAME, recorder=recorder)
     await engine.recover(symbols)
     return engine

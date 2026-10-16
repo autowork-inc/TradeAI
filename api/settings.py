@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 MIN_KEY_LEN = 32
-DEFAULT_COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "EURUSD", "XAUUSD", "XAGUSD")  # = config.SHADOW_SYMBOLS; образ API config.py не содержит
+DEFAULT_COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT", "EURUSD", "XAUUSD", "XAGUSD")  # = config.SHADOW_SYMBOLS; образ API config.py не содержит
 
 
 DEFAULT_STRATEGIES = ("SMC_Pro_Trend", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "VWAP_Reversion")  # = orchestrator.registry.SHADOW_STRATEGIES

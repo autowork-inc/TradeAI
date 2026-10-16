@@ -150,6 +150,8 @@ async def shadow_main(opts: Options) -> None:
     config.validate()
     if config.IS_TESTNET and not opts.allow_testnet:
         raise ConfigError("Shadow Mode считает по реальному рынку: нужен BINANCE_PROFILE=mainnet (testnet - только с --allow-testnet, для проверки связи)")
+    if config.TRADE_MODE == "live" and not config.DATABASE_URL:
+        raise ConfigError("TRADE_MODE=live требует DATABASE_URL: боевые сделки обязаны писаться в PostgreSQL (иначе клиент их не увидит); вслепую боевой контур не стартует")
     if config.DATABASE_URL:
         check_dsn(config.DATABASE_URL)  # неверный формат - до сети
     ban_lock.ensure_not_banned()
@@ -193,7 +195,8 @@ async def shadow_main(opts: Options) -> None:
 
                     live = await build_live_engine(session, events, symbols=crypto, strategy_names=names,
                                                    interval_ms=config.INTERVAL_MS[opts.interval],  # запасной таймфрейм; у каждой сделки свой (из сигнала): SMC_Pro_Trend 5m, VWAP 15m
-                                                   flush=recorder.flush if recorder is not None else None)
+                                                   flush=recorder.flush if recorder is not None else None,
+                                                   recorder=recorder)  # боевые сделки -> PostgreSQL (mode='live', id `<signal_id>:live`)
                     sink = LiveMirrorSink(tracker, live)  # Shadow-трекер получает все сигналы как прежде; одобренные - ещё и боевой движок
                 orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder,
                                   symbol_filter=strategy_allowed)  # OBI_Breakout - только символы со стаканом (Binance), см. config.STRATEGY_SYMBOLS

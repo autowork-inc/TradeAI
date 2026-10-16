@@ -8,6 +8,7 @@ advisory-блокировкой (два процесса не мигрируют
   state_events    - журнал переходов состояний: стейт-машина сетапа SMC (S0..S4 по шорту/лонгу) и жизненный цикл сделок.
 Цены и объёмы - NUMERIC, время - TIMESTAMPTZ (UTC). Первичный ключ сделки - signal_id (id = trade_id Оркестратора), поэтому
 повторная запись той же сделки - upsert, а не дубль. `mode` отделяет shadow от live в одной БД.
+Боевая сделка пишется под id `<signal_id>:live` (иначе upsert затёр бы теневую строку с тем же signal_id); её снапшот - копия теневого (COPY_SNAPSHOT).
 """
 
 from typing import Literal
@@ -165,6 +166,15 @@ UPSERT_TRADE = upsert_sql("trades", TRADE_COLUMNS, "id")
 INSERT_CLOSE = insert_sql("trade_closes", CLOSE_COLUMNS, "ON CONFLICT (trade_id, seq) DO NOTHING")
 INSERT_SNAPSHOT = insert_sql("trade_snapshots", SNAPSHOT_COLUMNS, "ON CONFLICT (trade_id) DO NOTHING")
 INSERT_STATE_EVENT = insert_sql("state_events", STATE_EVENT_COLUMNS)
+# Боевая сделка (id = `<signal_id>:live`, mode = 'live') получает СВОЙ снапшот: копию снапшота теневой сделки ($2) с пометкой в meta.
+# Делает это сама БД одним запросом (свечи не гуляют через память процесса); повторный вызов безопасен (ON CONFLICT DO NOTHING).
+COPY_SNAPSHOT = (
+    "INSERT INTO trade_snapshots (trade_id, strategy_id, created_at, candles, geometry, meta) "
+    "SELECT $1::text, strategy_id, created_at, candles, geometry, "
+    "COALESCE(meta, '{}'::jsonb) || jsonb_build_object('live', true, 'source_trade_id', $2::text) "
+    "FROM trade_snapshots WHERE trade_id = $2::text ON CONFLICT (trade_id) DO NOTHING"
+)
+SNAPSHOT_EXISTS = "SELECT 1 FROM trade_snapshots WHERE trade_id = $1"
 ABORT_ORPHANS = (
     "UPDATE trades SET status = 'aborted', exit_reason = 'process_restart', updated_at = now() "
     "WHERE mode = $1 AND status IN ('pending_limit', 'pending_market', 'open') RETURNING id, coin, strategy_id"

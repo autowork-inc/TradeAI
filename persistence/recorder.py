@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from orchestrator.journal import EventLog
 from orchestrator.types import Event
+from utils.errors import DataError
 
 Row = dict[str, Any]
 
@@ -20,6 +21,10 @@ class TradeRecorder(Protocol):
     def trade(self, row: Row) -> None: ...
     def close_leg(self, row: Row) -> None: ...
     def snapshot(self, row: Row) -> None: ...
+    def snapshot_copy(self, trade_id: str, source_trade_id: str, *, required: bool = True) -> None:
+        """Снапшот боевой сделки `trade_id` = копия снапшота теневой `source_trade_id` (свечи, геометрия, meta + пометка live).
+        required=True: источника нет -> ошибка (Fail-Fast); required=False (восстановление после рестарта): источника нет -> предупреждение, без падения."""
+        ...
     def state_event(self, row: Row) -> None: ...
 
 
@@ -31,6 +36,9 @@ class NullRecorder:
         pass
 
     def snapshot(self, row: Row) -> None:
+        pass
+
+    def snapshot_copy(self, trade_id: str, source_trade_id: str, *, required: bool = True) -> None:
         pass
 
     def state_event(self, row: Row) -> None:
@@ -45,6 +53,7 @@ class MemoryRecorder:
         self.trade_history: list[Row] = []
         self.closes: list[Row] = []
         self.snapshots: list[Row] = []
+        self.missing_snapshots: list[str] = []  # trade_id боевых сделок, у которых источника снапшота нет (required=False)
         self.state_events: list[Row] = []
 
     def trade(self, row: Row) -> None:
@@ -56,6 +65,18 @@ class MemoryRecorder:
 
     def snapshot(self, row: Row) -> None:
         self.snapshots.append(dict(row))
+
+    def snapshot_copy(self, trade_id: str, source_trade_id: str, *, required: bool = True) -> None:
+        """Эталон поведения PgRecorder: копия снапшота источника под новым id (повтор - без дубля); источника нет -> ошибка или пометка."""
+        if any(s["trade_id"] == trade_id for s in self.snapshots):
+            return
+        source = next((s for s in self.snapshots if s["trade_id"] == source_trade_id), None)
+        if source is None:
+            if required:
+                raise DataError(f"Снапшот-источник {source_trade_id} для боевой сделки {trade_id} не найден")
+            self.missing_snapshots.append(trade_id)
+            return
+        self.snapshots.append({**source, "trade_id": trade_id, "meta": {**(source.get("meta") or {}), "live": True, "source_trade_id": source_trade_id}})
 
     def state_event(self, row: Row) -> None:
         self.state_events.append(dict(row))

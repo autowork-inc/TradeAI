@@ -122,7 +122,7 @@ def test_strategy_filters_cover_the_five_shadow_strategies_and_legacy_names():
     ids = ["SMC_Pro_Trend", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "VWAP_Reversion"]
     assert sorted(k for k, _ in fmt.STRATEGY_OPTIONS[1:6]) == sorted(ids)  # пять активных стратегий идут перед архивом
     assert {"smc", "breakout"} <= set(fmt.STRATEGY_RU)  # сделки до мульти-стратегийного релиза остаются видны в фильтрах
-    assert all(fmt.STRATEGY_RU[i] for i in ids) and {"SOLUSDT", "LINKUSDT", "BTCUSDT"} <= set(fmt.COINS) and fmt.EXIT_RU["scale_2r"]
+    assert all(fmt.STRATEGY_RU[i] for i in ids) and {"SOLUSDT", "NEARUSDT", "BTCUSDT"} <= set(fmt.COINS) and fmt.EXIT_RU["scale_2r"]
 
 
 def test_strategy_filter_groups_live_shadow_archive_in_that_order():

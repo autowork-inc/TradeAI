@@ -67,7 +67,7 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT")
 # 2026-10-13 (решение пользователя): переход на макро-крипту, только высоколиквидные контракты; альткоины убраны. Позже в тот же день добавлены Forex/металлы
 # (EURUSD, XAUUSD, XAGUSD): их данные - не с Binance, а из MetaApi (orchestrator/mt5_feeds.py; нужны METAAPI_TOKEN/METAAPI_ACCOUNT_ID, иначе пропускаются).
 # 2026-10-14 (решение пользователя): пул расширен ликвидными альткоинами Binance Futures (SOL, BNB, XRP, ADA, AVAX, LINK).
-SHADOW_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "EURUSD", "XAUUSD", "XAGUSD")
+SHADOW_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT", "EURUSD", "XAUUSD", "XAGUSD")
 # Этап 5: PostgreSQL для Shadow Mode. Пусто - сделки пишутся только в JSONL-журнал (локальная разработка); задано - в БД.
 # Формат postgresql://user:password@host:5432/db. Пароль в логи не попадает (persistence.db.redact_dsn).
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -175,7 +175,7 @@ LIVE_ACCOUNT_NAME = ".live_account.json"  # снимок баланса/экви
 LIVE_RISK_STATE_NAME = ".live_risk_state.json"  # защёлка блокировки по суточному лимиту (переживает рестарт)
 # Мульти-биржевой боевой контур (решение пользователя 2026-10-13, вариант А): какой символ исполняется на какой площадке. Любой другой символ
 # получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - MetaApiLiveClient (MT5).
-LIVE_BINANCE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT")  # 2026-10-14: = крипто-часть SHADOW_SYMBOLS; TRADE_MODE по умолчанию shadow (ничего не отправляется)
+LIVE_BINANCE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT")  # 2026-10-16: = крипто-часть SHADOW_SYMBOLS; TRADE_MODE по умолчанию shadow (ничего не отправляется)
 LIVE_MT5_SYMBOLS = ("EURUSD", "XAUUSD", "XAGUSD")
 # Стратегии, которым разрешены только перечисленные символы (остальные - на любых). OBI_Breakout читает L2-стакан и ленту: они есть только у Binance Futures.
 # Для Shadow это вся Binance-крипта пула (SHADOW_SYMBOLS без MT5-символов); LIVE_BINANCE_SYMBOLS (боевое исполнение) не расширяется.

@@ -14,7 +14,8 @@ import pytest
 from features.smc import SmcParams, add_features
 from strategies.counter_trend import CounterTrendParams, detect_counter_trend
 from strategies.killzones import DAY_MS, HOUR_MS, KillzoneParams, detect_killzones
-from strategies.obi_breakout import ObiParams, detect_obi_breakout
+from strategies.obi_breakout import ObiParams
+from strategies.obi_breakout import detect_obi_breakout as _detect_obi
 from strategies.vwap_reversion import VwapParams, detect_vwap_reversion
 from tests.features.test_smc import assert_truncation_invariant, random_walk
 from tests.strategies.test_smc_setups import STEP, frame, mirror
@@ -275,6 +276,13 @@ def obi_scenario(obi=0.4, delta=None, vol_ratio=1.0, **series) -> pl.DataFrame:
     df = frame(n, **s)
     return df.with_columns(pl.Series("vol_ratio", [vol_ratio] * n, dtype=pl.Float64), pl.Series("volume", [10.0] * n), pl.Series("ms_obi", micro["ms_obi"], dtype=pl.Float64),
                            pl.Series("ms_delta", micro["ms_delta"], dtype=pl.Float64))
+
+
+LEGACY = ObiParams(max_bos_distance_atr=1.5, max_body_atr=2.5, require_buildup=False)  # дефолты до 2026-10-16: сценарии тестов подогнаны под них
+
+
+def detect_obi_breakout(df, params=None):
+    return _detect_obi(df, LEGACY if params is None else params)
 
 
 def test_obi_long_bos_confirmed_by_order_book_imbalance():
