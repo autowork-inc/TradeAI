@@ -38,3 +38,15 @@ def test_env_append_creates_missing_file_and_keeps_normal_files_intact(tmp_path)
 def test_all_env_writes_in_shadow_sh_go_through_env_append():
     text = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8")
     assert '>> "$ENV_FILE"' in text and text.count('>> "$ENV_FILE"') == 2  # внутри env_append: перевод строки и сама строка
+
+
+@pytest.mark.skipif(SH is None, reason="нужен sh")
+def test_repair_env_splits_the_glued_analyzer_password_and_leaves_other_keys_alone(tmp_path):
+    text = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+    fn = text[text.index("repair_env() {"):text.index("ensure_env() {")]
+    env = tmp_path / ".env.shadow"
+    env.write_bytes(b"BINANCE_API_KEY=abc\nAPPROVED_STRATEGIES=SMC_Pro_Trend,VWAP_ReversionANALYZER_DB_PASSWORD=49c2\nAPI_KEY=k\n")
+    script = tmp_path / "t.sh"
+    script.write_bytes((f'ENV_FILE="{env.as_posix()}"\n{fn}\nrepair_env\nrepair_env\n').encode())
+    subprocess.run([SH, script.as_posix()], check=True, timeout=30)
+    assert env.read_bytes().decode().split("\n") == ["BINANCE_API_KEY=abc", "APPROVED_STRATEGIES=SMC_Pro_Trend,VWAP_Reversion", "ANALYZER_DB_PASSWORD=49c2", "API_KEY=k", ""]

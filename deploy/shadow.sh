@@ -33,7 +33,18 @@ check_docker() {
     docker info >/dev/null 2>&1 || { echo "ОШИБКА: демон Docker недоступен (запущен ли он? есть ли права: sudo или группа docker)." >&2; exit 1; }
 }
 
+# Самолечение склейки 2026-10-18: `...VWAP_ReversionANALYZER_DB_PASSWORD=...` -> две строки. Только для уникального имени ANALYZER_DB_PASSWORD
+# (API_KEY нельзя: он суффикс BINANCE_API_KEY).
+repair_env() {
+    [ -f "$ENV_FILE" ] || return 0
+    if grep -q '[A-Za-z0-9_,.]ANALYZER_DB_PASSWORD=' "$ENV_FILE"; then
+        sed -i 's/\([A-Za-z0-9_,.]\)\(ANALYZER_DB_PASSWORD=\)/\1\n\2/' "$ENV_FILE"
+        echo "В $ENV_FILE исправлена склеенная строка ANALYZER_DB_PASSWORD."
+    fi
+}
+
 ensure_env() {
+    repair_env
     ensure_password
     ensure_api_key
 }
