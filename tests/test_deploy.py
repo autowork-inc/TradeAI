@@ -33,6 +33,7 @@ def mini_project(tmp_path: Path, **extra: str) -> Path:
         (tmp_path / name).write_text("x\n", encoding="utf-8")
     (tmp_path / "deploy").mkdir()
     (tmp_path / "deploy" / "shadow.sh").write_bytes(b"#!/bin/sh\r\necho hi\r\n")  # CRLF, как после правки на Windows
+    (tmp_path / "deploy" / "apply.sh").write_bytes(b"#!/bin/sh\r\necho apply\r\n")
     for name, text in extra.items():
         p = tmp_path / name
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +209,8 @@ def test_dockerfile_and_requirements_cover_persistence():
 def test_shadow_symbols_are_the_combat_pool_without_touching_the_ml_bot_symbols():
     assert config.SYMBOLS == ("BTCUSDT", "ETHUSDT")  # сборщики стакана и live_run читают SYMBOLS: пул ML-контура не меняется
     # 2026-10-11: боевой пул вместо тестового; BTC/ETH остаются только у ML-контура (SYMBOLS)
-    assert config.SHADOW_SYMBOLS == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT", "EURUSD", "XAUUSD", "XAGUSD")
+    # 2026-10-18: статичная основа - закреплённые BTC/ETH и MT5; остальные Binance-монеты определяет автоселектор по объёму (tests/orchestrator/test_universe.py)
+    assert config.SHADOW_SYMBOLS == ("BTCUSDT", "ETHUSDT", "EURUSD", "XAUUSD", "XAGUSD")
     config.validate()
 
 
@@ -245,3 +247,14 @@ def test_shadow_script_has_up_live_with_guards():
     sh = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8")
     assert "up-live)" in sh and "LIVE_ALLOW_MAINNET=true" in sh and "stop shadow-run" in sh and "BINANCE_API_SECRET" in sh
     assert "env_file" not in sh
+
+
+def test_apply_script_ships_in_the_archive_and_keeps_contour_without_interactive_prompts():
+    assert "deploy/apply.sh" in deploy_pack.RUN_FILES and "deploy/apply.sh" in deploy_pack.EXECUTABLE
+    text = (ROOT / "deploy" / "apply.sh").read_text(encoding="utf-8")
+    assert "up-live --yes" in text and "./deploy/shadow.sh up" in text  # контур сохраняется, ввод REAL не нужен
+    assert "live_has_positions" in text and "EX_TEMPFAIL" in text and "prev.tar.gz" in text  # отсрочка при позициях и откат
+    assert "--install-cron" in text and "APPLY_MAX_DEFER_H" in text
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert "scripts.deploy_pack --target shadow" in workflow and "StrictHostKeyChecking=yes" in workflow and "needs: test" in workflow
+    assert "BINANCE_API" not in workflow and "METAAPI" not in workflow  # ключи биржи в CI не попадают

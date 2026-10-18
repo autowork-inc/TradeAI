@@ -36,13 +36,16 @@ class Shell:
             self._settings_error = None
         except SettingsError as exc:
             self.settings, self._settings_error = ClientSettings(), str(exc)
+        self.saved_mode = self.settings.mode_filter if self.settings.mode_filter in fmt.MODE_KEYS else ""  # выбор пользователя (Statistics/History) переживает перезапуск
         self.default_mode = "shadow"  # активный контур: live, пока боевой счёт присылает баланс (фильтры History / Statistics стартуют с него)
         self._account_at = 0.0
         self.dashboard, self.stats, self.history = DashboardView(), StatsView(self), HistoryView(self)
         self._dot = w.dot(w.MUTED, 12)
         self._status_text = ft.Text("Не подключено", size=13, color=w.MUTED)
+        self._account_data: dict | None = None
         self._account = ft.Text(fmt.SHADOW_ACCOUNT_TEXT, size=13, color=w.AMBER, weight=ft.FontWeight.W_600,
-                                tooltip="Баланс и эквити боевого счёта (Binance + MT5). В режиме Shadow ордера не отправляются.")
+                                tooltip="Баланс боевого счёта (Binance + MT5). В режиме Shadow ордера не отправляются.")
+        self._eye = ft.IconButton(icon=ft.Icons.VISIBILITY_OFF, icon_size=18, tooltip="Показать баланс", visible=False, on_click=self._toggle_balance)
         self._build()
 
     # ------------------------------------------------------------------------------------------ каркас
@@ -56,7 +59,7 @@ class Shell:
         p.on_error = lambda e: log.error("Необработанная ошибка интерфейса: %s", getattr(e, "data", e))
         p.window.width, p.window.height, p.window.min_width, p.window.min_height = 1280, 820, 980, 600
         header = ft.Row([ft.Icon(ft.Icons.CANDLESTICK_CHART, color=w.ACCENT), ft.Text(APP_NAME, size=20, weight=ft.FontWeight.W_700), ft.Container(expand=True),
-                         self._account, ft.VerticalDivider(width=12, color=w.BORDER), self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
+                         self._account, self._eye, ft.VerticalDivider(width=12, color=w.BORDER), self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
                         spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         tabs = ft.Tabs(length=3, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label="Dashboard", icon=ft.Icons.DASHBOARD), ft.Tab(label="Statistics", icon=ft.Icons.BAR_CHART),
@@ -98,14 +101,44 @@ class Shell:
             info = await client.info()
         except ApiError:
             return
+        for view in (self.stats, self.history):
+            view.set_coins(list(info.get("coins") or []))
         account = info.get("account")
         live = bool(account and account.get("available"))
-        self._account.value = fmt.account_text(account)
-        self._account.color = w.GREEN if live else w.AMBER
-        self._account.update()
+        self._account_data = account
+        self._render_account()
         self.default_mode = fmt.default_mode(account)
         if self.stats.follow_default_mode(self.default_mode) | self.history.follow_default_mode(self.default_mode):
             await self._refresh_tab()
+
+    def _render_account(self) -> None:
+        shown = self.settings.balance_visible
+        self._account.value = fmt.account_text(self._account_data, shown)
+        self._account.color = w.GREEN if fmt.has_balance(self._account_data) else w.AMBER
+        self._eye.visible = fmt.has_balance(self._account_data)
+        self._eye.icon, self._eye.tooltip = (ft.Icons.VISIBILITY, "Скрыть баланс") if shown else (ft.Icons.VISIBILITY_OFF, "Показать баланс")
+        self._account.update()
+        self._eye.update()
+
+    def _persist_prefs(self) -> None:
+        try:
+            save_settings(self.settings)
+        except OSError as exc:
+            log.warning("Предпочтения интерфейса не сохранены на диск: %s", exc)
+
+    async def _toggle_balance(self, _=None) -> None:
+        self.settings.balance_visible = not self.settings.balance_visible
+        self._persist_prefs()
+        self._render_account()
+
+    def remember_mode(self, mode: str | None) -> None:
+        """Пользователь выбрал режим в Statistics или History: запомнить на диск и применить к обеим вкладкам."""
+        if mode not in fmt.MODE_KEYS:
+            return
+        self.saved_mode, self.settings.mode_filter = mode, mode
+        for view in (self.stats, self.history):
+            view._mode.value, view._mode_touched = mode, True
+        self._persist_prefs()
 
     async def connect(self) -> None:
         await self.disconnect()
@@ -175,7 +208,8 @@ class Shell:
 
         async def save(_=None) -> None:
             candidate = ClientSettings(base_url=url.value or "", api_key=(key.value or "").strip(), remember_key=bool(remember.value),
-                                       post_signal_candles=bool(post.value), binance_rest=self.settings.binance_rest)
+                                       post_signal_candles=bool(post.value), binance_rest=self.settings.binance_rest,
+                                       balance_visible=self.settings.balance_visible, mode_filter=self.settings.mode_filter)
             msg.color = w.AMBER
             try:
                 candidate.validate()

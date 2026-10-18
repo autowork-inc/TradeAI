@@ -42,13 +42,22 @@ class MultiFeed:
 
     def __init__(self, feeds: list[Any]):
         self._feeds = feeds
+        self._started = False
+
+    def add(self, feed: Any) -> None:
+        """Подключить фид к работающему набору (автоселектор монет, orchestrator/universe.py): существующие соединения не затрагиваются.
+        Уже запущенный набор сразу запускает добавленный фид; `poll` идёт по снимку списка, поэтому добавление посреди обхода безопасно."""
+        self._feeds = [*self._feeds, feed]
+        if self._started:
+            feed.start()
 
     def start(self) -> None:
+        self._started = True
         for f in self._feeds:
             f.start()
 
     async def aclose(self) -> None:
-        for f in self._feeds:
+        for f in list(self._feeds):
             await f.aclose()
 
     def check(self) -> None:
@@ -57,7 +66,7 @@ class MultiFeed:
 
     async def poll(self) -> list[FeatureContext]:
         out: list[FeatureContext] = []
-        for f in self._feeds:
+        for f in list(self._feeds):
             out += await f.poll()
         return out
 
@@ -103,6 +112,14 @@ class SmcKlineFeed:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
+
+    def warmed(self) -> bool:
+        """История всех символов загружена; для фида с `emit_latest_on_start` ещё и последняя закрытая свеча отдана `poll` (состояние старшего таймфрейма в руках потребителя)."""
+        for symbol in self._symbols:
+            last = self._last_emitted[symbol]
+            if last is None or (self._emit_latest and last < max(self._store[symbol])):
+                return False
+        return True
 
     def exchange_now_ms(self) -> int:
         return self._clock() + self._offset_ms

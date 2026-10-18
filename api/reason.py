@@ -150,6 +150,50 @@ def _vwap(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[s
              ("До VWAP, R", "—" if r_vwap is None else f"{r_vwap:.2f}"), ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
     return "\n".join(steps), facts
 
+def _x(v: float | None, fmt: str) -> str:
+    return "—" if v is None else format(v, fmt)
+
+
+def _trend_line(meta: dict[str, Any]) -> str:
+    label = meta.get("htf_label")
+    return f"старший тренд H4: {label}" if label else "старший тренд H4: —"
+
+
+def _horizontal(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[str, list[tuple[str, str]]]:
+    long = trade["side"] == "long"
+    level, touches, window = _num(meta, "level"), meta.get("touches"), meta.get("window")
+    steps = [
+        f"1. Консолидация {window or '—'} баров: коробка {fmt_price(_num(meta, 'box_lo'))} - {fmt_price(_num(meta, 'box_hi'))} "
+        f"({_x(_num(meta, 'box_atr'), '.1f')} ATR), эффективность движения {_x(_num(meta, 'efficiency'), '.2f')} (боковик).",
+        f"2. {'Сопротивление' if long else 'Поддержка'} {fmt_price(level)} протестировано {touches if touches is not None else '—'} раз.",
+        f"3. Импульсное закрытие {'выше' if long else 'ниже'} уровня, объём x{_x(_num(meta, 'vol_ratio'), '.2f')} к SMA20; {_trend_line(meta)}.",
+        f"4. {_entry_line(trade)}",
+    ]
+    facts = [("Таймфрейм", interval), ("Уровень", fmt_price(level)), ("Касаний уровня", str(touches if touches is not None else "—")),
+             ("Высота коробки, ATR", _x(_num(meta, "box_atr"), ".2f")), ("Эффективность (ER)", _x(_num(meta, "efficiency"), ".2f")),
+             ("Плотность коробки", _x(_num(meta, "density"), ".2f")), ("Объём / SMA20", _x(_num(meta, "vol_ratio"), ".2f")),
+             ("Риск, ATR", _x(_num(meta, "risk_atr"), ".2f")), ("Качество сетапа (0-1)", _x(_num(meta, "quality"), ".2f")),
+             ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
+    return "\n".join(steps), facts
+
+
+def _trendline(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[str, list[tuple[str, str]]]:
+    long, sweep = trade["side"] == "long", meta.get("mode") == "sweep"
+    line = "поддержки" if long == sweep else "сопротивления"
+    what = (f"свип линии {line}: прокол и закрытие обратно" if sweep
+            else f"закрытие {'выше' if long else 'ниже'} линии {line} (пробой)")
+    steps = [
+        f"1. Трендовая линия {line} через два свинга: {fmt_price(_num(meta, 'anchor1_price'))} -> {fmt_price(_num(meta, 'anchor2_price'))}, "
+        f"пролёт {_x(_num(meta, 'span_bars'), '.0f')} баров, наклон {_x(_num(meta, 'slope_atr'), '+.3f')} ATR/бар, линия не нарушалась закрытиями.",
+        f"2. Сигнал: {what} на уровне {fmt_price(_num(meta, 'line_level'))}, объём x{_x(_num(meta, 'vol_ratio'), '.2f')}; {_trend_line(meta)}.",
+        f"3. {_entry_line(trade)}",
+    ]
+    facts = [("Таймфрейм", interval), ("Режим", "Свип (ложный пробой)" if sweep else "Пробой"), ("Линия на сигнале", fmt_price(_num(meta, "line_level"))),
+             ("Наклон, ATR за бар", _x(_num(meta, "slope_atr"), "+.3f")), ("Доп. касаний линии", str(meta.get("touches", "—"))),
+             ("Объём / SMA20", _x(_num(meta, "vol_ratio"), ".2f")), ("Риск, ATR", _x(_num(meta, "risk_atr"), ".2f")),
+             ("Качество сетапа (0-1)", _x(_num(meta, "quality"), ".2f")), ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
+    return "\n".join(steps), facts
+
 
 def build_reason(trade: dict[str, Any], meta: dict[str, Any] | None, geometry: list[dict[str, Any]]) -> dict[str, Any]:
     """trade - строка сделки (ключи strategy_id/strategy_name, side, coin, planned_entry, sl, tp, entry_price). -> {title, summary, facts[], levels[]}."""
@@ -168,12 +212,16 @@ def build_reason(trade: dict[str, Any], meta: dict[str, Any] | None, geometry: l
         title, (summary, facts) = "ICT Killzones", _killzones(trade, meta, interval)
     elif name == "VWAP_Reversion":
         title, (summary, facts) = "VWAP Reversion", _vwap(trade, meta, interval)
+    elif name == "Horizontal_Breakout":
+        title, (summary, facts) = "Horizontal Breakout", _horizontal(trade, meta, interval)
+    elif name == "Trendline_Breakout":
+        title, (summary, facts) = "Trendline Breakout", _trendline(trade, meta, interval)
     else:
         title = name
         summary = "Причина входа для этой стратегии не описана в API; ниже - все параметры сигнала из снапшота."
         facts = [(str(k), fmt_price(v) if isinstance(v, float) else str(v)) for k, v in sorted(meta.items())]
     labels = [str(g.get("label")) for g in geometry if g.get("label")]
-    htf_tag = _htf(meta)[0] if name in ("smc", "SMC_Pro_Trend", "SMC_Counter_Trend") else None
+    htf_tag = _htf(meta)[0] if name in ("smc", "SMC_Pro_Trend", "SMC_Counter_Trend", "Horizontal_Breakout", "Trendline_Breakout") else None
     return {
         "title": f"{title} · {SIDE_RU.get(trade['side'], trade['side'])} · {trade['coin']}" + ("" if htf_tag is None else f" ({htf_tag})"),
         "summary": summary,

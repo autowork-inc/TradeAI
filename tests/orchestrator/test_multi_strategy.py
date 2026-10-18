@@ -16,17 +16,19 @@ from orchestrator.core import Orchestrator, Route
 from orchestrator.journal import MemoryEventLog
 from orchestrator.microstructure import DepthFeed, MicroStructure
 from orchestrator.multi_strategies import (
-    ICT_KILLZONES, OBI_BREAKOUT, SMC_COUNTER_TREND, VWAP_REVERSION, StrategyCounterTrend, StrategyKillzones, StrategyObiBreakout,
-    StrategyVwapReversion,
+    HORIZONTAL_BREAKOUT, ICT_KILLZONES, OBI_BREAKOUT, SMC_COUNTER_TREND, TRENDLINE_BREAKOUT, VWAP_REVERSION, StrategyCounterTrend,
+    StrategyHorizontalBreakout, StrategyKillzones, StrategyObiBreakout, StrategyTrendlineBreakout, StrategyVwapReversion,
 )
-from orchestrator.registry import SCALP_1R_PLAN, SHADOW_STRATEGIES, VWAP_PLAN, build_strategies, plans_for
+from orchestrator.registry import LEVEL_BREAKOUT_PLAN, SCALP_1R_PLAN, SHADOW_STRATEGIES, VWAP_PLAN, build_strategies, plans_for
 from orchestrator.strategies import SMC_PRO_TREND, StrategySMC
 from orchestrator.tracker import CLOSED, DEFAULT_PLAN, OPEN, PENDING_LIMIT, TrackerError, VirtualTracker
 from orchestrator.types import BarInfo, Direction, FeatureContext, Kind, Mode, Tick, position_key
 from persistence.recorder import MemoryRecorder, RecordingEventLog
 from strategies.counter_trend import CounterTrendParams
+from strategies.horizontal_breakout import HorizontalParams
 from strategies.obi_breakout import ObiParams
 from strategies.smc_setups import SmcSetupParams
+from strategies.trendline_breakout import TrendlineParams
 from strategies.vwap_reversion import VwapParams
 from tests.conftest import serve
 from tests.features.test_smc import random_walk
@@ -34,7 +36,7 @@ from tests.orchestrator.helpers import IV, SYM, Scripted, ctx, mk, tick
 from tests.orchestrator.test_feeds import settle
 from utils.errors import ConfigError, DataError
 
-A, B, C, D, E = SHADOW_STRATEGIES
+A, B, C, D, E, F, G = SHADOW_STRATEGIES
 
 
 def make(**kw) -> tuple[VirtualTracker, MemoryRecorder]:
@@ -133,13 +135,14 @@ def build(strategies, tracker=None, **kw):
     return orch, tracker, rec
 
 
-def test_five_strategies_trade_the_same_coin_on_the_same_bar_without_blocking_each_other():
+def test_all_strategies_trade_the_same_coin_on_the_same_bar_without_blocking_each_other():
     sigs = {A: mk(A, direction=Direction.SHORT, bar=1), B: mk(B, direction=Direction.LONG, kind=Kind.MARKET, bar=1),
             C: mk(C, direction=Direction.LONG, kind=Kind.MARKET, bar=1), D: mk(D, direction=Direction.SHORT, kind=Kind.MARKET, bar=1),
-            E: mk(E, direction=Direction.SHORT, kind=Kind.MARKET, bar=1)}
+            E: mk(E, direction=Direction.SHORT, kind=Kind.MARKET, bar=1), F: mk(F, direction=Direction.LONG, kind=Kind.MARKET, bar=1),
+            G: mk(G, direction=Direction.SHORT, kind=Kind.MARKET, bar=1)}
     orch, tracker, rec = build([Scripted(n, {1: [s]}) for n, s in sigs.items()])
     events = [e for i in range(2) for e in orch.on_context(ctx(SYM, i))]
-    assert [e.kind for e in events] == ["signal_accepted"] * 5  # никто не получил skipped_due_to_lock: у каждой стратегии своя блокировка (О14)
+    assert [e.kind for e in events] == ["signal_accepted"] * 7  # никто не получил skipped_due_to_lock: у каждой стратегии своя блокировка (О14)
     assert {t.signal.strategy for t in tracker.active(SYM)} == set(SHADOW_STRATEGIES)
     assert sorted(orch.held().values()) == sorted((SYM, f"shadow:{n}") for n in SHADOW_STRATEGIES)
     assert {s["strategy_id"] for s in rec.snapshots} == set(SHADOW_STRATEGIES)  # снапшот каждой сделки несёт strategy_id
@@ -168,11 +171,14 @@ def test_one_strategy_closing_does_not_release_the_lock_of_another():
 # ================================================================================================= реестр
 
 
-def test_registry_builds_the_five_strategies_with_unique_ids_and_individual_plans():
+def test_registry_builds_the_seven_strategies_with_unique_ids_and_individual_plans():
     names = [s.name for s in build_strategies()]
-    assert names == [SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION] == list(SHADOW_STRATEGIES) and len(set(names)) == 5
+    expected = [SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT]
+    assert names == expected == list(SHADOW_STRATEGIES) and len(set(names)) == 7
     plans = plans_for(names)
     assert plans[SMC_COUNTER_TREND] is SCALP_1R_PLAN and plans[VWAP_REVERSION] is VWAP_PLAN
+    assert plans[HORIZONTAL_BREAKOUT] is plans[TRENDLINE_BREAKOUT] is LEVEL_BREAKOUT_PLAN
+    assert LEVEL_BREAKOUT_PLAN.levels == ((1.0, 0.5), (2.0, 0.5)) and LEVEL_BREAKOUT_PLAN.be_after_first and LEVEL_BREAKOUT_PLAN.runner_frac == 0
     assert all(plans[n] is DEFAULT_PLAN for n in (SMC_PRO_TREND, OBI_BREAKOUT, ICT_KILLZONES))
     assert SCALP_1R_PLAN.levels == ((1.0, 1.0),) and SCALP_1R_PLAN.runner_frac == 0 and VWAP_PLAN.runner_frac == 0
     assert build_strategies()[0].params.htf_filter is True  # Pro_Trend - только по тренду H4
@@ -197,6 +203,10 @@ SOFT = {
     OBI_BREAKOUT: lambda: StrategyObiBreakout(ObiParams(impulse_atr_mult=0.3, obi_min=0.2, delta_min=0.2, delta_volume_mult=0.5)),
     ICT_KILLZONES: StrategyKillzones,
     VWAP_REVERSION: lambda: StrategyVwapReversion(VwapParams(sd_mult=1.5, min_day_bars=8)),
+    HORIZONTAL_BREAKOUT: lambda: StrategyHorizontalBreakout(HorizontalParams(volume_mult=0.5, min_clv=0.3, max_box_atr=8.0, min_touches=2,
+                                                                             min_body_atr=0.1, max_risk_atr=6.0)),
+    TRENDLINE_BREAKOUT: lambda: StrategyTrendlineBreakout(TrendlineParams(volume_mult=0.5, sweep_volume_mult=0.5, min_clv=0.3, min_body_atr=0.1,
+                                                                          max_risk_atr=6.0)),
 }
 
 
@@ -345,7 +355,7 @@ def test_depth_feed_over_a_local_websocket_reconnects_and_reports_the_gap():
 
 def test_micro_structure_is_not_needed_for_other_strategies():
     from orchestrator.registry import NEEDS_HTF, NEEDS_MICRO
-    assert NEEDS_MICRO == (OBI_BREAKOUT,) and set(NEEDS_HTF) == {SMC_PRO_TREND, SMC_COUNTER_TREND}
+    assert NEEDS_MICRO == (OBI_BREAKOUT,) and set(NEEDS_HTF) == {SMC_PRO_TREND, SMC_COUNTER_TREND, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT}
     assert config.DEPTH_LEVELS == 10 and config.DEPTH_UPDATE_SPEED == "500ms"  # DepthFeed подписывается ровно на depth10@500ms
 
 

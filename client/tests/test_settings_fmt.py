@@ -127,10 +127,11 @@ def test_strategy_filters_cover_the_five_shadow_strategies_and_legacy_names():
 
 def test_strategy_filter_groups_live_shadow_archive_in_that_order():
     opts = fmt.STRATEGY_OPTIONS
-    assert [k for k, _ in opts] == ["all", "SMC_Pro_Trend", "VWAP_Reversion", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "smc", "breakout"]
+    assert [k for k, _ in opts] == ["all", "SMC_Pro_Trend", "VWAP_Reversion", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "Horizontal_Breakout",
+                                     "Trendline_Breakout", "smc", "breakout"]
     labels = dict(opts)
     assert labels["SMC_Pro_Trend"] == "🟢 [LIVE] SMC Pro Trend" and labels["VWAP_Reversion"].startswith("🟢 [LIVE]")
-    assert all(labels[k].startswith("🟡 [SHADOW]") for k in ("OBI_Breakout", "SMC_Counter_Trend", "ICT_Killzones"))
+    assert all(labels[k].startswith("🟡 [SHADOW]") for k in ("OBI_Breakout", "SMC_Counter_Trend", "ICT_Killzones", "Horizontal_Breakout", "Trendline_Breakout"))
     assert labels["smc"] == "⚪ [АРХИВ] SMC Swing (до 11.10)" and labels["breakout"].startswith("⚪ [АРХИВ]")
     assert fmt.strategy_label("UNKNOWN") == "⚪ [АРХИВ] UNKNOWN"
     assert [k for k, _ in fmt.MODE_OPTIONS] == ["all", "live", "shadow"] and fmt.MODE_OPTIONS[1][1] == "🟢 Только LIVE"
@@ -138,7 +139,8 @@ def test_strategy_filter_groups_live_shadow_archive_in_that_order():
 
 def test_account_plaque_and_default_mode():
     live = {"available": True, "balance": 1234.5, "equity": 1250.0}
-    assert fmt.account_text(live) == "Баланс: $1,234.50 USDT | Эквити: $1,250.00 USDT" and fmt.default_mode(live) == "live"
+    assert fmt.account_text(live) == "Баланс: *** USDT" and fmt.default_mode(live) == "live"  # по умолчанию сумма скрыта, Equity в UI нет
+    assert fmt.account_text(live, True) == "Баланс: $1,234.50 USDT" and "Эквити" not in fmt.account_text(live, True)
     for none in (None, {}, {"available": False, "balance": None, "equity": None}, {"available": True, "balance": None, "equity": 1}):
         assert fmt.account_text(none) == "Shadow Mode (Тест)"
     assert fmt.default_mode(None) == "shadow" and fmt.default_mode({"available": False}) == "shadow"
@@ -146,3 +148,11 @@ def test_account_plaque_and_default_mode():
 
 def test_restart_status_is_human_readable():
     assert fmt.EXIT_RU["process_restart"] == "Прервана (Рестарт бота)" and "в WinRate не входит" in fmt.RESTART_HINT
+
+
+def test_ui_preferences_roundtrip(tmp_path):
+    path = tmp_path / "settings.json"
+    assert not ClientSettings().balance_visible and ClientSettings().mode_filter == ""
+    save_settings(ClientSettings(base_url="http://127.0.0.1:8000", balance_visible=True, mode_filter="all"), path)
+    loaded = load_settings(path, env={})
+    assert loaded.balance_visible is True and loaded.mode_filter == "all"

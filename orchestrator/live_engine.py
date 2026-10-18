@@ -286,6 +286,17 @@ class LiveExecutionEngine:
             raise ConfigError(f"{t.trade_id}: неизвестный таймфрейм сделки {t.interval!r}")
         return ms
 
+    async def prepare_symbols(self, symbols: Collection[str]) -> None:
+        """Монеты входят в live-уровень (автоселектор монет, orchestrator/universe.py): фильтры биржи загружаются в клиент и менеджер риска ДО включения в набор.
+        Плечо и тип маржи ставятся перед каждым входом (`_prepare_symbol`), отдельной подготовки не нужно."""
+        await self.client.load_filters(symbols)
+        self.risk.add_filters({s: self.client.filters(s) for s in symbols})
+        log.info("Live: подготовлены фильтры биржи для %s", sorted(symbols))
+
+    def open_symbols(self) -> list[str]:
+        """Монеты с боевой сделкой (позиция или ждущая заявка): их потоки обязаны жить, даже если монета вышла из live-уровня (Close-Only)."""
+        return sorted(self._trades)
+
     def enqueue(self, signal: Signal, now_ms: int) -> None:
         """Синхронно (из обработчика свечи): сигнал в очередь исполнителя. Сеть здесь запрещена."""
         self._queue.put_nowait((signal, now_ms))
@@ -1104,7 +1115,7 @@ class LiveMirrorSink:
 
     def submit(self, signal: Signal, now_ms: int) -> Submission:
         sub = self._primary.submit(signal, now_ms)
-        if sub.accepted and self._engine.risk.is_approved(signal.strategy):
+        if sub.accepted and signal.strategy not in config.SHADOW_ONLY_STRATEGIES and self._engine.risk.is_approved(signal.strategy):
             self._engine.enqueue(signal, now_ms)
         return sub
 

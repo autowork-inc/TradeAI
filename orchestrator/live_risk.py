@@ -107,6 +107,9 @@ class LiveRiskManager:
         approved = tuple(approved_strategies)
         if not approved or len(set(approved)) != len(approved):
             raise ConfigError(f"LiveRiskManager: approved_strategies пуст или с дублями: {approved}")
+        shadow_only = sorted(set(approved) & set(config.SHADOW_ONLY_STRATEGIES))
+        if shadow_only:
+            raise ConfigError(f"LiveRiskManager: стратегии {shadow_only} работают только в Shadow (config.SHADOW_ONLY_STRATEGIES)")
         if not (isinstance(max_open_positions, int) and max_open_positions >= 1):
             raise ConfigError(f"LiveRiskManager: max_open_positions - целое >= 1, сейчас {max_open_positions!r}")
         self.max_open_positions = max_open_positions
@@ -122,6 +125,10 @@ class LiveRiskManager:
             raise ConfigError(f"LiveRiskManager: venues пуст или с дублями: {self._venues}")
         self._venue_pnl: dict[str, tuple[float, int]] = {}  # площадка -> (результат за сутки UTC, момент получения)
         self._blocked_until_ms = self._load_latch()
+
+    def add_filters(self, filters: Mapping[str, SymbolFilters]) -> None:
+        """Фильтры биржи для монет, вошедших в live-уровень на лету (автоселектор): до включения монеты в набор live, иначе `evaluate` падал бы с ConfigError."""
+        self._filters.update(filters)
 
     # ------------------------------------------------------------------------------------- защёлка
 

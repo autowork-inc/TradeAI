@@ -388,7 +388,7 @@ def test_live_window_300_bars_gives_the_same_decision_as_the_full_history_r8(nam
 
 def test_no_row_iteration_in_new_detectors_r2():
     banned = r"\.apply\(|iter_rows|map_elements|map_rows|map_batches|rolling_map|\.rows\(|\.iter_|to_dicts|\.row\("
-    for module in ("counter_trend", "obi_breakout", "killzones", "vwap_reversion"):
+    for module in ("counter_trend", "obi_breakout", "killzones", "vwap_reversion", "horizontal_breakout", "trendline_breakout"):
         src = (Path(__file__).resolve().parents[2] / "strategies" / f"{module}.py").read_text(encoding="utf-8")
         code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
         assert re.search(banned, code) is None, f"{module}: итерация по строкам запрещена (R2)"

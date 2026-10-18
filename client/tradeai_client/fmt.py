@@ -10,10 +10,11 @@ EXIT_RU = {"sl": "Стоп", "be": "Безубыток", "trail": "Трейли�
 SIDE_RU = {"long": "Лонг", "short": "Шорт"}
 # strategy_id -> подпись. Пять стратегий мульти-стратегийного Shadow (с 2026-10-11) и прежние имена («smc», «breakout») - сделки до этой даты.
 STRATEGY_RU = {"SMC_Pro_Trend": "SMC Pro Trend", "SMC_Counter_Trend": "SMC Counter Trend", "OBI_Breakout": "OBI Breakout",
-               "ICT_Killzones": "ICT Killzones", "VWAP_Reversion": "VWAP Reversion", "smc": "SMC Swing (до 11.10)", "breakout": "Breakout (до 11.10)"}
+               "ICT_Killzones": "ICT Killzones", "VWAP_Reversion": "VWAP Reversion",
+               "Horizontal_Breakout": "Horizontal Breakout", "Trendline_Breakout": "Trendline Breakout", "smc": "SMC Swing (до 11.10)", "breakout": "Breakout (до 11.10)"}
 # контур стратегии: боевая (одобрена к live, `config.APPROVED_STRATEGIES`), теневая (только виртуальные сделки) или архивная (прежние имена до 11.10)
 STRATEGY_KIND = {"SMC_Pro_Trend": "live", "VWAP_Reversion": "live", "OBI_Breakout": "shadow", "SMC_Counter_Trend": "shadow", "ICT_Killzones": "shadow",
-                 "smc": "archive", "breakout": "archive"}
+                 "Horizontal_Breakout": "shadow", "Trendline_Breakout": "shadow", "smc": "archive", "breakout": "archive"}
 KIND_TAG = {"live": "🟢 [LIVE]", "shadow": "🟡 [SHADOW]", "archive": "⚪ [АРХИВ]"}
 
 
@@ -37,11 +38,21 @@ STATE_COLORS = {0: "#5b6372", 1: "#d9a441", 2: "#4c9be8", 3: "#c0622f", 4: "#2bb
 GREEN, RED, MUTED, TEXT = "#2bb673", "#e5534b", "#8b93a3", "#e6e9ef"
 
 
-def account_text(account: dict | None) -> str:
-    """Плашка шапки: «Баланс: $X.XX USDT | Эквити: $Y.YY USDT»; без боевого счёта (Shadow, нет данных) - «Shadow Mode (Тест)»."""
-    if not account or not account.get("available") or account.get("balance") is None or account.get("equity") is None:
+HIDDEN_BALANCE = "***"
+TRADES_GOAL = 200  # цель прогресс-бара на вкладке Statistics: сделок для статистически значимых выводов
+MODE_KEYS = tuple(k for k, _ in MODE_OPTIONS)
+
+
+def has_balance(account: dict | None) -> bool:
+    return bool(account and account.get("available") and account.get("balance") is not None)
+
+
+def account_text(account: dict | None, visible: bool = False) -> str:
+    """Плашка шапки: «Баланс: $X.XX USDT» (сумма скрыта «***», пока visible=False); без боевого счёта (Shadow, нет данных) - «Shadow Mode (Тест)».
+    Equity в интерфейсе не показывается (остаётся в API)."""
+    if not has_balance(account):
         return SHADOW_ACCOUNT_TEXT
-    return f"Баланс: ${account['balance']:,.2f} USDT | Эквити: ${account['equity']:,.2f} USDT"
+    return f"Баланс: ${account['balance']:,.2f} USDT" if visible else f"Баланс: {HIDDEN_BALANCE} USDT"
 
 
 def default_mode(account: dict | None) -> str:

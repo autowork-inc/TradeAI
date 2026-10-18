@@ -49,10 +49,11 @@ from orchestrator.journal import JsonlEventLog
 from orchestrator.kline_feed import MultiFeed, SmcKlineFeed
 from orchestrator.microstructure import DepthFeed, MicroStructure
 from orchestrator.mtf import MtfState
-from orchestrator.registry import NEEDS_MICRO, SHADOW_STRATEGIES, build_strategies, ensure_history_depth, plans_for, strategy_allowed
+from orchestrator.registry import NEEDS_MICRO, OBI_BREAKOUT, SHADOW_STRATEGIES, build_strategies, ensure_history_depth, plans_for, strategy_allowed
 from orchestrator.strategies import SMC_PRO_TREND
 from orchestrator.tick_feed import TickFeed
 from orchestrator.tracker import VirtualTracker
+from orchestrator.universe import GroupConnector, Hooks, Universe, UniverseManager
 from orchestrator.types import Mode, Tick
 from persistence.db import Database, check_dsn
 from persistence.pg import PgRecorder
@@ -71,6 +72,7 @@ HEARTBEAT_NAME = ".shadow_heartbeat"
 POLL_INTERVAL_S = 1.0
 D1_MIN_BARS = 60  # 1d-свечей, с которых считается bias (прогрев признаков - 21; история D.MTF_BIAS_HISTORY_BARS = 90): общий порог FeatureEngine.min_bars = 100 для суток велик
 SUMMARY_EVERY_S = 3600.0
+GROUP_WARMUP_TIMEOUT_S = 600.0  # группа потоков новой монеты: история 1h/4h/1d обязана загрузиться за это время, иначе падаем (R1)
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,8 @@ class ShadowRun:
 
     def __init__(self, feed, orchestrator: Orchestrator, tracker: VirtualTracker, tick_feed=None, *,
                  heartbeat: Path | None = None, clock=time.monotonic, recorder: PgRecorder | None = None,
-                 htf_feed=None, htf: MtfState | None = None, micro: MicroStructure | None = None, depth_feed: DepthFeed | None = None, live=None):
+                 htf_feed=None, htf: MtfState | None = None, micro: MicroStructure | None = None, depth_feed: DepthFeed | None = None, live=None,
+                 universe: UniverseManager | None = None):
         if (htf_feed is None) != (htf is None):
             raise ConfigError("HTF: htf_feed и htf задаются вместе (фид H4 без таблицы bias, как и наоборот, бессмыслен)")
         if (micro is None) != (depth_feed is None):
@@ -104,6 +107,7 @@ class ShadowRun:
         self._feed, self._orch, self._tracker, self._ticks = feed, orchestrator, tracker, tick_feed
         self._htf_feed, self._htf = htf_feed, htf
         self._micro, self._depth = micro, depth_feed
+        self._universe = universe  # автоселектор монет (orchestrator/universe.py): фоновая задача, ошибка роняет процесс
         self._live = live  # LiveExecutionEngine при TRADE_MODE=live, иначе None (боевой код не импортируется)
         self._recorder = recorder
         self._heartbeat, self._clock = heartbeat, clock
@@ -115,6 +119,8 @@ class ShadowRun:
             self._ticks.check()
         if self._depth is not None:
             self._depth.check()
+        if self._universe is not None:
+            self._universe.check()
         if self._live is not None:
             self._live.check()  # упал боевой исполнитель -> падаем вместе с ним (R1); Safe Mode к этому моменту уже включён
         if self._recorder is not None:
@@ -178,7 +184,7 @@ async def shadow_main(opts: Options) -> None:
 
                     mt5_data = await connect_mt5_data(mt5_wanted)
                 mt5_client, mt5_mapper = mt5_data if mt5_data is not None else (None, None)
-                crypto = tuple(s for s in symbols if s not in mt5_wanted)
+                crypto = tuple(s for s in symbols if s not in mt5_wanted)  # статичная основа: закреплённые BTC/ETH; остальные Binance-монеты подключает автоселектор
                 all_symbols = crypto if mt5_client is None else symbols  # без ключей MetaApi MT5-символы в этом запуске не участвуют
                 symbols = all_symbols
                 names = SHADOW_STRATEGIES
@@ -188,54 +194,69 @@ async def shadow_main(opts: Options) -> None:
                 strategies = build_strategies(names, mtf=mtf, interval=opts.interval)
                 ensure_history_depth(strategies, opts.history, opts.interval)  # до сети: VWAP_Reversion без целых суток в кадре молча не торгует
                 tracker = VirtualTracker(events, equity=opts.equity, recorder=recorder, plans=plans_for(names))
+                universe = Universe(state_path=config.DATA_DIR / config.UNIVERSE_STATE_NAME) if config.UNIVERSE_AUTO else None
+                subscribed = universe.subscribed if universe is not None else set(crypto)  # монеты с запущенными потоками (в т.ч. подключённые на лету)
                 live = None
                 sink = tracker
                 if config.TRADE_MODE == "live":  # ВЫКЛЮЧЕНО по умолчанию (TRADE_MODE=shadow): боевой код тогда даже не импортируется
                     from orchestrator.live_engine import LiveMirrorSink, build_live_engine
 
-                    live = await build_live_engine(session, events, symbols=crypto, strategy_names=names,
+                    saved_live = universe.load_saved()[0] if universe is not None else ()  # live-уровень прошлого запуска: фильтры и сверка позиций на бирже
+                    live = await build_live_engine(session, events, symbols=tuple(dict.fromkeys([*crypto, *saved_live])), strategy_names=names,
                                                    interval_ms=config.INTERVAL_MS[opts.interval],  # запасной таймфрейм; у каждой сделки свой (из сигнала): SMC_Pro_Trend 5m, VWAP 15m
                                                    flush=recorder.flush if recorder is not None else None,
                                                    recorder=recorder)  # боевые сделки -> PostgreSQL (mode='live', id `<signal_id>:live`)
                     sink = LiveMirrorSink(tracker, live)  # Shadow-трекер получает все сигналы как прежде; одобренные - ещё и боевой движок
+                # новые сигналы - только по отслеживаемым монетам (live-уровень, Binance Test, MT5); OBI_Breakout - ещё и только где есть стакан (live-уровень), см. config.STRATEGY_SYMBOLS
                 orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder,
-                                  symbol_filter=strategy_allowed)  # OBI_Breakout - только символы со стаканом (Binance), см. config.STRATEGY_SYMBOLS
+                                  symbol_filter=(lambda n, s: universe.tracked(s) and strategy_allowed(n, s)) if universe is not None else strategy_allowed)
+
+                def make_feeds(syms: tuple[str, ...]) -> tuple[list[SmcKlineFeed], list[SmcKlineFeed]]:
+                    """Фиды свечей Binance для набора монет: (рабочие 15m/5m, состояния 4h/1h/1d). Для новых монет - отдельные соединения (старые не трогаются)."""
+                    work_ = [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=syms, interval=opts.interval, history_bars=opts.history)]
+                    if mtf:
+                        work_.append(SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=syms, interval=D.MTF_BASE_INTERVAL, history_bars=opts.history))
+                    state_: list[SmcKlineFeed] = []
+                    if D.HTF_FILTER_ENABLED:
+                        state_.append(SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=syms, interval=D.HTF_INTERVAL, history_bars=D.HTF_HISTORY_BARS,
+                                                   emit_latest_on_start=True))
+                        if mtf:
+                            state_ += [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=syms, interval=D.MTF_STRUCT_INTERVAL,
+                                                    history_bars=D.MTF_STRUCT_HISTORY_BARS, emit_latest_on_start=True),
+                                       SmcKlineFeed(api, session, FeatureEngine(SmcParams(), min_bars=D1_MIN_BARS), symbols=syms, interval=D.MTF_BIAS_INTERVAL,
+                                                    history_bars=D.MTF_BIAS_HISTORY_BARS, emit_latest_on_start=True)]
+                    return work_, state_
+
                 # Рабочие фиды (контексты идут стратегиям): 15m (opts.interval) всегда, 5m - для SMC_Pro_Trend. Фиды состояния (1h, 1d, 4h) стратегиям не идут.
-                work = [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=opts.interval, history_bars=opts.history)]
-                if mtf:
-                    work.append(SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=D.MTF_BASE_INTERVAL, history_bars=opts.history))
+                work, state = make_feeds(crypto)
                 feed = MultiFeed(work)
                 htf_feed = htf = None
                 if D.HTF_FILTER_ENABLED:
                     htf = MtfState(config.INTERVAL_MS, events, base=D.MTF_BASE_INTERVAL if mtf else None, struct=D.MTF_STRUCT_INTERVAL, bias=D.MTF_BIAS_INTERVAL,
                                    legacy=opts.interval, legacy_bias=D.HTF_INTERVAL)
-                    state = [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=D.HTF_INTERVAL, history_bars=D.HTF_HISTORY_BARS,
-                                          emit_latest_on_start=True)]
-                    if mtf:
-                        state += [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=crypto, interval=D.MTF_STRUCT_INTERVAL,
-                                               history_bars=D.MTF_STRUCT_HISTORY_BARS, emit_latest_on_start=True),
-                                  SmcKlineFeed(api, session, FeatureEngine(SmcParams(), min_bars=D1_MIN_BARS), symbols=crypto, interval=D.MTF_BIAS_INTERVAL,
-                                               history_bars=D.MTF_BIAS_HISTORY_BARS, emit_latest_on_start=True)]
                     htf_feed = MultiFeed(state)
                 micro = depth_feed = None
+                book_symbols: set[str] = set()  # монеты, по которым идёт стакан и лента микроструктуры (live-уровень)
                 if any(n in NEEDS_MICRO for n in names):  # лента - из того же aggTrade, что и тики трекера; стакан - отдельный публичный поток (только крипта)
-                    micro = MicroStructure(crypto, config.INTERVAL_MS[opts.interval])
-                    depth_feed = DepthFeed(session, micro.aggregator, symbols=crypto)
+                    book_symbols = universe.book if universe is not None else set()
+                    book_symbols.update(c for c in crypto if strategy_allowed(OBI_BREAKOUT, c))
+                    micro = MicroStructure(tuple(sorted(book_symbols)), config.INTERVAL_MS[opts.interval])
+                    depth_feed = MultiFeed([DepthFeed(session, micro.aggregator, symbols=tuple(sorted(book_symbols)))])
 
                 def on_tick(tick: Tick) -> None:
                     tracker.on_tick(tick)
                     if live is not None:
                         live.on_tick(tick)  # те же тики, что у Shadow: лучшая цена для трейлинга и mark price для безубытка
-                    if micro is not None and tick.symbol in crypto:  # у MT5-котировок нет ленты сделок (объёма и стороны агрессора)
+                    if micro is not None and tick.symbol in book_symbols:  # у MT5-котировок нет ленты сделок (объёма и стороны агрессора), у Binance Test - стакана
                         micro.on_tick(tick)
 
                 def on_gap(ts: int) -> None:
-                    for s in crypto:
+                    for s in tuple(subscribed):
                         tracker.mark_gap(s, ts)
                     if micro is not None:
                         micro.aggregator.mark_gap("trade")
 
-                ticks = TickFeed(session, on_tick, on_gap, symbols=crypto)
+                ticks = MultiFeed([TickFeed(session, on_tick, on_gap, symbols=crypto)])
                 if mt5_client is not None:  # MT5-символы: свечи M5 (единственный запрос к MetaApi), из них производные 15m / 1h / 4h / 1d, и тики
                     mt5_feed = Mt5KlineFeed(mt5_client, FeatureEngine(SmcParams()), broker_name=mt5_mapper.broker_name, symbols=mt5_wanted,
                                             history_bars=opts.history, emit=mtf)
@@ -248,13 +269,28 @@ async def shadow_main(opts: Options) -> None:
                     feed = MultiFeed([feed, mt5_feed.m15_view(FeatureEngine(SmcParams())), mt5_feed])
                     mt5_ticks = Mt5TickFeed(mt5_client, on_tick, lambda ts: [tracker.mark_gap(s, ts) for s in mt5_wanted], broker_name=mt5_mapper.broker_name,
                                             symbols=mt5_wanted)
-                    ticks = MultiFeed([ticks, mt5_ticks])
+                    ticks.add(mt5_ticks)
+
+                add_group = GroupConnector(make_feeds=make_feeds, work=feed, state=htf_feed, ticks=ticks, warmup_timeout_s=GROUP_WARMUP_TIMEOUT_S,
+                                           settle_s=2 * POLL_INTERVAL_S, make_tick_feed=lambda batch: TickFeed(session, on_tick, on_gap, symbols=batch))
+
+                def add_book(batch: tuple[str, ...]) -> None:
+                    micro.add_symbols(batch, int(time.time() * 1000))
+                    book_symbols.update(batch)
+                    depth_feed.add(DepthFeed(session, micro.aggregator, symbols=batch))
+
+                manager = None
+                if universe is not None:
+                    manager = UniverseManager(api, universe, Hooks(add_group=add_group, prepare_live=live.prepare_symbols if live is not None else None,
+                                                                   add_book=add_book if micro is not None else None,
+                                                                   open_symbols=live.open_symbols if live is not None else None))
                 runner = ShadowRun(feed, orch, tracker, ticks, heartbeat=config.DATA_DIR / HEARTBEAT_NAME, recorder=recorder,
-                                 htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live)
-                log.info("Shadow Mode: %s %s%s, стратегии %s, HTF-фильтр %s, микроструктура %s, эквити %.0f, журнал %s, БД %s, TRADE_MODE=%s",
+                                 htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live, universe=manager)
+                log.info("Shadow Mode: %s %s%s, стратегии %s, HTF-фильтр %s, микроструктура %s, эквити %.0f, журнал %s, БД %s, TRADE_MODE=%s, автоселектор монет %s",
                          all_symbols, opts.interval, f" + SMC_Pro_Trend {D.MTF_BIAS_INTERVAL}->{D.MTF_STRUCT_INTERVAL}->{D.MTF_BASE_INTERVAL}" if mtf else "",
                          list(names), D.HTF_INTERVAL if htf is not None else "выключен",
-                         "стакан + лента" if micro is not None else "нет", opts.equity, journal.path, "включена" if recorder is not None else "нет", config.TRADE_MODE)
+                         "стакан + лента" if micro is not None else "нет", opts.equity, journal.path, "включена" if recorder is not None else "нет", config.TRADE_MODE,
+                         f"каждые {config.UNIVERSE_REFRESH_S / 3600:.0f} ч" if manager is not None else "выключен")
                 if htf_feed is not None:
                     htf_feed.start()
                 feed.start()
@@ -265,10 +301,14 @@ async def shadow_main(opts: Options) -> None:
                 ticks.start()
                 if depth_feed is not None:
                     depth_feed.start()
+                if manager is not None:
+                    manager.start()
                 try:
                     await runner.run()
                 finally:
                     runner.log_summary()
+                    if manager is not None:
+                        await manager.aclose()
                     if live is not None:
                         await live.aclose()
                     await feed.aclose()

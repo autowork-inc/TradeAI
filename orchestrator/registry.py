@@ -1,7 +1,7 @@
 """Реестр стратегий мульти-стратегийного Shadow (2026-10-11): идентификаторы (strategy_id), планы управления позицией, сборка набора.
 
 strategy_id - то, что пишется в колонку `strategy_id` всех таблиц БД и входит в составной ключ позиции `<символ>_<strategy_id>`
-(orchestrator/tracker.py). Пять стратегий работают параллельно; четыре из них - на свечах M15 (один kline-фид и один фид H4 на всех), а `SMC_Pro_Trend` с
+(orchestrator/tracker.py). Семь стратегий работают параллельно (две последние - только Shadow, SHADOW_ONLY_STRATEGIES); шесть из них - на свечах M15 (один kline-фид и один фид H4 на всех), а `SMC_Pro_Trend` с
 2026-10-14 - в мульти-таймфреймовом режиме (`build_strategies(mtf=True)`): 1d bias -> 1h свип -> 5m FVG/CHoCH/вход. У каждой стратегии свой рабочий таймфрейм
 (`strategy.interval`): Оркестратор считает её только на закрытии этих свечей. У каждой своя блокировка монеты (О14), свои позиции и свои сделки; общего
 изменяемого состояния между стратегиями нет.
@@ -13,6 +13,7 @@ strategy_id - то, что пишется в колонку `strategy_id` все
   ICT_Killzones      Scale Out по умолчанию;
   VWAP_Reversion     возврат к среднему: 50% на +1R (+безубыток), остаток 50% на +2R, без runner'а (цель - вернуться к VWAP, а не уйти
                      за него; точный уровень VWAP на сигнале пишется в meta, тейк-ордера из цены трекер при MARKET-входе не использует).
+  Horizontal_Breakout / Trendline_Breakout  50% на +1R (+безубыток), 50% на +2R, без runner'а (LEVEL_BREAKOUT_PLAN, 2026-10-18).
 Параметры планов - стартовые допущения, не из утверждённых: подбирать по статистике Shadow (trade_closes хранит каждую часть сделки),
 а не по знаку прибыли.
 """
@@ -22,13 +23,17 @@ from collections.abc import Collection, Mapping, Sequence
 import config
 from features import defaults as D
 from orchestrator.multi_strategies import (
+    HORIZONTAL_BREAKOUT,
     ICT_KILLZONES,
     OBI_BREAKOUT,
     SMC_COUNTER_TREND,
+    TRENDLINE_BREAKOUT,
     VWAP_REVERSION,
     StrategyCounterTrend,
+    StrategyHorizontalBreakout,
     StrategyKillzones,
     StrategyObiBreakout,
+    StrategyTrendlineBreakout,
     StrategyVwapReversion,
 )
 from orchestrator.strategies import SMC_PRO_TREND, Strategy, StrategySMC
@@ -37,8 +42,11 @@ from strategies.smc_setups import SmcSetupParams
 from strategies.vwap_reversion import VwapParams, min_history_bars
 from utils.errors import ConfigError
 
-SHADOW_STRATEGIES = (SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION)
-NEEDS_HTF = (SMC_PRO_TREND, SMC_COUNTER_TREND)  # читают колонку htf_bias (H4)
+SHADOW_STRATEGIES = (SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT)
+# Стратегии без доступа к live (2026-10-18): никогда не исполняются боевым движком - config.validate и LiveRiskManager отвергают их в
+# APPROVED_STRATEGIES (ConfigError), LiveMirrorSink их не пересылает. Список продублирован в config (config не импортирует оркестратор).
+SHADOW_ONLY_STRATEGIES = (HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT)
+NEEDS_HTF = (SMC_PRO_TREND, SMC_COUNTER_TREND, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT)  # читают колонку htf_bias (H4)
 NEEDS_MICRO = (OBI_BREAKOUT,)  # читают колонки ms_obi / ms_delta (стакан + лента)
 
 
@@ -52,7 +60,11 @@ def strategy_allowed(name: str, symbol: str) -> bool:
 
 SCALP_1R_PLAN = ScaleOutPlan(((1.0, 1.0),), be_after_first=False, trail_mode=None)
 VWAP_PLAN = ScaleOutPlan(((1.0, 0.5), (2.0, 0.5)), be_after_first=True, trail_mode=None)
-STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_COUNTER_TREND: SCALP_1R_PLAN, VWAP_REVERSION: VWAP_PLAN}
+# Пробои уровня / линии (2026-10-18): разметка - медиана R:R 1.0, но у четверти сделок цель >= 2R. Половина фиксируется на +1R (стоп в безубыток),
+# половина ждёт +2R; без runner'а - трейлинг 3 ATR на 15m для пробоя консолидации слишком широк.
+LEVEL_BREAKOUT_PLAN = ScaleOutPlan(((1.0, 0.5), (2.0, 0.5)), be_after_first=True, trail_mode=None)
+STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_COUNTER_TREND: SCALP_1R_PLAN, VWAP_REVERSION: VWAP_PLAN,
+                                           HORIZONTAL_BREAKOUT: LEVEL_BREAKOUT_PLAN, TRENDLINE_BREAKOUT: LEVEL_BREAKOUT_PLAN}
 
 
 def plans_for(names: Sequence[str]) -> Mapping[str, ScaleOutPlan]:
@@ -94,8 +106,10 @@ def build_strategies(names: Sequence[str] = SHADOW_STRATEGIES, *, mtf: bool = Fa
     mtf=False (по умолчанию): прежний одно-таймфреймовый режим; `interval` (если задан) закрепляет за всеми стратегиями таймфрейм."""
     if len(set(names)) != len(names):
         raise ConfigError(f"Дубли в наборе стратегий: {list(names)}")
-    if (SMC_PRO_TREND in names or SMC_COUNTER_TREND in names) and not D.HTF_FILTER_ENABLED:
-        raise ConfigError("SMC_Pro_Trend и SMC_Counter_Trend читают HTF Bias: D.HTF_FILTER_ENABLED должен быть True")
+    if any(n in NEEDS_HTF for n in names) and not D.HTF_FILTER_ENABLED:
+        raise ConfigError(f"{[n for n in names if n in NEEDS_HTF]} читают HTF Bias: D.HTF_FILTER_ENABLED должен быть True")
+    if tuple(config.SHADOW_ONLY_STRATEGIES) != SHADOW_ONLY_STRATEGIES:
+        raise ConfigError(f"config.SHADOW_ONLY_STRATEGIES {config.SHADOW_ONLY_STRATEGIES} != registry.SHADOW_ONLY_STRATEGIES {SHADOW_ONLY_STRATEGIES}")
     if mtf and interval is None:
         raise ConfigError("build_strategies: с mtf=True нужен рабочий interval остальных стратегий (например '15m')")
     factories = {
@@ -104,6 +118,8 @@ def build_strategies(names: Sequence[str] = SHADOW_STRATEGIES, *, mtf: bool = Fa
         OBI_BREAKOUT: StrategyObiBreakout,
         ICT_KILLZONES: StrategyKillzones,
         VWAP_REVERSION: (lambda: vwap_reversion_on(interval)) if interval else StrategyVwapReversion,  # свой 15m: окна 16 / 3 (откат с 5m 2026-10-15)
+        HORIZONTAL_BREAKOUT: StrategyHorizontalBreakout,
+        TRENDLINE_BREAKOUT: StrategyTrendlineBreakout,
     }
     unknown = [n for n in names if n not in factories]
     if unknown:

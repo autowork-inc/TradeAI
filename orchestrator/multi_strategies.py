@@ -5,6 +5,8 @@
   OBI_Breakout       strategies/obi_breakout.py    BOS локального экстремума + дисбаланс стакана / всплеск дельты ленты
   ICT_Killzones      strategies/killzones.py       свип границ Азиатской сессии в killzone Лондона / Нью-Йорка
   VWAP_Reversion     strategies/vwap_reversion.py  возврат от 3-го стандартного отклонения Anchored VWAP (дневной якорь)
+  Horizontal_Breakout  strategies/horizontal_breakout.py  пробой плотной горизонтальной консолидации по H4 (2026-10-18, только Shadow)
+  Trendline_Breakout   strategies/trendline_breakout.py   пробой / свип трендовой линии по двум свингам (2026-10-18, только Shadow)
 
 Все четыре входят MARKET (по первому тику после закрытия свечи; R и плечо считаются по факту входа в трекере). Планы управления позицией -
 orchestrator/registry.py. Состояний автомата сетапа (S0..S4) у них нет: решение принимается на одной закрытой свече.
@@ -17,8 +19,10 @@ import polars as pl
 from orchestrator.strategies import _htf_meta, _signal_id
 from orchestrator.types import Direction, FeatureContext, Kind, Signal, geometry
 from strategies.counter_trend import CounterTrendParams, detect_counter_trend
+from strategies.horizontal_breakout import HorizontalParams, detect_horizontal_breakout
 from strategies.killzones import DAY_MS, HOUR_MS, KillzoneParams, detect_killzones
 from strategies.obi_breakout import DELTA_COLUMN, OBI_COLUMN, ObiParams, detect_obi_breakout
+from strategies.trendline_breakout import TrendlineParams, detect_trendline_breakout
 from strategies.vwap_reversion import VwapParams, detect_vwap_reversion, min_history_bars
 from utils.errors import DataError
 
@@ -26,6 +30,8 @@ SMC_COUNTER_TREND = "SMC_Counter_Trend"
 OBI_BREAKOUT = "OBI_Breakout"
 ICT_KILLZONES = "ICT_Killzones"
 VWAP_REVERSION = "VWAP_Reversion"
+HORIZONTAL_BREAKOUT = "Horizontal_Breakout"  # 2026-10-18, только Shadow (config.SHADOW_ONLY_STRATEGIES)
+TRENDLINE_BREAKOUT = "Trendline_Breakout"  # 2026-10-18, только Shadow (config.SHADOW_ONLY_STRATEGIES)
 
 
 def _market_signal(name: str, ctx: FeatureContext, direction: Direction, sl: float, geo: tuple[dict[str, Any], ...], meta: dict[str, Any]) -> Signal:
@@ -159,4 +165,72 @@ class StrategyVwapReversion:
             out.append(_market_signal(self.name, ctx, direction, sl, geo, {
                 "vwap": vwap, "sd": last["vw_sd"], "band": band, "sd_mult": self.params.sd_mult,
                 "target_vwap_r": abs(ctx.last_close - vwap) / abs(sl - ctx.last_close), "atr": last["atr"], **_htf_meta(last)}))
+        return tuple(out)
+
+
+def _f(v: Any) -> float | None:
+    return None if v is None else float(v)
+
+
+class StrategyHorizontalBreakout:
+    """Только Shadow: имя в config.SHADOW_ONLY_STRATEGIES - в APPROVED_STRATEGIES его не пустит config.validate и LiveRiskManager."""
+
+    name = HORIZONTAL_BREAKOUT
+
+    def __init__(self, params: HorizontalParams | None = None):
+        self.params = params or HorizontalParams()
+
+    def detect(self, ctx: FeatureContext) -> tuple[Signal, ...]:
+        det = detect_horizontal_breakout(ctx.frame, self.params)
+        last = _last(det)
+        out = []
+        t = ctx.bar_open_time
+        for side in ("long", "short"):
+            if not last[f"hb_{side}_signal"]:
+                continue
+            level, sl = last[f"hb_{side}_level"], last[f"hb_{side}_sl"]
+            geo = (
+                geometry("zone", last["hb_box_t1"], t, last["hb_box_lo"], last["hb_box_hi"], f"консолидация {self.params.window} баров"),
+                geometry("line", last["hb_box_t1"], t, level, level, "горизонтальный уровень"),
+                geometry("marker", t, t, ctx.last_close, ctx.last_close, "пробой"),
+                _sl_line(ctx, sl),
+            )
+            out.append(_market_signal(self.name, ctx, Direction(side), sl, geo, {
+                "level": level, "box_hi": last["hb_box_hi"], "box_lo": last["hb_box_lo"], "box_atr": _f(last["hb_box_atr"]),
+                "efficiency": _f(last["hb_efficiency"]), "density": _f(last["hb_density"]), "touches": int(last[f"hb_{side}_touches"]),
+                "touch_span": int(last[f"hb_{side}_touch_span"]), "clv": _f(last[f"hb_{side}_clv"]), "vol_ratio": _f(last["vol_ratio"]),
+                "risk_atr": _f(last[f"hb_{side}_risk_atr"]), "quality": _f(last[f"hb_{side}_quality"]), "window": self.params.window,
+                "atr": last["atr"], **_htf_meta(last)}))
+        return tuple(out)
+
+
+class StrategyTrendlineBreakout:
+    """Только Shadow (config.SHADOW_ONLY_STRATEGIES). Режим сигнала (breakout / sweep) - в meta["mode"]."""
+
+    name = TRENDLINE_BREAKOUT
+
+    def __init__(self, params: TrendlineParams | None = None):
+        self.params = params or TrendlineParams()
+
+    def detect(self, ctx: FeatureContext) -> tuple[Signal, ...]:
+        det = detect_trendline_breakout(ctx.frame, ctx.interval_ms, self.params)
+        last = _last(det)
+        out = []
+        t = ctx.bar_open_time
+        for side in ("long", "short"):
+            if not last[f"tl_{side}_signal"]:
+                continue
+            g = {k: last[f"tl_{side}_{k}"] for k in ("mode", "level", "sl", "anchor1_time", "anchor1_price", "anchor2_time", "anchor2_price")}
+            geo = (
+                geometry("line", g["anchor1_time"], t, g["anchor1_price"], g["level"], "трендовая линия"),
+                geometry("marker", g["anchor2_time"], g["anchor2_time"], g["anchor2_price"], g["anchor2_price"], "2-я опора"),
+                geometry("marker", t, t, ctx.last_close, ctx.last_close, "пробой линии" if g["mode"] == "breakout" else "свип линии"),
+                _sl_line(ctx, g["sl"]),
+            )
+            out.append(_market_signal(self.name, ctx, Direction(side), g["sl"], geo, {
+                "mode": g["mode"], "line_level": g["level"], "slope_atr": _f(last[f"tl_{side}_slope_atr"]),
+                "span_bars": _f(last[f"tl_{side}_span_bars"]), "age_bars": _f(last[f"tl_{side}_age_bars"]),
+                "touches": int(last[f"tl_{side}_touches"]), "risk_atr": _f(last[f"tl_{side}_risk_atr"]),
+                "quality": _f(last[f"tl_{side}_quality"]), "vol_ratio": _f(last["vol_ratio"]),
+                "anchor1_price": g["anchor1_price"], "anchor2_price": g["anchor2_price"], "atr": last["atr"], **_htf_meta(last)}))
         return tuple(out)

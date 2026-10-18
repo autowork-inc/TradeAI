@@ -32,6 +32,8 @@ class ClientSettings:
     remember_key: bool = True
     post_signal_candles: bool = True  # на графике достраивать свечи ПОСЛЕ сигнала из публичного REST Binance (в снапшоте их нет)
     binance_rest: str = "https://fapi.binance.com"
+    balance_visible: bool = False  # сумма баланса в шапке по умолчанию скрыта (***)
+    mode_filter: str = ""  # последний выбранный пользователем режим Statistics/History (all|live|shadow); пусто - следовать активному контуру
 
     def validate(self) -> "ClientSettings":
         parts = urlsplit(self.base_url.strip())

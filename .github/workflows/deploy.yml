@@ -1,0 +1,74 @@
+# Деплой из CI (только вручную): тесты -> архив (без ключей) -> VPS -> deploy/apply.sh (контур сохраняется, обновление ждёт закрытия боевых позиций, откат при провале).
+# Нужно один раз добавить секреты репозитория (Settings -> Secrets and variables -> Actions):
+#   VPS_HOST         адрес сервера
+#   VPS_USER         пользователь SSH (тот, у кого каталог ~/trading)
+#   VPS_SSH_KEY      приватный ключ ОТДЕЛЬНОЙ пары для деплоя (без парольной фразы); публичную часть добавьте в ~/.ssh/authorized_keys на сервере
+#   VPS_KNOWN_HOSTS  вывод `ssh-keyscan -t ed25519 <VPS_HOST>` (защита от подмены сервера)
+# Коммит с [skip deploy] в сообщении деплой пропускает. Ключи биржи и MetaApi в CI не попадают: они лежат только в ~/trading/.env.shadow на сервере.
+name: deploy
+
+# Автозапуск по push ОТКЛЮЧЁН (решение пользователя 2026-10-18: деплоит он сам). Запуск только вручную: Actions -> deploy -> Run workflow.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[skip deploy]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest pytest-asyncio
+      - run: pip install -r requirements-dev.txt || true
+      - run: python -m pytest tests -q -x -p no:cacheprovider
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Архив (цель shadow: ключей API в нём нет)
+        run: python -m scripts.deploy_pack --target shadow --output trading_shadow.tar.gz
+      - name: SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          [ -n "$VPS_SSH_KEY" ] && [ -n "$VPS_KNOWN_HOSTS" ] || { echo "Нет секретов VPS_SSH_KEY / VPS_KNOWN_HOSTS" >&2; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Доставка и применение
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -u
+          SSH="ssh -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=yes -o BatchMode=yes $VPS_USER@$VPS_HOST"
+          $SSH 'mkdir -p ~/trading_incoming ~/trading/deploy'
+          scp -i "$HOME/.ssh/deploy_key" -o StrictHostKeyChecking=yes -o BatchMode=yes \
+              trading_shadow.tar.gz trading_shadow.tar.gz.sha256 "$VPS_USER@$VPS_HOST:trading_incoming/"
+          # свежий apply.sh берём из самого архива: логика применения обновляется вместе с кодом
+          $SSH 'tar --force-local -xzf ~/trading_incoming/trading_shadow.tar.gz -C ~/trading deploy/apply.sh && chmod +x ~/trading/deploy/apply.sh'
+          $SSH '~/trading/deploy/apply.sh --install-cron' || true
+          set +e
+          $SSH '~/trading/deploy/apply.sh --from ~/trading_incoming/trading_shadow.tar.gz'
+          rc=$?
+          set -e
+          if [ "$rc" -eq 75 ]; then
+            echo "::notice::Обновление ОТЛОЖЕНО: в боевом контуре есть открытые позиции. Архив лежит на сервере, cron применит его, когда позиции закроются."
+            exit 0
+          fi
+          exit "$rc"

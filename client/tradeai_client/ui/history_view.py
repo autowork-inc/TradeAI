@@ -31,7 +31,8 @@ class HistoryView:
         self._coin = _dropdown("Монета", [("all", "Все")] + [(c, fmt.coin_short(c)) for c in COINS], 130, self._filter_changed)
         self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 230, self._filter_changed)
         self._mode = _dropdown("Режим", fmt.MODE_OPTIONS, 180, self._mode_changed)
-        self._mode.value, self._mode_touched = self.host.default_mode, False  # пока пользователь не выбрал сам, режим следует за активным контуром
+        saved = getattr(self.host, "saved_mode", "")  # последний выбор пользователя; пока его нет, режим следует за активным контуром
+        self._mode.value, self._mode_touched = saved or self.host.default_mode, bool(saved)
         self._info = ft.Text("", size=12, color=w.MUTED)
         self._prev = ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="Новее", on_click=self._prev_page, disabled=True)
         self._next = ft.IconButton(icon=ft.Icons.ARROW_FORWARD, tooltip="Старше", on_click=self._next_page, disabled=True)
@@ -49,12 +50,19 @@ class HistoryView:
 
     # ------------------------------------------------------------------------------------------ загрузка
 
+    def set_coins(self, coins: list[str]) -> None:
+        """Монеты с сервера (автоселектор подключает новые на лету): фильтр «Монета» получает их вместе с прежними; выбранное значение сохраняется. Перерисовка - при ближайшем обновлении вкладки."""
+        merged = list(dict.fromkeys([*COINS, *coins]))
+        if [o.key for o in self._coin.options][1:] != merged:
+            self._coin.options = [ft.DropdownOption(key="all", text="Все")] + [ft.DropdownOption(key=c, text=fmt.coin_short(c)) for c in merged]
+
     async def _filter_changed(self, _=None) -> None:
         self._offset = 0
         await self.refresh()
 
     async def _mode_changed(self, _=None) -> None:
         self._mode_touched = True
+        self.host.remember_mode(self._mode.value)
         await self._filter_changed()
 
     def follow_default_mode(self, mode: str) -> bool:

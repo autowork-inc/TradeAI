@@ -62,6 +62,15 @@ class MicroAggregator:
         self._window_ms, self._grace_ms, self._keep = int(obi_window_s * 1000), int(grace_s * 1000), keep
         self._bars: dict[str, dict[int, _Bar]] = {s: {} for s in self._symbols}
         self._first_ms: dict[str, int | None] = {k: None for k in KINDS}  # время первого сообщения текущего соединения
+        self._added_ms: dict[str, int] = {}  # монеты, добавленные в работающий процесс (автоселектор): сводки свечей, начатых до добавления, неполные
+
+    def add_symbols(self, symbols: tuple[str, ...], now_ms: int) -> None:
+        """Монеты, подключённые на лету: окна свечей, открывшихся раньше `now_ms`, для них неполные (valid=False, ms_obi / ms_delta = null)."""
+        for s in symbols:
+            if s not in self._bars:
+                self._symbols += (s,)
+                self._bars[s] = {}
+                self._added_ms[s] = now_ms
 
     # ------------------------------------------------------------------------------------------ события
 
@@ -118,6 +127,9 @@ class MicroAggregator:
         bar = self._bars.get(symbol, {}).get(bar_open_time)
         firsts = (self._first_ms["trade"], self._first_ms["depth"])
         valid = bar is not None and all(f is not None and f <= bar_open_time + self._grace_ms for f in firsts)
+        added = self._added_ms.get(symbol)
+        if added is not None and added > bar_open_time + self._grace_ms:
+            valid = False
         if not valid:
             return MicroBar(None, None, 0 if bar is None else bar.trades, 0 if bar is None else len(bar.obi), False)
         total = bar.buy + bar.sell
@@ -141,6 +153,9 @@ class MicroStructure:
     def __init__(self, symbols: tuple[str, ...], interval_ms: int, **kwargs: Any):
         self.interval_ms = interval_ms  # свечи ЭТОГО таймфрейма получают ms_obi / ms_delta (окна агрегатора кратны ему); другие (5m) ShadowRun не присоединяет
         self.aggregator = MicroAggregator(symbols, interval_ms, **kwargs)
+
+    def add_symbols(self, symbols: tuple[str, ...], now_ms: int) -> None:
+        self.aggregator.add_symbols(symbols, now_ms)
 
     def on_tick(self, tick: Tick) -> None:
         if tick.kind != "trade":

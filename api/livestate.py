@@ -96,6 +96,32 @@ def read_account(dirs: "list[Path | None]", now: float | None = None) -> dict[st
             "age_s": max(0.0, now - best["updated"]), "venues": best["venues"]}
 
 
+UNIVERSE_FILE = ".symbol_universe.json"  # снимок автоселектора монет (его пишет shadow-run / shadow-live, orchestrator/universe.py)
+
+
+def read_universe_coins(dirs: "list[Path | None]") -> list[str]:
+    """Монеты автоселектора (live-уровень, затем Binance Test) из самого свежего снимка. Нет файла / нечитаем - пусто (API только читает и не падает из-за файла)."""
+    best: tuple[float, list[str]] | None = None
+    for d in dirs:
+        path = None if d is None else d / UNIVERSE_FILE
+        if path is None or not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            coins = [c for c in (*data["live"], *data["test"]) if isinstance(c, str) and c.isalnum() and c == c.upper()]
+            stamp = float(data["updated_ms"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if best is None or stamp > best[0]:
+            best = (stamp, coins)
+    return [] if best is None else best[1]
+
+
+def current_coins(settings: Settings) -> tuple[str, ...]:
+    """Монеты для клиента: статичная основа (закреплённые и MT5) + текущие монеты автоселектора, без повторов, порядок сохраняется."""
+    return tuple(dict.fromkeys([*settings.coins, *read_universe_coins([settings.live_data_dir, settings.shadow_data_dir])]))
+
+
 def parse_setup_row(row: Any) -> dict[str, Any]:
     m = _STATE_RE.match(row["to_state"] or "")
     if m is None or m.group(1) != row["side"]:
@@ -176,7 +202,7 @@ class LiveStateHub:
                 positions = await conn.fetch(POSITIONS_SQL, "shadow")
                 events = await conn.fetch(EVENTS_SQL, EVENTS_LIMIT)
         hb = freshest_heartbeat_age_s([self._s.shadow_data_dir, self._s.live_data_dir])
-        return build_state(self._s.coins, setups, positions, events, hb, datetime.now(timezone.utc))
+        return build_state(current_coins(self._s), setups, positions, events, hb, datetime.now(timezone.utc))
 
     async def refresh(self) -> None:
         """Один цикл опроса. Недоступность БД и нечитаемые данные не роняют процесс (API только читает), но видны клиентам и в health."""

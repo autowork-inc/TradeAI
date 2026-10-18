@@ -32,7 +32,10 @@ def texts(c) -> list[str]:
 class Host:
     def __init__(self, client=None):
         self.client, self.opened, self.ran = client, [], []
-        self.default_mode = "shadow"
+        self.default_mode, self.saved_mode, self.remembered = "shadow", "", []
+
+    def remember_mode(self, mode):
+        self.remembered.append(mode)
 
     def run(self, coro):
         self.ran.append(coro)
@@ -69,7 +72,7 @@ def test_stats_view_renders_kpis_ranking_and_warning(fx):
     t = texts(ft.Column(v._render(fx("stats.json"))))
     assert "Win Rate" in t and "55.6%" in t and "Profit Factor" in t and "1.41" in t and "Net R" in t
     assert any(x.startswith("Лучшая: DOGE") for x in t) and "нет сделок" not in t
-    assert any("выводов о прибыльности делать нельзя" in x for x in t)  # предупреждение о малой выборке
+    assert not any("выводов о прибыльности делать нельзя" in x for x in t)  # текстовое предупреждение заменено прогресс-баром
     names = [x for x in t if x in ("DOGE", "BTC", "ETH", "1000PEPE")]
     assert names[:4] == ["DOGE", "BTC", "ETH", "1000PEPE"]  # порядок по Net R
 
@@ -165,13 +168,36 @@ def test_dashboard_renders_two_labelled_sections(fx):
 def test_stats_and_history_explain_filters_and_follow_active_mode(fx):
     v = StatsView(Host())
     t = texts(ft.Column(v._render(fx("stats.json"))))
-    assert any("учитываются только завершённые сделки (по TP/SL/BE)" in x and "отфильтрованы" in x for x in t)
+    assert not any("учитываются только завершённые" in x or "нужно порядка" in x for x in t)  # дисклеймер и текст про 200+ убраны
+    assert v._goal._text.value == f"{fx('stats.json')['overall']['trades']} / 200"
     assert any(x.startswith("В расчёте:") for x in t)
     assert v._filters()["mode"] == "shadow" and v.follow_default_mode("live") and v._filters()["mode"] == "live"
     v._mode_touched = True
     assert not v.follow_default_mode("shadow") and v._filters()["mode"] == "live"  # выбор пользователя не перезаписывается
     h = HistoryView(Host())
     assert h._mode.value == "shadow" and h.follow_default_mode("live") and h._mode.value == "live"
+
+
+def test_saved_mode_is_applied_on_open_and_reported_on_change():
+    host = Host()
+    host.saved_mode = "all"
+    v, h = StatsView(host), HistoryView(host)
+    assert v._filters()["mode"] == "all" and h._mode.value == "all"  # запомненный выбор не сбрасывается на live/shadow
+    assert not v.follow_default_mode("live") and not h.follow_default_mode("live")
+    v._mode.value = "shadow"
+    asyncio.run(v._mode_changed())
+    assert host.remembered == ["shadow"]
+
+
+def test_goal_bar_fills_up_to_200_and_clamps():
+    from tradeai_client.ui.widgets import GoalBar
+    b = GoalBar(200, width=200)
+    b.set(10)
+    assert b._text.value == "10 / 200" and b._fill.width == 10
+    b.set(500)
+    assert b._fill.width == 200
+    b.set(0)
+    assert b._fill.width == 0
 
 
 def test_history_row_marks_restart_with_readable_status_and_tooltip():
@@ -181,3 +207,11 @@ def test_history_row_marks_restart_with_readable_status_and_tooltip():
             "gap_affected": False, "has_snapshot": False}
     row = h._row(base).content
     assert "Прервана (Рестарт бота)" in texts(row) and "SHADOW" in texts(row) and row.tooltip.endswith("в WinRate не входит")
+
+
+def test_coin_filters_pick_up_coins_added_by_the_server_and_keep_selection():
+    for view in (StatsView(Host()), HistoryView(Host())):
+        view._coin.value = "BTCUSDT"
+        view.set_coins(["BTCUSDT", "SOLUSDT", "NEWUSDT"])
+        keys = [o.key for o in view._coin.options]
+        assert keys[0] == "all" and "SOLUSDT" in keys and "NEWUSDT" in keys and keys.count("BTCUSDT") == 1 and view._coin.value == "BTCUSDT"

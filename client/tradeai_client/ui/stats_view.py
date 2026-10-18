@@ -9,8 +9,6 @@ from tradeai_client.api import ApiError
 from tradeai_client.ui import widgets as w
 
 COINS = fmt.COINS
-STATS_NOTE = ("В статистике учитываются только завершённые сделки (по TP/SL/BE). "
-              "Прерванные рестартом и незавершённые сделки отфильтрованы.")
 PERIODS = {"all": ("Всё время", None), "30d": ("30 дней", 30), "7d": ("7 дней", 7), "1d": ("24 часа", 1)}
 COIN_COLS = [26, 90, 300, 70, 80, 60, 90]
 
@@ -26,21 +24,31 @@ class StatsView:
         self._coin = _dropdown("Монета", [("all", "Все")] + [(c, fmt.coin_short(c)) for c in COINS], 130, self._changed)
         self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 230, self._changed)
         self._mode = _dropdown("Режим", fmt.MODE_OPTIONS, 180, self._mode_changed)
-        self._mode.value, self._mode_touched = self.host.default_mode, False
+        saved = getattr(self.host, "saved_mode", "")
+        self._mode.value, self._mode_touched = saved or self.host.default_mode, bool(saved)
         self._side = _dropdown("Сторона", [("all", "Все"), ("long", "Лонг"), ("short", "Шорт")], 120, self._changed)
         self._period = _dropdown("Период", [(k, v[0]) for k, v in PERIODS.items()], 170, self._changed)
         self._stamp = ft.Text("", size=12, color=w.MUTED)
+        self._goal = w.GoalBar(fmt.TRADES_GOAL)
         self._body = ft.Column(spacing=14)
         self.control = ft.Column(
             [ft.Container(height=2), ft.Row([self._mode, self._coin, self._strategy, self._side, self._period,
-                     ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp], spacing=10),
+                     ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp,
+                     ft.Container(expand=True), self._goal.control], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
              self._body], expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
+
+    def set_coins(self, coins: list[str]) -> None:
+        """Монеты с сервера (автоселектор подключает новые на лету): фильтр «Монета» получает их вместе с прежними; выбранное значение сохраняется. Перерисовка - при ближайшем обновлении вкладки."""
+        merged = list(dict.fromkeys([*COINS, *coins]))
+        if [o.key for o in self._coin.options][1:] != merged:
+            self._coin.options = [ft.DropdownOption(key="all", text="Все")] + [ft.DropdownOption(key=c, text=fmt.coin_short(c)) for c in merged]
 
     async def _changed(self, _=None) -> None:
         await self.refresh()
 
     async def _mode_changed(self, _=None) -> None:
         self._mode_touched = True
+        self.host.remember_mode(self._mode.value)
         await self.refresh()
 
     def follow_default_mode(self, mode: str) -> bool:
@@ -73,9 +81,8 @@ class StatsView:
     # ------------------------------------------------------------------------------------------ отрисовка
 
     def _render(self, d: dict) -> list[ft.Control]:
-        o, out = d["overall"], [w.banner(STATS_NOTE, w.ACCENT, ft.Icons.INFO_OUTLINE)]
-        if d["significance"]["note"]:
-            out.append(w.banner(d["significance"]["note"], w.AMBER))
+        o, out = d["overall"], []
+        self._goal.set(o["trades"])
         out.append(self._excluded_note(d["counts"], o["trades"]))
         pf = fmt.fmt_pf(o)
         se = f"± {o['avg_r_stderr']:.2f}" if o["avg_r_stderr"] is not None else None

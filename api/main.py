@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, WebSo
 from fastapi.responses import JSONResponse
 from pydantic import StringConstraints
 
-from api.livestate import SETUP_STRATEGIES, LiveStateHub, freshest_heartbeat_age_s, read_account
+from api.livestate import SETUP_STRATEGIES, LiveStateHub, current_coins, freshest_heartbeat_age_s, read_account
 from api.reason import build_reason
 from api.security import FailureThrottle, check_key
 from api.serialize import DataIntegrityError, close_out, event_out, iso, trade_out
@@ -157,7 +157,7 @@ def create_app(settings: Settings) -> FastAPI:
             rows = await conn.fetch(COUNTS_SQL, mode)
             seen = [r["strategy_id"] for r in await conn.fetch(STRATEGIES_SQL, mode)]
         hb = freshest_heartbeat_age_s([settings.shadow_data_dir, settings.live_data_dir])
-        return {"server_time": iso(datetime.now(timezone.utc)), "mode": mode, "schema_version": version, "coins": list(settings.coins),
+        return {"server_time": iso(datetime.now(timezone.utc)), "mode": mode, "schema_version": version, "coins": list(current_coins(settings)),
                 "strategies": sorted({*DEFAULT_STRATEGIES, *seen}),  # настроенные + все, по которым есть сделки (в т.ч. прежние smc / breakout)
                 "counts": counts_from_rows(rows), "account": read_account([settings.live_data_dir]),
                 "shadow": {"heartbeat_age_s": hb, "alive": None if hb is None else hb < 120.0}}

@@ -322,9 +322,8 @@ def test_build_router_without_mt5_is_binance_only():
     assert router.venues == ("binance",) and router.mt5 is None and router.venue_of("EURUSD") is None
 
 
-def test_live_binance_pool_is_the_eleven_shadow_cryptos_and_mt5_stays_separate():
-    crypto = tuple(s for s in config.SHADOW_SYMBOLS if s not in config.LIVE_MT5_SYMBOLS)
-    assert config.LIVE_BINANCE_SYMBOLS == crypto and len(crypto) == 11
+def test_live_binance_pool_starts_with_pinned_btc_eth_and_mt5_stays_separate():
+    assert config.LIVE_BINANCE_SYMBOLS == ("BTCUSDT", "ETHUSDT")  # остальное добавляет автоселектор по объёму >= 400M (на месте, в тот же объект)
     assert config.LIVE_MT5_SYMBOLS == ("EURUSD", "XAUUSD", "XAGUSD") and not config.LIVE_ENABLE_MT5
     assert config.TRADE_MODE == "shadow"  # по умолчанию ничего не отправляется
     assert set(config.LIVE_BINANCE_SYMBOLS).isdisjoint(config.LIVE_MT5_SYMBOLS)

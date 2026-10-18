@@ -341,3 +341,21 @@ def test_where_clause_all_mode_does_not_filter_by_contour():
 
     where, args = where_clause("t.", "all", None, ["BTCUSDT"], None, None)
     assert args[0] == "all" and "t.mode = $1 OR $1 = 'all'" in where and "t.coin = ANY($2::text[])" in where
+
+
+def test_current_coins_adds_universe_coins_from_freshest_snapshot_and_ignores_garbage(tmp_path):
+    import json
+    from pathlib import Path
+
+    from api.livestate import UNIVERSE_FILE, current_coins, read_universe_coins
+    shadow, live = tmp_path / "shadow", tmp_path / "live"
+    shadow.mkdir(), live.mkdir()
+    s = Settings(DSN, KEY, shadow_data_dir=shadow, live_data_dir=live)
+    assert current_coins(s) == s.coins  # снимка нет: статичная основа
+    (shadow / UNIVERSE_FILE).write_text(json.dumps({"updated_ms": 1, "live": ["BTCUSDT", "OLDUSDT"], "test": []}), encoding="utf-8")
+    (live / UNIVERSE_FILE).write_text(json.dumps({"updated_ms": 2, "live": ["BTCUSDT", "SOLUSDT"], "test": ["NEARUSDT", "bad coin"]}), encoding="utf-8")
+    assert read_universe_coins([live, shadow]) == ["BTCUSDT", "SOLUSDT", "NEARUSDT"]  # свежий снимок, мусорный тикер отброшен
+    assert current_coins(s) == (*s.coins, "SOLUSDT", "NEARUSDT")  # основа первой, без повторов
+    (live / UNIVERSE_FILE).write_text("{broken", encoding="utf-8")
+    assert read_universe_coins([live, shadow]) == ["BTCUSDT", "OLDUSDT"]  # нечитаемый файл пропускается, API не падает
+    assert read_universe_coins([None, Path(tmp_path / "none")]) == []

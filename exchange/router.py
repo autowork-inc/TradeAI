@@ -54,6 +54,7 @@ from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan
 from orchestrator.types import BarInfo, Direction, Kind, Signal, Tick
 from utils.errors import ConfigError, DataError, TradingInfraError
 from utils.storage import atomic_write_text
+from utils.symbolset import SymbolSet
 
 log = logging.getLogger("router")
 
@@ -160,7 +161,9 @@ class ExecutionRouter:
         be_trigger_r: float = D.BE_TRIGGER_R,
         state_path: Path | None = None,
     ):
-        self._binance_symbols, self._mt5_symbols = tuple(binance_symbols), tuple(mt5_symbols)
+        # SymbolSet (config.LIVE_BINANCE_SYMBOLS) хранится по ссылке: автоселектор монет меняет его состав на месте, маршрутизатор видит новый состав сразу
+        self._binance_symbols = binance_symbols if isinstance(binance_symbols, SymbolSet) else tuple(binance_symbols)
+        self._mt5_symbols = tuple(mt5_symbols)
         both = set(self._binance_symbols) & set(self._mt5_symbols)
         if both:
             raise ConfigError(f"Символ не может исполняться на двух площадках: {sorted(both)}")

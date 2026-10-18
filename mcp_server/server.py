@@ -78,7 +78,7 @@ async def get_trade_details(strategy_id: str, limit: int = 20) -> dict[str, Any]
     Свечи снапшота не включены (слишком большие).
 
     Args:
-        strategy_id: например SMC_Pro_Trend, SMC_Counter_Trend, OBI_Breakout, ICT_Killzones, VWAP_Reversion.
+        strategy_id: например SMC_Pro_Trend, SMC_Counter_Trend, OBI_Breakout, ICT_Killzones, VWAP_Reversion, Horizontal_Breakout, Trendline_Breakout.
         limit: сколько последних сделок вернуть, 1..100 (по времени сигнала; включает открытые и отменённые - смотрите status).
     """
     sid = _strategy_id(strategy_id)

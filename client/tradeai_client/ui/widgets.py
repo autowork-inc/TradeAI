@@ -49,6 +49,25 @@ def hbar(frac: float, color: str, *, width: float = 240, height: float = 10) -> 
                         alignment=ft.Alignment.CENTER_LEFT)
 
 
+class GoalBar:
+    """Компактный прогресс-бар к цели (сделок «в расчёте» / goal): плавное заполнение фиолетово-зелёным градиентом."""
+
+    def __init__(self, goal: int, *, width: float = 190, height: float = 12) -> None:
+        self.goal, self.width = goal, width
+        self._fill = ft.Container(width=0, height=height, border_radius=height / 2, animate=ft.Animation(700, ft.AnimationCurve.EASE_OUT),
+                                  gradient=ft.LinearGradient(begin=ft.Alignment.CENTER_LEFT, end=ft.Alignment.CENTER_RIGHT, colors=["#8b5cf6", GREEN]))
+        self._text = ft.Text("", size=12, weight=ft.FontWeight.W_600, color=TEXT)
+        track = ft.Container(width=width, height=height, bgcolor=BORDER, border_radius=height / 2, content=self._fill, alignment=ft.Alignment.CENTER_LEFT)
+        self.control = ft.Row([ft.Icon(ft.Icons.EMOJI_EVENTS, size=16, color="#8b5cf6"), track, self._text], spacing=8, tight=True,
+                              tooltip=f"Прогресс к {goal} сделкам: столько нужно для статистически значимых выводов")
+        self.set(0)
+
+    def set(self, done: int) -> None:
+        frac = max(0.0, min(1.0, done / self.goal))
+        self._fill.width = max(frac * self.width, 3 if frac > 0 else 0)
+        self._text.value = f"{done} / {self.goal}"
+
+
 def banner(text: str, color: str = AMBER, icon: ft.IconData = ft.Icons.WARNING_AMBER) -> ft.Container:
     return ft.Container(content=ft.Row([ft.Icon(icon, color=color, size=18), ft.Text(text, color=TEXT, size=13, expand=True)], spacing=10,
                                        vertical_alignment=ft.CrossAxisAlignment.START),

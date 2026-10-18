@@ -3,7 +3,7 @@
 Кросс-платформенно (только stdlib). Что кладётся в архив определяется Dockerfile: каждая строка `COPY <путь> ...` - это
 исходники, без которых образ не соберётся (раньше список был зашит здесь и разошёлся с Dockerfile: в архиве не оказалось
 features/strategies/orchestrator). Плюс образ API мониторинга (api/Dockerfile и всё, что он копирует) и файлы запуска: docker-compose.yml, Dockerfile, .dockerignore, requirements.txt,
-.env.shadow.example, deploy/shadow.sh, README.md. Исключено всегда: .venv, __pycache__, .git, tests, data, logs, backups,
+.env.shadow.example, deploy/shadow.sh, deploy/apply.sh (автоприменение обновления), README.md. Исключено всегда: .venv, __pycache__, .git, tests, data, logs, backups,
 client (настольный клиент Этапа 6 работает на вашем ПК и на сервер не отправляется).
 
 Цели:
@@ -24,13 +24,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN_FILES = ("docker-compose.yml", "Dockerfile", ".dockerignore", "requirements.txt", ".env.shadow.example", ".env.example",
-             "README.md", "deploy/shadow.sh")
+             "README.md", "deploy/shadow.sh", "deploy/apply.sh")
 FULL_ONLY = (".env",)
 EXCLUDED_PARTS = {"__pycache__", ".venv", ".git", "tests", ".pytest_cache", "data", "logs", "backups", "node_modules", "algo_live", "client", "mcp_server"}
 EXTRA_DOCKERFILES = ("api/Dockerfile",)  # образы дополнительных сервисов; контекст сборки у всех - корень проекта
 FORBIDDEN_NAMES = {".env", ".env.shadow"}  # в shadow-архиве недопустимы
 FORBIDDEN_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
-EXECUTABLE = {"deploy/shadow.sh"}
+EXECUTABLE = {"deploy/shadow.sh", "deploy/apply.sh"}
 ARCHIVE_DEFAULT = "trading_docker.tar.gz"
 
 

@@ -8,8 +8,10 @@
 ключи остаются); заглушки не пишутся: shadow-run с фиктивным токеном упал бы при подключении к MetaApi (R1).
 
 Шаги: 1 архив (deploy_pack, цель shadow, без ключей) · 2 SSH + SFTP · 3 Docker · 4 распаковка · 5 права .env* ·
-6 остановка старых контейнеров · 7 запуск (deploy/shadow.sh up) · 8 PostgreSQL и миграции · 9 глубокая проверка (контейнеры, логи,
-блокировка IP Binance). Любая ошибка команды на сервере немедленно прерывает деплой (R1). Данные БД не удаляются:
+6 остановка старых контейнеров · 7 запуск · 8 PostgreSQL и миграции · 9 глубокая проверка (контейнеры, логи, блокировка IP Binance).
+Первый деплой (нет ~/trading/.env.shadow и deploy/apply.sh): распаковка и `deploy/shadow.sh up`. Повторный деплой (2026-10-18): шаги 4/6/7 заменены на
+`deploy/apply.sh --from ...` - контур (Shadow или боевой shadow-live) СОХРАНЯЕТСЯ, `up-live` вводить не нужно, обновление боевого контура откладывается, пока
+есть открытые позиции (код 75: деплой считается принятым, дальше применяет cron), при провале запуска - автоматический откат на прежнюю версию. Любая ошибка команды на сервере немедленно прерывает деплой (R1). Данные БД не удаляются:
 `shadow.sh down` только останавливает контейнеры, том `pgdata` и `./data/shadow` сохраняются.
 Требует: pip install -r requirements-dev.txt (paramiko).
 """
@@ -38,6 +40,9 @@ TIMEOUT = 20
 TOTAL = 9
 DC = "docker compose --env-file .env.shadow"
 REQUIRED_SERVICES = ("postgres", "shadow-run", "api")
+LIVE_REQUIRED_SERVICES = ("postgres", "shadow-live", "api")
+INCOMING = "trading_incoming"  # каталог на сервере для присланных архивов (его же читает cron: deploy/apply.sh --pending)
+EX_DEFERRED = 75  # deploy/apply.sh: обновление отложено до закрытия боевых позиций
 ENV_FILE = ".env.shadow"
 METAAPI_TMP = ".metaapi.tmp"
 METAAPI_KEYS = ("METAAPI_TOKEN", "METAAPI_ACCOUNT_ID")
@@ -223,9 +228,17 @@ def main(argv: list[str] | None = None) -> int:
         ok("Docker и compose v2 готовы")
 
         step(4, f"Распаковка в {d}")
-        run(cli, f"mkdir -p {d} && tar -xzf {shlex.quote(ARCHIVE)} -C {d} && rm -f {shlex.quote(ARCHIVE)}", "распаковка архива")
-        run(cli, f"cd {d} && chmod +x deploy/shadow.sh && ls docker-compose.yml Dockerfile deploy/shadow.sh", "проверка состава")
-        ok("распаковано (.env.shadow с паролем БД архивом не затирается)")
+        incremental = run(cli, f"test -f {d}/.env.shadow && test -f {d}/deploy/apply.sh", "первый деплой?", check=False, quiet=True)[0] == 0
+        contour, deferred = "shadow", False
+        if incremental:
+            run(cli, f"mkdir -p ~/{INCOMING} {d}/deploy && mv -f {shlex.quote(ARCHIVE)} ~/{INCOMING}/ && mv -f {shlex.quote(ARCHIVE + '.sha256')} ~/{INCOMING}/ 2>/dev/null || true",
+                "перенос архива в каталог обновлений")
+            run(cli, f"tar --force-local -xzf ~/{INCOMING}/{ARCHIVE} -C {d} deploy/apply.sh && chmod +x {d}/deploy/apply.sh", "свежий apply.sh из архива")
+            ok(f"архив в ~/{INCOMING}, применение - deploy/apply.sh (контур сохраняется)")
+        else:
+            run(cli, f"mkdir -p {d} && tar -xzf {shlex.quote(ARCHIVE)} -C {d} && rm -f {shlex.quote(ARCHIVE)}", "распаковка архива")
+            run(cli, f"cd {d} && chmod +x deploy/shadow.sh deploy/apply.sh && ls docker-compose.yml Dockerfile deploy/shadow.sh deploy/apply.sh", "проверка состава")
+            ok("распаковано (первый деплой; .env.shadow с паролем БД архивом не затирается)")
 
         step(5, "Права на секреты")
         run(cli, f"cd {d} && for f in .env .env.shadow; do if [ -f $f ]; then chmod 600 $f; fi; done", "chmod 600")
@@ -236,15 +249,33 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(_c("33", "  MetaApi: ключи не заданы, .env.shadow не менялся (Forex/металлы заработают после ввода ключей)"))
 
-        step(6, "Остановка старых контейнеров (данные сохраняются)")
-        run(cli, f"cd {d} && if [ -f .env.shadow ]; then ./deploy/shadow.sh down; else echo первый-деплой-останавливать-нечего; fi",
-            "остановка shadow")
-        ok("остановлено")
+        if incremental:
+            step(6, "Остановка старых контейнеров не нужна: deploy/apply.sh сам перезапускает действующий контур")
+            ok("пропущено")
+            step(7, "Применение обновления (deploy/apply.sh --from)")
+            code, _ = run(cli, f"cd {d} && ./deploy/apply.sh --install-cron && ./deploy/apply.sh --from ~/{INCOMING}/{ARCHIVE}", "применение обновления", check=False)
+            if code == EX_DEFERRED:
+                deferred = True
+                print(_c("33", "  Обновление ОТЛОЖЕНО: в боевом контуре есть открытые позиции. Архив ждёт на сервере, cron применит его, когда позиции закроются "
+                               "(проверка: ./deploy/apply.sh --status)."))
+            elif code != 0:
+                fail(f"применение обновления: код возврата {code} (при провале запуска apply.sh уже вернул прежнюю версию, см. вывод выше)")
+            _, contour_out = run(cli, f"cat {d}/.deploy_contour 2>/dev/null || echo shadow", "контур", check=False, quiet=True)
+            contour = "live" if contour_out.strip() == "live" else "shadow"
+            ok(f"обновление {'отложено' if deferred else 'применено'}, контур: {contour}")
+        else:
+            step(6, "Остановка старых контейнеров (данные сохраняются)")
+            run(cli, f"cd {d} && if [ -f .env.shadow ]; then ./deploy/shadow.sh down; else echo первый-деплой-останавливать-нечего; fi", "остановка shadow")
+            ok("остановлено")
+            step(7, "Запуск профиля shadow (deploy/shadow.sh up)")
+            run(cli, f"cd {d} && ./deploy/shadow.sh up", "запуск shadow")
+            run(cli, f"cd {d} && chmod 600 .env.shadow && ./deploy/apply.sh --install-cron", "chmod .env.shadow, cron автоприменения")
+            ok("postgres + shadow-run + api запущены")
 
-        step(7, "Запуск профиля shadow (deploy/shadow.sh up)")
-        run(cli, f"cd {d} && ./deploy/shadow.sh up", "запуск shadow")
-        run(cli, f"cd {d} && chmod 600 .env.shadow", "chmod .env.shadow")
-        ok("postgres + shadow-run + api запущены")
+        if deferred:  # старый код ещё работает: схему БД и логи нового кода проверять рано
+            ok("проверка нового кода отложена вместе с обновлением")
+            print(_c("1;32", "\nДеплой принят (обновление ждёт закрытия позиций). Дальше на сервере: cd " + d + " && ./deploy/apply.sh --status"))
+            return 0
 
         step(8, "PostgreSQL и миграции")
         run(cli, f"cd {d} && {DC} exec -T postgres pg_isready -U tradeai -d tradeai", "PostgreSQL не готов")
@@ -263,10 +294,12 @@ def main(argv: list[str] | None = None) -> int:
 
         step(9, f"Глубокая проверка (ожидание {a.health_wait} с)")
         time.sleep(a.health_wait)
-        _, ps = run(cli, f"cd {d} && {DC} ps --format '{{{{.Service}}}} {{{{.State}}}}'", "docker compose ps", quiet=True)
+        required = LIVE_REQUIRED_SERVICES if contour == "live" else REQUIRED_SERVICES
+        svc = "shadow-live" if contour == "live" else "shadow-run"
+        _, ps = run(cli, f"cd {d} && {DC} --profile live ps --format '{{{{.Service}}}} {{{{.State}}}}'", "docker compose ps", quiet=True)
         states = parse_services(ps)
-        bad = {s: states.get(s, "нет") for s in REQUIRED_SERVICES if states.get(s) != "running"}
-        _, logs = run(cli, f"cd {d} && {DC} logs --no-color --tail 200 shadow-run", "логи shadow-run", quiet=True)
+        bad = {s: states.get(s, "нет") for s in required if states.get(s) != "running"}
+        _, logs = run(cli, f"cd {d} && {DC} --profile live logs --no-color --tail 200 {svc}", f"логи {svc}", quiet=True)
         blocked, errors = scan_logs(logs)
         if blocked:
             print("\n".join("    " + x for x in blocked[:10]), file=sys.stderr)
@@ -277,8 +310,8 @@ def main(argv: list[str] | None = None) -> int:
             fail("контейнеры не в состоянии running")
         if errors:
             print("\n".join("    " + x for x in errors[:10]), file=sys.stderr)
-            fail("в последних 200 строках лога shadow-run есть ошибки (Traceback/CRITICAL/FATAL/ConfigError)")
-        ok("postgres, shadow-run и api running, блокировки IP и ошибок в логах нет")
+            fail(f"в последних 200 строках лога {svc} есть ошибки (Traceback/CRITICAL/FATAL/ConfigError)")
+        ok(f"{', '.join(required)} running, блокировки IP и ошибок в логах нет")
     except (TimeoutError, socket.timeout):
         fail("таймаут во время выполнения команды на сервере")
     except paramiko.SSHException as e:

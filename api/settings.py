@@ -7,10 +7,11 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 MIN_KEY_LEN = 32
-DEFAULT_COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT", "EURUSD", "XAUUSD", "XAGUSD")  # = config.SHADOW_SYMBOLS; образ API config.py не содержит
+DEFAULT_COINS = ("BTCUSDT", "ETHUSDT", "EURUSD", "XAUUSD", "XAGUSD")  # = config.SHADOW_SYMBOLS (статичная основа); монеты автоселектора API добавляет из .symbol_universe.json; образ API config.py не содержит
 
 
-DEFAULT_STRATEGIES = ("SMC_Pro_Trend", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "VWAP_Reversion")  # = orchestrator.registry.SHADOW_STRATEGIES
+DEFAULT_STRATEGIES = ("SMC_Pro_Trend", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "VWAP_Reversion",
+                      "Horizontal_Breakout", "Trendline_Breakout")  # = orchestrator.registry.SHADOW_STRATEGIES
 
 
 class ApiConfigError(Exception):

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from utils.errors import ConfigError
+from utils.symbolset import SymbolSet
 
 # --- Пути ---------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
@@ -67,7 +68,23 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT")
 # 2026-10-13 (решение пользователя): переход на макро-крипту, только высоколиквидные контракты; альткоины убраны. Позже в тот же день добавлены Forex/металлы
 # (EURUSD, XAUUSD, XAGUSD): их данные - не с Binance, а из MetaApi (orchestrator/mt5_feeds.py; нужны METAAPI_TOKEN/METAAPI_ACCOUNT_ID, иначе пропускаются).
 # 2026-10-14 (решение пользователя): пул расширен ликвидными альткоинами Binance Futures (SOL, BNB, XRP, ADA, AVAX, LINK).
-SHADOW_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT", "EURUSD", "XAUUSD", "XAGUSD")
+# 2026-10-18 (решение пользователя): состав Binance-крипты определяет АВТОСЕЛЕКТОР по суточному объёму (orchestrator/universe.py, обновление раз в 6 ч);
+# жёстко закреплены только BTC и ETH. Здесь - статичная основа процесса: закреплённые монеты и MT5-символы (Forex/металлы).
+UNIVERSE_PINNED = ("BTCUSDT", "ETHUSDT")  # всегда live-уровень, независимо от объёма
+CORE_SHADOW_SYMBOLS = UNIVERSE_PINNED + ("EURUSD", "XAUUSD", "XAGUSD")
+SHADOW_SYMBOLS = CORE_SHADOW_SYMBOLS  # статичная основа; монеты автоселектора добавляются в работающий процесс (потоки подписываются без разрыва существующих)
+UNIVERSE_AUTO = os.environ.get("UNIVERSE_AUTO", "true").strip().lower() not in ("0", "false", "no", "off")
+UNIVERSE_REFRESH_S = 6 * 3600.0
+UNIVERSE_LIVE_MIN_USDT = 400_000_000.0  # quoteVolume за 24 ч: >= -> live-уровень (авто-перевод в live без участия человека), иначе - Binance Test (только Shadow)
+UNIVERSE_TEST_MIN_USDT = 100_000_000.0  # < -> монета игнорируется (не отслеживается, новые сигналы по ней блокируются)
+UNIVERSE_MIN_LISTING_DAYS = 70  # история 1d для bias (60+ свечей): моложе контракт не берём, иначе расчёт признаков упал бы (R1)
+UNIVERSE_MAX_SYMBOLS = 80  # предохранитель: больше отслеживаемых Binance-монет не берём (остаются самые ликвидные), нагрузка на потоки и CPU
+UNIVERSE_FETCH_FAILURES_MAX = 3  # подряд неудачных опросов биржи (сеть/5xx) до падения процесса; между попытками UNIVERSE_RETRY_S
+UNIVERSE_RETRY_S = 600.0
+UNIVERSE_STATE_NAME = ".symbol_universe.json"  # снимок текущих уровней для API/клиента и для рестарта (пишет менеджер, API читает)
+# Скоуп «Binance Test»: монеты 100M..400M USDT/сутки. Только Shadow: ExecutionRouter отвечает `unsupported_symbol`, попадание в LIVE_* - ConfigError,
+# OBI_Breakout на них не работает (стакан тонкий - ложные сигналы). Состав задаёт автоселектор (SymbolSet обновляется на месте).
+BINANCE_TEST_SYMBOLS = SymbolSet()
 # Этап 5: PostgreSQL для Shadow Mode. Пусто - сделки пишутся только в JSONL-журнал (локальная разработка); задано - в БД.
 # Формат postgresql://user:password@host:5432/db. Пароль в логи не попадает (persistence.db.redact_dsn).
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -157,6 +174,9 @@ TRADE_MODE = os.environ.get("TRADE_MODE", "shadow").strip().lower()
 LIVE_ALLOW_MAINNET = _env_bool("LIVE_ALLOW_MAINNET")  # без него live на mainnet не стартует (реальные деньги)
 # Стратегии, которым разрешены реальные ордера; остальные продолжают работать только в Shadow-трекере.
 APPROVED_STRATEGIES = tuple(s.strip() for s in os.environ.get("APPROVED_STRATEGIES", "SMC_Pro_Trend").split(",") if s.strip())
+# Стратегии БЕЗ доступа к live (2026-10-18, решение пользователя): работают только в Shadow-трекере. Попадание в APPROVED_STRATEGIES -
+# ConfigError при старте (validate) и в LiveRiskManager; LiveMirrorSink их не пересылает. = orchestrator.registry.SHADOW_ONLY_STRATEGIES.
+SHADOW_ONLY_STRATEGIES = ("Horizontal_Breakout", "Trendline_Breakout")
 LIVE_MARGIN_USDT = _env_float("LIVE_MARGIN_USDT", 10.0)  # фиксированная маржа на сделку (изолированная)
 LIVE_LEVERAGE = int(_env_float("LIVE_LEVERAGE", 10.0))  # плечо: размер позиции = маржа * плечо
 LIVE_MAX_OPEN_POSITIONS = int(_env_float("LIVE_MAX_OPEN_POSITIONS", 4.0))  # одновременно открытых боевых позиций (и заявок) по всем площадкам; сверх лимита сигнал остаётся только виртуальным (Shadow)
@@ -175,11 +195,10 @@ LIVE_ACCOUNT_NAME = ".live_account.json"  # снимок баланса/экви
 LIVE_RISK_STATE_NAME = ".live_risk_state.json"  # защёлка блокировки по суточному лимиту (переживает рестарт)
 # Мульти-биржевой боевой контур (решение пользователя 2026-10-13, вариант А): какой символ исполняется на какой площадке. Любой другой символ
 # получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - MetaApiLiveClient (MT5).
-LIVE_BINANCE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT")  # 2026-10-16: = крипто-часть SHADOW_SYMBOLS; TRADE_MODE по умолчанию shadow (ничего не отправляется)
+LIVE_BINANCE_SYMBOLS = SymbolSet(UNIVERSE_PINNED)  # 2026-10-18: live-уровень = BTC, ETH + монеты с объёмом >= UNIVERSE_LIVE_MIN_USDT (автоселектор дополняет набор на месте); TRADE_MODE по умолчанию shadow
 LIVE_MT5_SYMBOLS = ("EURUSD", "XAUUSD", "XAGUSD")
 # Стратегии, которым разрешены только перечисленные символы (остальные - на любых). OBI_Breakout читает L2-стакан и ленту: они есть только у Binance Futures.
-# Для Shadow это вся Binance-крипта пула (SHADOW_SYMBOLS без MT5-символов); LIVE_BINANCE_SYMBOLS (боевое исполнение) не расширяется.
-STRATEGY_SYMBOLS = {"OBI_Breakout": tuple(s for s in SHADOW_SYMBOLS if s not in LIVE_MT5_SYMBOLS)}
+STRATEGY_SYMBOLS = {"OBI_Breakout": LIVE_BINANCE_SYMBOLS}  # OBI_Breakout читает стакан и ленту: только ликвидный live-уровень (>= 400M); Binance Test и MT5 исключены
 LIVE_ENABLE_MT5 = _env_bool("LIVE_ENABLE_MT5")  # подключать MT5 (MetaApi) к боевому контуру; по умолчанию выключено: Binance-контур работает без ключей MetaApi
 LIVE_MT5_ACCOUNT_CURRENCIES = ("USD", "USDT", "USDC")  # суточный PnL складывается с Binance 1:1: счёт MT5 в другой валюте не допускается
 BALANCE_PATH = os.environ.get("BINANCE_BALANCE_PATH", "/fapi/v3/balance")
@@ -302,6 +321,9 @@ def validate() -> None:
         raise ConfigError(f"APPROVED_STRATEGIES содержит дубли: {APPROVED_STRATEGIES}")
     if TRADE_MODE == "live" and not APPROVED_STRATEGIES:
         raise ConfigError("TRADE_MODE=live, но APPROVED_STRATEGIES пуст: ни одной стратегии не разрешено")
+    shadow_only = sorted(set(APPROVED_STRATEGIES) & set(SHADOW_ONLY_STRATEGIES))
+    if shadow_only:
+        raise ConfigError(f"Стратегии {shadow_only} работают только в Shadow: их нельзя включать в APPROVED_STRATEGIES")
     if BINANCE_PROFILE not in _PROFILES:
         raise ConfigError(f"BINANCE_PROFILE должен быть из {sorted(_PROFILES)}, сейчас {BINANCE_PROFILE!r}")
     if not LIVE_MA_FAST < LIVE_MA_SLOW:
@@ -320,6 +342,18 @@ def validate() -> None:
     for name, symbols in (("LIVE_BINANCE_SYMBOLS", LIVE_BINANCE_SYMBOLS), ("LIVE_MT5_SYMBOLS", LIVE_MT5_SYMBOLS)):
         if not symbols or len(set(symbols)) != len(symbols) or any(s != s.upper() or not s.isalnum() for s in symbols):
             raise ConfigError(f"{name} должны быть непустыми, уникальными, в верхнем регистре: {symbols}")
+    if BINANCE_TEST_SYMBOLS and (len(set(BINANCE_TEST_SYMBOLS)) != len(BINANCE_TEST_SYMBOLS) or any(s != s.upper() or not s.isalnum() for s in BINANCE_TEST_SYMBOLS)):
+        raise ConfigError(f"BINANCE_TEST_SYMBOLS должны быть уникальными, в верхнем регистре: {BINANCE_TEST_SYMBOLS}")
+    test_live = sorted(set(BINANCE_TEST_SYMBOLS) & (set(LIVE_BINANCE_SYMBOLS) | set(LIVE_MT5_SYMBOLS)))
+    if test_live:
+        raise ConfigError(f"Тикеры скоупа Binance Test нельзя исполнять в live (только Shadow): {test_live}")
+    test_core = sorted(set(BINANCE_TEST_SYMBOLS) & (set(CORE_SHADOW_SYMBOLS) | set(SYMBOLS)))
+    if test_core:
+        raise ConfigError(f"Тикер не может быть одновременно в основном пуле и в Binance Test: {test_core}")
+    if not (0 < UNIVERSE_TEST_MIN_USDT < UNIVERSE_LIVE_MIN_USDT) or UNIVERSE_REFRESH_S <= 0 or UNIVERSE_RETRY_S <= 0:
+        raise ConfigError("Автоселектор: 0 < UNIVERSE_TEST_MIN_USDT < UNIVERSE_LIVE_MIN_USDT, UNIVERSE_REFRESH_S > 0, UNIVERSE_RETRY_S > 0")
+    if UNIVERSE_MAX_SYMBOLS < len(UNIVERSE_PINNED) or UNIVERSE_MIN_LISTING_DAYS < 1 or UNIVERSE_FETCH_FAILURES_MAX < 1:
+        raise ConfigError("Автоселектор: UNIVERSE_MAX_SYMBOLS >= числа закреплённых монет, UNIVERSE_MIN_LISTING_DAYS >= 1, UNIVERSE_FETCH_FAILURES_MAX >= 1")
     if set(LIVE_BINANCE_SYMBOLS) & set(LIVE_MT5_SYMBOLS):
         raise ConfigError(f"Символ не может исполняться на двух площадках сразу: {sorted(set(LIVE_BINANCE_SYMBOLS) & set(LIVE_MT5_SYMBOLS))}")
     unknown = [i for i in KLINE_INTERVALS if i not in INTERVAL_MS]
