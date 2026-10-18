@@ -41,6 +41,14 @@ repair_env() {
         sed -i 's/\([A-Za-z0-9_,.]\)\(ANALYZER_DB_PASSWORD=\)/\1\n\2/' "$ENV_FILE"
         echo "В $ENV_FILE исправлена склеенная строка ANALYZER_DB_PASSWORD."
     fi
+    # Несколько строк ANALYZER_DB_PASSWORD (по одной на каждый запуск analyzer-up при склеенной строке): роль получала склейку всех значений, а compose - последнее.
+    # Оставляем ОДНУ - последнюю (её читает compose).
+    if [ "$(grep -c '^ANALYZER_DB_PASSWORD=' "$ENV_FILE")" -gt 1 ]; then
+        last="$(grep '^ANALYZER_DB_PASSWORD=' "$ENV_FILE" | tail -n1)"
+        sed -i '/^ANALYZER_DB_PASSWORD=/d' "$ENV_FILE"
+        env_append "$last"
+        echo "В $ENV_FILE оставлена одна строка ANALYZER_DB_PASSWORD (последняя)."
+    fi
 }
 
 ensure_env() {
@@ -126,9 +134,12 @@ ensure_analyzer_password() {
 apply_analyzer_role() {
     [ -f analyzer/sql/001_analyzer_ro.sql ] || { echo "ОШИБКА: нет analyzer/sql/001_analyzer_ro.sql (архив собран без анализатора?)" >&2; exit 1; }
     $DC --profile live ps --status running --services 2>/dev/null | grep -qx postgres || { echo "ОШИБКА: postgres не запущен (./deploy/shadow.sh up)." >&2; exit 1; }
-    pw="$(grep '^ANALYZER_DB_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)"
+    pw="$(grep '^ANALYZER_DB_PASSWORD=' "$ENV_FILE" | tail -n1 | cut -d= -f2-)"
     $DC --profile live exec -T postgres psql -U tradeai -d tradeai -v ON_ERROR_STOP=1 -v analyzer_password="$pw" -f - < analyzer/sql/001_analyzer_ro.sql >/dev/null
-    echo "Роль analyzer_ro применена (SELECT на trades, trade_closes, trade_snapshots, state_events; read-only, REPEATABLE READ)."
+    # проверка: под этим паролем роль входит по сети (-h postgres: у 127.0.0.1 в образе postgres метод trust, он пароль не проверяет), иначе контейнер анализатора не подключится
+    $DC --profile live exec -T -e PGPASSWORD="$pw" postgres psql -h postgres -U analyzer_ro -d tradeai -tAc 'SELECT 1' >/dev/null \
+        || { echo "ОШИБКА: роль analyzer_ro не входит с паролем из $ENV_FILE (проверьте, что строка ANALYZER_DB_PASSWORD в файле одна)." >&2; exit 1; }
+    echo "Роль analyzer_ro применена и проверена входом (SELECT на trades, trade_closes, trade_snapshots, state_events; read-only, REPEATABLE READ)."
 }
 
 cmd="${1:-up}"

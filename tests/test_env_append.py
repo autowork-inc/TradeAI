@@ -57,3 +57,22 @@ def test_analyzer_is_recreated_and_its_healthcheck_probes_the_database():
     assert "up -d --build --force-recreate --no-deps analyzer" in sh  # новая переменная окружения подхватывается; postgres/бот не пересоздаются
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "127.0.0.1:8000/ready" in compose.split("  analyzer:")[1]
+
+
+@pytest.mark.skipif(SH is None, reason="нужен sh")
+def test_repair_env_keeps_only_the_last_analyzer_password_line(tmp_path):
+    """Склейка + повторные analyzer-up дали несколько строк ANALYZER_DB_PASSWORD: роль получала склейку всех, compose - последнюю (auth failed)."""
+    text = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+    fn = _function_text() + text[text.index("repair_env() {"):text.index("ensure_env() {")]
+    env = tmp_path / ".env.shadow"
+    env.write_bytes(b"A=1\nANALYZER_DB_PASSWORD=old1\nB=2\nANALYZER_DB_PASSWORD=old2\nANALYZER_DB_PASSWORD=last\n")
+    script = tmp_path / "t.sh"
+    script.write_bytes((f'ENV_FILE="{env.as_posix()}"\n{fn}\nrepair_env\nrepair_env\n').encode())
+    subprocess.run([SH, script.as_posix()], check=True, timeout=30)
+    assert env.read_bytes().decode().split("\n") == ["A=1", "B=2", "ANALYZER_DB_PASSWORD=last", ""]
+
+
+def test_analyzer_role_is_applied_with_the_last_password_and_verified_by_a_network_login():
+    sh = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8")
+    assert "grep '^ANALYZER_DB_PASSWORD=' \"$ENV_FILE\" | tail -n1 | cut -d= -f2-" in sh
+    assert "psql -h postgres -U analyzer_ro" in sh
