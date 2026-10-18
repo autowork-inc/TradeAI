@@ -61,9 +61,9 @@ from execution.state import SafeMode, SafeModeActive
 from features import defaults as D
 from orchestrator.journal import EventLog
 from orchestrator.live_risk import LiveOrderPlan, LiveRejected, LiveRiskManager, split_levels, utc_day_start_ms
-from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan, Submission
+from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan, Submission, impulse_hits_limit
 from orchestrator.types import BarInfo, Direction, Event, Kind, Signal, Tick
-from persistence.recorder import NullRecorder, TradeRecorder
+from persistence.recorder import DbOpenTrade, NullRecorder, TradeRecorder
 from utils.errors import ConfigError, DataError, HttpServerError, NetworkError, TradingInfraError
 from utils.storage import atomic_write_text
 
@@ -187,7 +187,7 @@ class LiveTrade:
             pr = dict(rec["plan"])
             ep = pr.pop("exit_plan")
             exit_plan = ScaleOutPlan(tuple((float(r), float(f)) for r, f in ep["levels"]), bool(ep["be_after_first"]), ep["trail_mode"],
-                                     float(ep["trail_atr_mult"]), int(ep["trail_wick_bars"]))
+                                     float(ep["trail_atr_mult"]), int(ep["trail_wick_bars"]), ep.get("tp_anchor", "fill"))  # файлы до 2026-10-18 - без якоря
             plan = LiveOrderPlan(direction=Direction(pr.pop("direction")), kind=Kind(pr.pop("kind")), exit_plan=exit_plan, **pr)
             data = {k: v for k, v in rec.items() if k not in ("plan", "levels")}
             return cls(plan=plan, levels=[Level(**lvl) for lvl in rec["levels"]], **data)
@@ -332,6 +332,8 @@ class LiveExecutionEngine:
             if t.cancel_reason is None and t.plan.kind is Kind.LIMIT:
                 if t.plan.inval is not None and sgn * close > sgn * t.plan.inval:
                     t.cancel_reason = "invalidated"
+                elif impulse_hits_limit(bar, entry=t.plan.entry, sl=t.plan.sl):
+                    t.cancel_reason = "impulse_bar"
                 elif t.plan.tp is not None and sgn * close <= sgn * t.plan.tp:
                     t.cancel_reason = "tp_before_fill"
         elif t.status == OPEN:
@@ -608,8 +610,8 @@ class LiveExecutionEngine:
             return
         risk = abs(fill - p.sl)
         levels: list[Level] = []
-        for i, (r, lvl_qty) in enumerate(split[0]):
-            price = self.client.round_price(p.symbol, fill - sgn * r * risk)
+        for i, (r, lvl_qty) in enumerate(split[0]):  # якорь плана: от факта входа или от цен сигнала (SMC_Pro_Trend) - та же функция, что у VirtualTracker
+            price = self.client.round_price(p.symbol, p.exit_plan.level_price(r, side_sgn=sgn, fill=fill, sl=p.sl, signal_entry=p.entry))
             if not sgn * price < sgn * fill:
                 await self._emergency(trade, DataError(f"уровень {r}R: цена {price} не по ту сторону входа {fill}"), "bad_level")
             levels.append(Level(r, lvl_qty, price, client_id(self.client.id_prefix, f"T{i}", p.signal_id)))
@@ -892,8 +894,9 @@ class LiveExecutionEngine:
 
     # ------------------------------------------------------------------------- перезапуск и сверка
 
-    async def recover(self, symbols: Collection[str]) -> None:
-        """Старт: поднять сделки из файла состояния и сверить их с биржей; найти чужие позиции и висячие ордера на монетах пула."""
+    async def recover(self, symbols: Collection[str], db_open: Collection[DbOpenTrade] = ()) -> None:
+        """Старт: поднять сделки из файла состояния и сверить их с биржей; сверить с биржей открытые боевые сделки из БД, которых нет в файле
+        (`_reconcile_db`); найти чужие позиции и висячие ордера на монетах пула."""
         now = self._now()
         self._recovering = True  # снапшоты поднимаемых сделок: отсутствие источника - предупреждение, а не падение
         for rec in self._store.load() if self._store is not None else []:
@@ -916,6 +919,7 @@ class LiveExecutionEngine:
                 t.db_open, t.legs_put = False, 0  # строки могли не дойти до БД или остаться 'aborted' (упали посреди записи): пишем заново, upsert идемпотентен
                 self._sync_db(t)
                 await self._manage(t, now)
+        await self._reconcile_db(db_open, now)
         for symbol in symbols:
             if symbol not in self._trades:
                 await self._adopt_or_clean(symbol, now)
@@ -935,8 +939,90 @@ class LiveExecutionEngine:
         self._recovering = False
         self._save()
 
-    async def _adopt_or_clean(self, symbol: str, now: int) -> None:
-        """Монета без записи сделки: позиция со стопом на бирже подтягивается, без стопа - Safe Mode; висячие наши algo-ордера снимаются."""
+    async def _reconcile_db(self, rows: Collection[DbOpenTrade], now: int) -> None:
+        """Открытые боевые сделки из БД, которых нет в файле состояния (файл потерян; процесс упал между снятием сделки с учёта и записью итога в БД),
+        сверяются с биржей (2026-10-18):
+          * позиции нет (или монету уже ведёт другая сделка) -> сделка закрылась, пока бот не работал: закрытие задним числом по фактическим
+            исполнениям счёта (`userTrades`) - цена выхода, комиссия, PnL; строка `trades` -> `closed` (`exit_reason='closed_offline'`);
+          * позиция есть и совпадает по направлению -> сделка подхватывается движком под СВОИМ id (исходные стратегия, SL, время, закрытия)
+            и сопровождается дальше; её монета попадает в `open_symbols()` - потоки свечей и тиков поднимаются заново;
+          * позиция против направления сделки -> Safe Mode и падение (R1): разбирает человек."""
+        known = {t.db_id for t in self._trades.values()}
+        todo = [r for r in rows if r.row["id"] not in known]
+        for r in todo:
+            if r.row.get("mode") != "live" or not str(r.row.get("id", "")).endswith(LIVE_ID_SUFFIX):
+                raise DataError(f"Сверка с биржей: строка {r.row.get('id')!r} не боевая (mode={r.row.get('mode')!r})")
+        if not todo:
+            return
+        await self.prepare_symbols(sorted({r.row["coin"] for r in todo}))  # монета могла выпасть из стартового набора: фильтры нужны для ордеров сопровождения
+        for r in todo:
+            symbol, direction = r.row["coin"], Direction(r.row["side"])
+            if symbol not in self._trades:
+                pos = await self.client.get_position(symbol)
+                if abs(pos.amt) > _EPS:
+                    if (pos.amt > 0) != (direction is Direction.LONG):
+                        self._trip(f"{symbol}: позиция {pos.amt} против сделки {r.row['id']} ({direction.value}) из БД", {"trade_id": r.row["id"]})
+                        raise LiveExecutionError(f"{symbol}: на бирже позиция {pos.amt}, а в БД открыта сделка {r.row['id']} ({direction.value}): Safe Mode")
+                    await self._adopt_or_clean(symbol, now, db=r)
+                    continue
+            await self._close_offline(r, now)
+
+    async def _close_offline(self, r: DbOpenTrade, now: int) -> None:
+        """Сделка из БД закрылась без бота: остаток объёма закрывается по закрывающим исполнениям счёта после последнего записанного закрытия.
+        Исполнений не хватает (биржа их не отдала) -> цена входа, источник `unknown`, `gap_affected` - вне R-статистики, как у `_fallback_price`.
+        Комиссия выхода - фактическая из `userTrades` (если в USDT), комиссия входа - расчётная (ставка, как у остальных боевых сделок)."""
+        row = dict(r.row)
+        tid, symbol = row["id"], row["coin"]
+        long = row["side"] == Direction.LONG.value
+        side = 1.0 if long else -1.0
+        qty, entry = float(row["qty"]), float(row["entry_price"])
+        closes = list(r.closes)
+        rest = qty - sum(float(c["qty"]) for c in closes)
+        since = max([int(row["entry_time"] or row["signal_time"]), *(int(c["ts"]) + 1 for c in closes)])  # время закрытия = момент, когда движок его увидел: исполнение было раньше
+        price, source, fee_out, ts = entry, "unknown", None, since
+        if rest > _EPS:
+            got = notional = commission = 0.0
+            usdt = True
+            for u in await self.client.user_trades(symbol, since, now):
+                if u.side != ("SELL" if long else "BUY") or got >= rest - _EPS:
+                    continue
+                q = min(u.qty, rest - got)
+                got, notional, commission, ts = got + q, notional + q * u.price, commission + u.commission * q / u.qty, u.time_ms
+                usdt = usdt and u.commission_asset in ("USDT", "")
+            if got >= rest - _EPS:
+                price, source = notional / got, "exchange"
+                fee_out = commission if usdt else None  # комиссия в BNB в USDT не пересчитывается: оценка по ставке
+            else:
+                ts = now
+        fee_in_rate = self._maker if row["kind"] == Kind.LIMIT.value and self._post_only else self._taker
+        ra = row.get("risk_amount")
+        gross = side * (price - entry) * rest if rest > _EPS else 0.0
+        fees = fee_in_rate * entry * rest + (fee_out if fee_out is not None else self._taker * price * rest) if rest > _EPS else 0.0
+        net = gross - fees
+        plan = dict(row.get("plan") or {})
+        if rest > _EPS:
+            self._rec.close_leg({"trade_id": tid, "seq": max((int(c["seq"]) for c in closes), default=0) + 1, "ts": ts, "reason": "closed_offline",
+                                 "frac": rest / qty, "qty": rest, "price": price, "gross_r": gross / ra if ra else 0.0, "fees_r": fees / ra if ra else 0.0,
+                                 "net_r": net / ra if ra else 0.0, "pnl": net, "fees": fees})  # строка сделки уже в БД: внешний ключ закрытия удовлетворён
+            sources = [*plan.get("exit_price_sources", []), source]
+            plan.update(exit_price_sources=sources, exit_price_source=next(s for s in LEG_SOURCES if s in sources))
+            if fee_out is not None:
+                plan["exit_fee_from_exchange"] = True
+        plan["reconciled_offline"] = True
+        pnl = sum(float(c["pnl"] or 0.0) for c in closes) + net
+        legs = [(float(c["qty"]), float(c["price"])) for c in closes] + ([(rest, price)] if rest > _EPS else [])
+        row.update(status=CLOSED, remaining_frac=0.0, exit_time=ts, stop_price=None, exit_reason="closed_offline", plan=plan,
+                   exit_price=sum(q * p for q, p in legs) / sum(q for q, _ in legs) if legs else None,
+                   pnl=pnl, fees=sum(float(c["fees"] or 0.0) for c in closes) + fees, r_multiple=pnl / ra if ra else None,
+                   gross_r=(sum(float(c["gross_r"] or 0.0) for c in closes) + gross / ra) if ra else None,
+                   gap_affected=bool(row.get("gap_affected")) or (rest > _EPS and source == "unknown"))
+        self._rec.trade(row)
+        self._emit(now, "live_closed_offline", symbol, str(row["strategy_id"]), tid[:-len(LIVE_ID_SUFFIX)],
+                   {"venue": "binance", "exit_price": row["exit_price"], "pnl_usdt": pnl, "source": source if rest > _EPS else "recorded", "qty": rest})
+
+    async def _adopt_or_clean(self, symbol: str, now: int, db: DbOpenTrade | None = None) -> None:
+        """Монета без записи сделки: позиция со стопом на бирже подтягивается, без стопа - Safe Mode; висячие наши algo-ордера снимаются.
+        `db` - сделка из БД, которой нет в файле состояния: позиция подхватывается под её id, стратегией, исходным SL (R) и временем, с её закрытиями."""
         pos = await self.client.get_position(symbol)
         algos = await self.client.get_open_algo_orders(symbol)
         if abs(pos.amt) <= _EPS:
@@ -955,26 +1041,38 @@ class LiveExecutionEngine:
         stop = min(stops, key=lambda a: sgn * a.trigger_price)  # самый тугой стоп (ближе к прибыли)
         be_like = sgn * stop.trigger_price <= sgn * pos.entry_price  # стоп на входе или за ним: безубыток уже взведён
         risk = 0.0 if be_like else abs(pos.entry_price - stop.trigger_price)
-        tps = sorted((a for a in mine if a.order_type in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")), key=lambda a: -sgn * a.trigger_price)
+        row = db.row if db is not None else {}
+        sl = stop.trigger_price
+        if row.get("sl") and abs(pos.entry_price - float(row["sl"])) > _EPS:  # исходный SL сделки из БД: R известен, даже если стоп уже в безубытке
+            sl = float(row["sl"])
+            risk = abs(pos.entry_price - sl)
+        tps =sorted((a for a in mine if a.order_type in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")), key=lambda a: -sgn * a.trigger_price)
         levels = [Level((abs(a.trigger_price - pos.entry_price) / risk) if risk else float(i + 1), a.qty or amt, a.trigger_price,
                         a.client_algo_id) for i, a in enumerate(tps)]
         fracs = tuple((lvl.r, min(lvl.qty / amt, 1.0)) for lvl in levels)
         rest = 1.0 - sum(f for _, f in fracs)
         exit_plan = ScaleOutPlan(fracs, True, "atr" if rest > _EPS else None) if fracs else DEFAULT_PLAN
+        filled = max(float(row.get("qty") or 0.0), amt)  # из БД: исходный объём входа (часть могла закрыться уровнями до рестарта)
         plan = LiveOrderPlan(
-            signal_id=f"adopted_{symbol}_{now}", strategy="adopted", symbol=symbol, direction=direction, kind=Kind.MARKET,
-            side="BUY" if pos.amt > 0 else "SELL", qty=amt, entry=pos.entry_price, sl=stop.trigger_price, tp=None, inval=None,
-            leverage=self.risk.leverage, margin_usdt=amt * pos.entry_price / self.risk.leverage, notional_usdt=amt * pos.entry_price,
-            max_loss_usdt=amt * abs(pos.entry_price - stop.trigger_price), exit_plan=exit_plan)
-        t = LiveTrade(plan, now, status=OPEN, entry_sent=True, filled_qty=amt, fill_price=pos.entry_price, risk=risk, remaining=amt,
+            signal_id=row["id"][:-len(LIVE_ID_SUFFIX)] if db is not None else f"adopted_{symbol}_{now}",
+            strategy=str(row["strategy_id"]) if db is not None else "adopted", symbol=symbol, direction=direction,
+            kind=Kind(row["kind"]) if db is not None else Kind.MARKET,
+            side="BUY" if pos.amt > 0 else "SELL", qty=filled, entry=pos.entry_price, sl=sl, tp=None, inval=None,
+            leverage=self.risk.leverage, margin_usdt=filled * pos.entry_price / self.risk.leverage, notional_usdt=filled * pos.entry_price,
+            max_loss_usdt=filled * abs(pos.entry_price - sl), exit_plan=exit_plan)
+        sources = list((row.get("plan") or {}).get("exit_price_sources", []))
+        legs = [{"seq": int(c["seq"]), "ts": int(c["ts"]), "reason": c["reason"], "qty": float(c["qty"]), "price": float(c["price"]),
+                 "source": sources[i] if i < len(sources) else "trigger"} for i, c in enumerate(db.closes)] if db is not None else []
+        t = LiveTrade(plan, now, status=OPEN, entry_sent=True, filled_qty=filled, fill_price=pos.entry_price, risk=risk, remaining=amt,
                       protected=True, stop_price=stop.trigger_price, stop_kind="be" if be_like else "sl", stop_cid=stop.client_algo_id,
-                      stop_qty=stop.qty or amt, levels=levels, best_q=sgn * pos.entry_price, be_armed=be_like, adopted=True, fill_bar_no=0)
+                      stop_qty=stop.qty or amt, levels=levels, best_q=sgn * pos.entry_price, be_armed=be_like, adopted=db is None, fill_bar_no=0,
+                      legs=legs, legs_put=len(legs), recovered=db is not None, entry_cid=str(row.get("client_order_id") or ""),
+                      signal_ms=row.get("signal_time"), fill_ms=row.get("entry_time") or now)
         self.risk.adopt_busy(symbol, plan.signal_id)
         self._trades[symbol] = t
-        self._emit_trade(t, "live_adopted", {"amt": pos.amt, "entry": pos.entry_price, "stop": stop.trigger_price,
-                                             "levels": [[v.r, v.qty, v.price] for v in levels]})
-        t.fill_ms = now
-        self._sync_db(t)  # позиция без записи: строка в БД (стратегия `adopted`, без снапшота - сигнала у неё нет)
+        self._emit_trade(t, "live_recovered_db" if db is not None else "live_adopted",
+                         {"amt": pos.amt, "entry": pos.entry_price, "stop": stop.trigger_price, "levels": [[v.r, v.qty, v.price] for v in levels]})
+        self._sync_db(t)  # без записи: строка в БД (стратегия `adopted`, без снапшота); сделка из БД - та же строка (upsert), снапшот у неё уже есть
 
     # ------------------------------------------------------------------------------------- запись в БД
 
@@ -1130,11 +1228,12 @@ class LiveMirrorSink:
 async def build_live_engine(
     session: aiohttp.ClientSession, journal: EventLog, *, symbols: Collection[str], strategy_names: Collection[str], interval_ms: int,
     flush: Callable[[], Awaitable[None]] | None = None, now_ms: Callable[[], int] | None = None,
-    plans: Mapping[str, ScaleOutPlan] | None = None, recorder: TradeRecorder | None = None,
+    plans: Mapping[str, ScaleOutPlan] | None = None, recorder: TradeRecorder | None = None, db_open: Collection[DbOpenTrade] = (),
 ) -> LiveExecutionEngine:
     """Собирает боевой контур при TRADE_MODE=live. Любое сомнение (режим, ключи, mainnet без подтверждения, Safe Mode, неизвестная
     стратегия в APPROVED_STRATEGIES, позиция без стопа) - ConfigError / LiveExecutionError ДО первого нового ордера.
-    Позиции и ордера прошлого запуска подтягиваются из файла состояния и сверяются с биржей (`recover`)."""
+    Позиции и ордера прошлого запуска подтягиваются из файла состояния и сверяются с биржей (`recover`); открытые боевые сделки из БД (`db_open`),
+    которых нет в файле, тоже сверяются с биржей: закрытые - дописываются в БД, живые - подхватываются."""
     if config.TRADE_MODE != "live":
         raise ConfigError(f"Live Execution Engine собирается только при TRADE_MODE=live (сейчас {config.TRADE_MODE!r})")
     if not config.USE_TESTNET and not config.LIVE_ALLOW_MAINNET:
@@ -1168,5 +1267,5 @@ async def build_live_engine(
     engine = LiveExecutionEngine(client, risk, journal, safe, now_ms=clock, interval_ms=interval_ms, flush=flush,
                                  store=LiveStateStore(config.DATA_DIR / config.LIVE_STATE_NAME), router=router,
                                  account_path=config.DATA_DIR / config.LIVE_ACCOUNT_NAME, recorder=recorder)
-    await engine.recover(symbols)
+    await engine.recover(symbols, db_open)
     return engine

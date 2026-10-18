@@ -80,8 +80,14 @@ class ScaleOutPlan:
     trail_mode: str | None = None  # "atr" | "wick" | None (если остатка нет)
     trail_atr_mult: float = D.TRAIL_ATR_MULT
     trail_wick_bars: int = D.TRAIL_WICK_BARS
+    # От чего считаются цены уровней: "fill" - от фактической цены входа и R = |вход - SL| (как раньше); "signal" (2026-10-18, SMC_Pro_Trend) - от цен
+    # СИГНАЛА: входа (50% FVG) и SL за экстремумом свипа, то есть от структуры графика, а не от цены, сдвинутой проскальзыванием. Уровень, оказавшийся
+    # не в прибыли относительно фактического входа, считается от входа (иначе тейк «за ценой»). R-статистика сделки всегда - от фактического входа.
+    tp_anchor: str = "fill"
 
     def __post_init__(self) -> None:
+        if self.tp_anchor not in ("fill", "signal"):
+            raise ConfigError(f"ScaleOutPlan: tp_anchor 'fill' или 'signal', получено {self.tp_anchor!r}")
         if not self.levels:
             raise ConfigError("ScaleOutPlan: нужен хотя бы один уровень")
         prev = 0.0
@@ -109,7 +115,28 @@ class ScaleOutPlan:
 
     def describe(self) -> dict[str, Any]:
         return {"levels": [list(x) for x in self.levels], "be_after_first": self.be_after_first, "runner_frac": self.runner_frac,
-                "trail_mode": self.trail_mode, "trail_atr_mult": self.trail_atr_mult, "trail_wick_bars": self.trail_wick_bars}
+                "trail_mode": self.trail_mode, "trail_atr_mult": self.trail_atr_mult, "trail_wick_bars": self.trail_wick_bars, "tp_anchor": self.tp_anchor}
+
+    def level_price(self, r: float, *, side_sgn: float, fill: float, sl: float, signal_entry: float | None) -> float:
+        """Цена уровня `r` (реальная, не q-мир). side_sgn - Direction.sgn (+1 шорт, -1 лонг). Якорь "signal": от входа и SL сигнала; уровень не в прибыли
+        относительно фактического входа (проскальзывание за уровень) - от фактического входа, как "fill". Одна функция для VirtualTracker и боевого движка (R8)."""
+        by_fill = fill - side_sgn * r * abs(fill - sl)
+        if self.tp_anchor != "signal" or signal_entry is None:
+            return by_fill
+        anchored = signal_entry - side_sgn * r * abs(signal_entry - sl)
+        return anchored if side_sgn * anchored < side_sgn * fill else by_fill
+
+
+def impulse_hits_limit(bar: BarInfo | None, *, entry: float, sl: float, mult: float = D.IMPULSE_BAR_ATR) -> bool:
+    """Импульсная свеча у ждущей лимитки: диапазон закрытой свечи > mult * ATR(14)[i-1] И свеча дошла до зоны заявки - ближе 1R (|вход - SL|)
+    к цене лимитки со стороны рынка (шорт: high >= вход - R; лонг: low <= вход + R). Такой «нож» обычно пробивает и вход, и стоп: заявку снимаем.
+    Нет данных свечи / ATR - False (правило не срабатывает; обычные отмены работают). Одна функция для VirtualTracker и боевого движка (R8)."""
+    if bar is None or bar.high is None or bar.low is None or bar.atr_prev is None or not bar.atr_prev > 0:
+        return False
+    if not bar.high - bar.low > mult * bar.atr_prev:
+        return False
+    risk = abs(entry - sl)
+    return bar.high >= entry - risk if sl > entry else bar.low <= entry + risk
 
 
 DEFAULT_PLAN = ScaleOutPlan(D.SCALE_OUT_LEVELS, D.SCALE_OUT_BE_AFTER_FIRST, D.RUNNER_TRAIL_MODE, D.TRAIL_ATR_MULT, D.TRAIL_WICK_BARS)
@@ -189,7 +216,12 @@ class VirtualTrade:
         """Цена последнего уровня плана (у runner'а это условная цель, не ордер)."""
         if self.entry_m is None or self.risk is None:
             return None
-        return (self.entry_m - self.plan.last_r * self.risk) * self.sgn
+        return self.level_q(self.plan.last_r) * self.sgn
+
+    def level_q(self, r: float) -> float:
+        """Уровень `r` в «шортовом мире» (ScaleOutPlan.level_price: якорь - факт входа или цены сигнала)."""
+        s = self.signal
+        return self.sgn * self.plan.level_price(r, side_sgn=self.sgn, fill=self.entry_m * self.sgn, sl=s.sl, signal_entry=s.entry)
 
     def record(self) -> dict[str, Any]:
         s = self.signal
@@ -306,7 +338,7 @@ class VirtualTracker:
                 self._cancel(t, f"rejected_{sizing.reason}", tick.ts_ms)
                 return
             t.sizing, t.entry_m, t.risk = sizing, q, risk
-            t.tp_m = q - t.plan.last_r * risk
+            t.tp_m = t.level_q(t.plan.last_r)
             self._fill(t, tick.price, tick.ts_ms)
         if t.status != OPEN:
             return
@@ -321,7 +353,7 @@ class VirtualTracker:
         plan = t.plan
         while t.status == OPEN and t.levels_done < len(plan.levels):
             r, frac = plan.levels[t.levels_done]
-            if q > t.entry_m - r * t.risk:
+            if q > t.level_q(r):
                 return
             t.levels_done += 1
             frac = min(frac, t.remaining)
@@ -356,6 +388,8 @@ class VirtualTracker:
             if t.status == PENDING_LIMIT:
                 if q > t.inval_m:
                     self._cancel(t, "invalidated", now_ms)
+                elif impulse_hits_limit(bar, entry=t.entry_m * t.sgn, sl=t.signal.sl):
+                    self._cancel(t, "impulse_bar", now_ms)
                 elif t.bars_closed >= self._limit_ttl * scale:
                     self._cancel(t, "ttl", now_ms)
             elif t.bars_closed - t.fill_bar_no >= self._max_hold * scale:

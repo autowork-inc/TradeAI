@@ -1,12 +1,14 @@
 """Форматирование и подписи для интерфейса (без Flet: тестируется отдельно)."""
 
+import re
 from datetime import datetime, timezone
 
 DASH = "—"
 STATUS_RU = {"closed": "Закрыта", "open": "Открыта", "pending_limit": "Ждёт лимитку", "pending_market": "Ждёт рынок",
              "cancelled": "Отменена", "aborted": "Прервана"}
 EXIT_RU = {"sl": "Стоп", "be": "Безубыток", "trail": "Трейлинг", "tp": "Тейк", "timeout": "Таймаут", "process_restart": "Прервана (Рестарт бота)",
-           "scale_1r": "+1R (50%)", "scale_2r": "+2R", "scale_3r": "+3R (40%)", "ttl": "Срок заявки", "invalidated": "Сетап отменён", "tp_before_fill": "Цена ушла до входа"}
+           "scale_1r": "+1R (50%)", "scale_2r": "+2R", "scale_3r": "+3R (40%)", "ttl": "Срок заявки", "invalidated": "Сетап отменён", "tp_before_fill": "Цена ушла до входа",
+           "impulse_bar": "Импульсная свеча", "closed_offline": "Закрыта без бота (сверка)"}
 SIDE_RU = {"long": "Лонг", "short": "Шорт"}
 # strategy_id -> подпись. Пять стратегий мульти-стратегийного Shadow (с 2026-10-11) и прежние имена («smc», «breakout») - сделки до этой даты.
 STRATEGY_RU = {"SMC_Pro_Trend": "SMC Pro Trend", "SMC_Counter_Trend": "SMC Counter Trend", "OBI_Breakout": "OBI Breakout",
@@ -101,6 +103,41 @@ def fmt_local(s: str | None) -> str:
     """ISO UTC -> локальное время ПК: 10.10 15:45."""
     dt = parse_iso(s)
     return DASH if dt is None else dt.astimezone().strftime("%d.%m %H:%M")
+
+
+# Время в часовом поясе пользователя (2026-10-18): сервер и API отдают UTC, всё, что видит человек, - в поясе ПК (Windows), с учётом летнего времени
+# на конкретную дату. Пояс читается из ОС при каждом вызове: смена пояса в Windows видна без перезапуска клиента.
+
+def local_offset_ms(ms: int) -> int:
+    """Смещение часового пояса ПК от UTC на момент `ms` (мс): UTC+3 -> 10_800_000."""
+    off = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone().utcoffset()
+    return 0 if off is None else int(off.total_seconds() * 1000)
+
+
+def tz_label(ms: int) -> str:
+    """Подпись пояса ПК на момент `ms`: «UTC+3», «UTC-4:30», «UTC»."""
+    off = local_offset_ms(ms) // 60_000
+    if off == 0:
+        return "UTC"
+    sign, off = ("+" if off > 0 else "-"), abs(off)
+    return f"UTC{sign}{off // 60}" + (f":{off % 60:02d}" if off % 60 else "")
+
+
+_UTC_STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC")
+
+
+def localize_utc_text(text: str) -> str:
+    """Метки «2026-09-21 10:00 UTC» в текстах сервера (api/reason.py) -> время ПК «21.09.2026 13:00 UTC+3». Прочий текст не меняется
+    (правила вида «00:00-07:00 UTC» - это часы сессии по UTC, а не момент времени: их шаблон не совпадает и они остаются как есть)."""
+    def local(m: re.Match) -> str:
+        ms = int(datetime(*(int(g) for g in m.groups()), tzinfo=timezone.utc).timestamp() * 1000)
+        return f"{fmt_ms_local(ms, '%d.%m.%Y %H:%M')} {tz_label(ms)}"
+    return _UTC_STAMP.sub(local, text)
+
+
+def fmt_ms_local(ms: int | None, pattern: str = "%d.%m %H:%M") -> str:
+    """Миллисекунды UTC -> локальное время ПК."""
+    return DASH if ms is None else datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone().strftime(pattern)
 
 
 def fmt_age(seconds: float | None) -> str:

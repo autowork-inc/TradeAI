@@ -24,7 +24,7 @@ from typing import Any
 
 from persistence import schema
 from persistence.db import Database
-from persistence.recorder import Row
+from persistence.recorder import DbOpenTrade, Row
 from utils.errors import DataError, TradingInfraError
 
 log = logging.getLogger("persistence.pg")
@@ -63,6 +63,30 @@ def convert(kind: str, value: Any, name: str = "?") -> Any:
             raise DataError(f"{name}: ожидается строка, получено {value!r}")
         return value
     raise DataError(f"Неизвестный тип колонки {kind!r}")
+
+
+def from_db(kind: str, value: Any) -> Any:
+    """Обратное `convert`: значение asyncpg -> «сырой» Python-тип строки (мс, float, dict/list)."""
+    if value is None:
+        return None
+    if kind == "ts":
+        return int(value.timestamp() * 1000)
+    if kind == "num":
+        return float(value)
+    if kind == "json":
+        return json.loads(value) if isinstance(value, str) else value
+    return value
+
+
+async def fetch_open_live(db: Database) -> list[DbOpenTrade]:
+    """Открытые боевые сделки (mode='live', status='open') с их закрытиями - для сверки с биржей при старте (`LiveExecutionEngine.recover`)."""
+    rows = [{name: from_db(kind, r[name]) for name, kind in schema.TRADE_COLUMNS.items()} for r in await db.fetch(schema.SELECT_OPEN_LIVE)]
+    closes: dict[str, list[Row]] = {}
+    if rows:
+        kinds = {**schema.CLOSE_COLUMNS, "trade_id": "text"}
+        for c in await db.fetch(schema.SELECT_CLOSES_OF, [r["id"] for r in rows]):
+            closes.setdefault(c["trade_id"], []).append({k: from_db(kinds[k], c[k]) for k in c.keys()})
+    return [DbOpenTrade(r, tuple(closes.get(r["id"], ()))) for r in rows]
 
 
 def to_args(row: Row, columns: dict[str, str]) -> list[Any]:

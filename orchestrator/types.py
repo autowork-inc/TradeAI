@@ -130,6 +130,7 @@ class BarInfo:
     high: float | None
     low: float | None
     atr: float | None
+    atr_prev: float | None = None  # ATR(14) до этой свечи (ATR[i-1]): порог импульсной свечи не зависит от неё самой
 
 
 SNAPSHOT_COLUMNS = ("open_time", "open", "high", "low", "close", "volume", "atr")
@@ -173,7 +174,11 @@ class FeatureContext:
             v = self.frame[name][-1]
             return None if v is None or v != v else float(v)  # null и NaN -> None
 
-        return BarInfo(last("high"), last("low"), last("atr"))
+        prev = None
+        if "atr" in self.frame.columns and self.frame.height >= 2:
+            v = self.frame["atr"][-2]
+            prev = None if v is None or v != v else float(v)
+        return BarInfo(last("high"), last("low"), last("atr"), prev)
 
     def snapshot_candles(self, n: int = 100) -> list[dict[str, Any]]:
         """Последние n свечей для снапшота сделки (JSONB): OHLCV и ATR, где есть. null/NaN -> None."""

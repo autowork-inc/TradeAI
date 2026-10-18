@@ -186,6 +186,20 @@ LIVE_MAX_HOLD_BARS = 192  # тайм-аут позиции (как у VirtualTra
 LIVE_MAX_ENTRY_DEVIATION = 0.01  # MARKET-вход отклоняется, если mark price биржи ушла от цены сигнала больше чем на эту долю
 LIVE_STATE_NAME = "live_engine_state.json"  # состояние боевых сделок (переживает рестарт; сверяется с биржей при старте)
 LIVE_MT5_STATE_NAME = "live_mt5_state.json"  # состояние сопровождения MT5-позиций (Scale Out / безубыток / трейлинг); источник правды по объёму - брокер
+METAAPI_RECONNECT_PAUSE_S = _env_float("METAAPI_RECONNECT_PAUSE_S", 300.0)  # пауза перед переподключением к MetaApi после сбоя связи (orchestrator/mt5_link.py): 5 минут
+METAAPI_SYMBOLS_CACHE_NAME = ".metaapi_symbols.json"  # кеш списка символов брокера (get_symbols) в DATA_DIR
+METAAPI_SYMBOLS_CACHE_TTL_S = 86_400.0  # время жизни кеша списка символов: 24 часа
+
+# Фильтры НОВЫХ сигналов (Блок 4, 2026-10-18; orchestrator/news_calendar.py). Сопровождение открытых сделок они не трогают.
+NEWS_FILTER_ENABLED = os.environ.get("NEWS_FILTER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
+NEWS_CALENDAR_URL = os.environ.get("NEWS_CALENDAR_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")  # недельный календарь ForexFactory (JSON)
+NEWS_REFRESH_S = 3600.0  # календарь скачивается раз в час
+NEWS_TIMEOUT_S = 2.0  # жёсткий таймаут запроса: сбой - исключение сразу, бот не ждёт
+NEWS_BLACKOUT_BEFORE_MS = 15 * 60_000  # новые сигналы задерживаются за 15 минут до High Impact события...
+NEWS_BLACKOUT_AFTER_MS = 15 * 60_000  # ...и 15 минут после
+NEWS_MAX_AGE_MS = 8 * 86_400_000  # календарь старше (недельный + запас) - фильтр новостей не блокирует (fail-open), в лог предупреждение
+NEWS_CACHE_NAME = ".news_calendar.json"  # последний удачный календарь в DATA_DIR
+WEEKEND_FILTER_ENABLED = os.environ.get("WEEKEND_FILTER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")  # суббота 00:00 - воскресенье 23:59 UTC
 USE_TESTNET = _env_bool("USE_TESTNET")  # ордера боевого контура идут на testnet; данные Shadow (свечи/тики) по-прежнему mainnet
 TESTNET_REST_URL = "https://testnet.binancefuture.com"
 LIVE_REST_URL = TESTNET_REST_URL if USE_TESTNET else REST_BASE_URL  # базовый адрес клиента ордеров (exchange/binance_live.py)

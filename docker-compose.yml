@@ -207,7 +207,9 @@ services:
       context: .
       dockerfile: api/Dockerfile
     profiles: ["shadow", "live"]
-    restart: on-failure:20
+    # unless-stopped (2026-10-18): API мониторинга поднимается после любого падения и после перезагрузки сервера/Docker (не только «до 20 сбоев»);
+    # остановленный вручную (`shadow.sh down`) не воскресает. Ключей биржи в нём нет, писать в БД он не может - бесконечный перезапуск безопасен.
+    restart: unless-stopped
     stop_grace_period: 10s
     depends_on:
       postgres:

@@ -1,7 +1,8 @@
 """Ответ /api/trades/{id}/snapshot (+ свечи после сигнала) -> `spec`: чистый словарь с примитивами для окна графика.
 
 Здесь вся «геометрия» графика, но нет ни Flet, ни lightweight-charts: spec легко тестировать и безопасно передавать в
-отдельный процесс (multiprocessing). Время везде - миллисекунды UTC; бары привязаны к сетке таймфрейма.
+отдельный процесс (multiprocessing). Время везде - миллисекунды UTC; бары привязаны к сетке таймфрейма. Человеку время показывается в поясе ПК:
+подписи панели - `fmt.fmt_ms_local` (с подписью пояса, «UTC+3»), ось графика сдвигается окном на `tz_offset_ms` (одно смещение на весь график).
 
 Единый формат геометрии `{type: zone|line|marker, t1, t2, p1, p2, label}` приходит из снапшота: клиент рисует его, ничего не зная о
 стратегиях. Линии плана (SL/TP/вход) рисуются из полей самой сделки (фактические цены), а не из геометрии - чтобы не дублировать.
@@ -9,7 +10,6 @@
 
 import re
 import textwrap
-from datetime import datetime, timezone
 from typing import Any
 
 from tradeai_client import fmt, retro
@@ -80,10 +80,11 @@ def _wrap(text: str) -> list[str]:
     return out
 
 
-def _utc(ms: int | None) -> str:
+def _local(ms: int | None) -> str:
+    """Время события в поясе ПК с подписью пояса: «21.09 13:00 UTC+3»."""
     if ms is None:
         return fmt.DASH
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%d.%m %H:%M")
+    return f"{fmt.fmt_ms_local(ms)} {fmt.tz_label(ms)}"
 
 
 def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] | None = None, *, now_ms: int,
@@ -198,7 +199,9 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         vlines.append({"t": snap_t(signal_ms), "color": AMBER, "text": "С"})
 
     # текстовые панели
-    reason = snap.get("reason") or {}
+    raw_reason = snap.get("reason") or {}  # тексты сервера: моменты времени в них - UTC, показываем в поясе ПК
+    reason = {**raw_reason, "title": fmt.localize_utc_text(str(raw_reason.get("title", ""))), "summary": fmt.localize_utc_text(str(raw_reason.get("summary", ""))),
+              "facts": [{**f, "value": fmt.localize_utc_text(str(f["value"]))} for f in raw_reason.get("facts", [])]}
     reason_lines = _wrap(reason.get("title", "")) + [""] + [ln for part in str(reason.get("summary", "")).split("\n") for ln in _wrap(part)]
     reason_lines += [""] + [ln for f in reason.get("facts", []) for ln in _wrap(f"{f['label']}: {f['value']}")]
     result = [f"Статус: {fmt.STATUS_RU.get(trade['status'], trade['status'])}   Итог: {fmt.fmt_r(trade.get('r_multiple'))}"
@@ -206,7 +209,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
     if trade.get("exit_reason"):
         result.append(f"Причина выхода: {fmt.EXIT_RU.get(trade['exit_reason'], trade['exit_reason'])}")
     for i, (ts, c) in enumerate(close_events, start=1):
-        result.append(f"{i}. {fmt.EXIT_RU.get(c['reason'], c['reason'])}  {_utc(ts)} UTC  @ {fmt.fmt_price(c['price'])}  {fmt.fmt_r(c.get('net_r'))}")
+        result.append(f"{i}. {fmt.EXIT_RU.get(c['reason'], c['reason'])}  {_local(ts)}  @ {fmt.fmt_price(c['price'])}  {fmt.fmt_r(c.get('net_r'))}")
     if trade.get("gap_affected"):
         result.append("⚠ Сделка помечена gap_affected (обрыв потока тиков): в статистику не входит")
     notes = []
@@ -225,7 +228,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         timeline.append({"ts": m["ts"], "code": m["text"], "text": m["full"], "tone": net_tone})
     timeline.sort(key=lambda e: e["ts"])
     for e in timeline:
-        e["time"] = _utc(e.pop("ts")) + " UTC"
+        e["time"] = _local(e.pop("ts"))
     # структурная панель (HTML в окне графика): карточки «Результат», «Разбор сделки», «Причина входа»
     exit_t = snap_t(exit_ms) if exit_ms is not None else None
     after = [b for b in bars if b["post"] and exit_t is not None and b["t"] > exit_t]
@@ -236,7 +239,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
     panel = {
         "result": {"tone": tone, "status": fmt.STATUS_RU.get(trade["status"], trade["status"]), "r": fmt.fmt_r(r_total), "pnl": pnl_text,
                    "exit_reason": fmt.EXIT_RU.get(trade.get("exit_reason"), trade.get("exit_reason")) if trade.get("exit_reason") else None,
-                   "closes": [{"n": i, "label": clean_text(fmt.EXIT_RU.get(c["reason"], c["reason"])), "time": _utc(ts) + " UTC", "price": fmt.fmt_price(c["price"]),
+                   "closes": [{"n": i, "label": clean_text(fmt.EXIT_RU.get(c["reason"], c["reason"])), "time": _local(ts), "price": fmt.fmt_price(c["price"]),
                                "r": fmt.fmt_r(c.get("net_r")), "tone": "neutral" if not c.get("net_r") else ("good" if c["net_r"] > 0 else "bad")}
                               for i, (ts, c) in enumerate(close_events, start=1)],
                    "warning": "Сделка помечена gap_affected (обрыв потока тиков): в статистику не входит" if trade.get("gap_affected") else None},
@@ -252,6 +255,8 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
     return {
         "title": clean_text(f"{trade['coin']} {meta.get('interval', '')} · {fmt.SIDE_RU.get(trade['side'], trade['side'])} · {fmt.STATUS_RU.get(trade['status'], trade['status'])}"),
         "trade_id": trade["id"], "interval_ms": iv, "snapshot_last_t": snapshot_last,
+        # ось времени - в поясе ПК: окно графика прибавляет это смещение ко всем меткам (одно на график: у оси не бывает «повторного часа» перехода на зимнее время)
+        "tz_offset_ms": fmt.local_offset_ms(signal_ms if signal_ms is not None else snapshot_last), "tz_label": fmt.tz_label(signal_ms if signal_ms is not None else snapshot_last),
         "bars": bars, "helper": helper, "trade_markers": trade_markers, "setup_markers": setup_markers,
         "boxes": boxes, "segments": segments, "hlines": hlines, "vlines": vlines,
         "visible": [max(first_t, (snap_t(signal_ms) if signal_ms else snapshot_last) - 45 * iv), (min(grid_end, snap_t(exit_ms) + 40 * iv) if aborted else grid_end) + 2 * iv],

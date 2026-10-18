@@ -10,6 +10,7 @@
 #   ./deploy/shadow.sh backup    # pg_dump в ./backups/tradeai-<время>.sql.gz
 #   ./deploy/shadow.sh psql      # консоль SQL
 #   ./deploy/shadow.sh up-live   # БОЕВОЙ режим (shadow-live вместо shadow-run): реальные ордера на Binance, см. docker-compose.yml и .env.shadow.example
+#   ./deploy/shadow.sh api       # поднять API мониторинга, если он не работает (то же делают up, up-live и status)
 #   ./deploy/shadow.sh down      # остановить (данные БД и журнал СОХРАНЯЮТСЯ)
 #
 # Что скрипт НЕ делает: не трогает live-run и ключи биржи (в архиве Shadow их нет и быть не должно), не публикует порт БД наружу,
@@ -33,6 +34,18 @@ check_docker() {
 ensure_env() {
     ensure_password
     ensure_api_key
+}
+
+# Автозапуск API мониторинга (2026-10-18): в docker-compose.yml у api restart: unless-stopped - Docker поднимает его после падения и после
+# перезагрузки сервера (если служба docker включена в автозагрузку). Здесь - страховка: api не работает (остановлен/упал/не создан) -> запустить.
+ensure_api() {
+    if ! $DC --profile live ps --status running --services 2>/dev/null | grep -qx api; then
+        echo "== API мониторинга не запущен - запускаю (restart: unless-stopped)"
+        $DC --profile live up -d api
+    fi
+    if command -v systemctl >/dev/null 2>&1 && [ "$(systemctl is-enabled docker 2>/dev/null || true)" = "disabled" ]; then
+        echo "ВНИМАНИЕ: служба docker не в автозагрузке - после перезагрузки сервера API не поднимется. Включить: systemctl enable docker" >&2
+    fi
 }
 
 rand_hex() {
@@ -101,6 +114,7 @@ case "$cmd" in
             echo "$state" | grep -q '^api exited' && { echo "ОШИБКА: api остановился:" >&2; $DC logs --tail 40 api >&2; exit 1; }
             i=$((i + 1)); sleep 5
         done
+        ensure_api
         $DC ps
         echo "== Последние строки лога shadow-run"
         $DC logs --tail 15 shadow-run
@@ -134,12 +148,14 @@ case "$cmd" in
             echo "$state" | grep -q '^shadow-live exited' && { echo "ОШИБКА: shadow-live остановился:" >&2; $DC --profile live logs --tail 40 shadow-live >&2; exit 1; }
             i=$((i + 1)); sleep 5
         done
+        ensure_api
         $DC --profile live ps
         $DC --profile live logs --tail 25 shadow-live
         echo "Готово. Лог: ./deploy/shadow.sh logs shadow-live. Вернуться в Shadow: ./deploy/shadow.sh up"
         ;;
     status)
         check_docker; ensure_env
+        ensure_api
         $DC ps
         echo "== Пульс (метка времени основного цикла; свежее 120 с = жив)"
         $DC exec -T shadow-run python -c "import os,time; print(round(time.time()-os.path.getmtime('/app/data/shadow/.shadow_heartbeat')), 'с назад')" || true
@@ -193,13 +209,18 @@ case "$cmd" in
         check_docker; ensure_env
         exec $DC exec postgres psql -U tradeai -d tradeai
         ;;
+    api)
+        check_docker; ensure_env
+        ensure_api
+        $DC --profile live ps api
+        ;;
     down)
         check_docker; ensure_env
         $DC --profile live stop api shadow-run shadow-live postgres
         echo "Остановлено. Данные БД (том pgdata) и журнал ./data/shadow сохранены. Запуск: ./deploy/shadow.sh up"
         ;;
     *)
-        echo "Использование: $0 {up|up-live|status|logs [сервис]|stats|backup|psql|apikey|down}" >&2
+        echo "Использование: $0 {up|up-live|status|api|logs [сервис]|stats|backup|psql|apikey|down}" >&2
         exit 2
         ;;
 esac

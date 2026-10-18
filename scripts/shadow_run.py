@@ -48,6 +48,8 @@ from orchestrator.feature_engine import FeatureEngine
 from orchestrator.journal import JsonlEventLog
 from orchestrator.kline_feed import MultiFeed, SmcKlineFeed
 from orchestrator.microstructure import DepthFeed, MicroStructure
+from orchestrator.minute_bars import MarketEntryGuard, MinuteBars
+from orchestrator.news_calendar import NewsCalendar, WeekendGate, fetch_calendar
 from orchestrator.mtf import MtfState
 from orchestrator.registry import NEEDS_MICRO, OBI_BREAKOUT, SHADOW_STRATEGIES, build_strategies, ensure_history_depth, plans_for, strategy_allowed
 from orchestrator.strategies import SMC_PRO_TREND
@@ -56,7 +58,7 @@ from orchestrator.tracker import VirtualTracker
 from orchestrator.universe import GroupConnector, Hooks, Universe, UniverseManager
 from orchestrator.types import Mode, Tick
 from persistence.db import Database, check_dsn
-from persistence.pg import PgRecorder
+from persistence.pg import PgRecorder, fetch_open_live
 from persistence.recorder import RecordingEventLog
 from utils import ban_lock
 from utils.binance_rest import BinanceRest
@@ -99,7 +101,7 @@ class ShadowRun:
     def __init__(self, feed, orchestrator: Orchestrator, tracker: VirtualTracker, tick_feed=None, *,
                  heartbeat: Path | None = None, clock=time.monotonic, recorder: PgRecorder | None = None,
                  htf_feed=None, htf: MtfState | None = None, micro: MicroStructure | None = None, depth_feed: DepthFeed | None = None, live=None,
-                 universe: UniverseManager | None = None):
+                 universe: UniverseManager | None = None, news: NewsCalendar | None = None):
         if (htf_feed is None) != (htf is None):
             raise ConfigError("HTF: htf_feed и htf задаются вместе (фид H4 без таблицы bias, как и наоборот, бессмыслен)")
         if (micro is None) != (depth_feed is None):
@@ -108,6 +110,7 @@ class ShadowRun:
         self._htf_feed, self._htf = htf_feed, htf
         self._micro, self._depth = micro, depth_feed
         self._universe = universe  # автоселектор монет (orchestrator/universe.py): фоновая задача, ошибка роняет процесс
+        self._news = news  # календарь новостей: сбой сети он переживает сам; упавшая задача (ошибка кода) роняет процесс
         self._live = live  # LiveExecutionEngine при TRADE_MODE=live, иначе None (боевой код не импортируется)
         self._recorder = recorder
         self._heartbeat, self._clock = heartbeat, clock
@@ -121,6 +124,8 @@ class ShadowRun:
             self._depth.check()
         if self._universe is not None:
             self._universe.check()
+        if self._news is not None:
+            self._news.check_task()
         if self._live is not None:
             self._live.check()  # упал боевой исполнитель -> падаем вместе с ним (R1); Safe Mode к этому моменту уже включён
         if self._recorder is not None:
@@ -168,25 +173,32 @@ async def shadow_main(opts: Options) -> None:
         journal = JsonlEventLog(config.DATA_DIR / JOURNAL_NAME)
         timeout = aiohttp.ClientTimeout(total=config.HTTP_TOTAL_TIMEOUT_S, connect=config.HTTP_CONNECT_TIMEOUT_S)
         recorder: PgRecorder | None = None
+        db: Database | None = None
         try:
             if config.DATABASE_URL:
-                recorder = PgRecorder(await Database.connect(config.DATABASE_URL))
-                aborted = await recorder.start()  # миграции + пометка висящих сделок прошлого запуска
+                db = await Database.connect(config.DATABASE_URL)
+                recorder = PgRecorder(db)
+                # миграции + пометка висящих ТЕНЕВЫХ сделок прошлого запуска: виртуальная позиция не видела цену за время простоя (тиков нет) -
+                # её исход неизвестен, поэтому она не восстанавливается, а уходит в aborted (О17). Боевые строки не трогаются: их сверяет с биржей движок.
+                aborted = await recorder.start()
                 log.info("PostgreSQL готов, схема актуальна; сделок прошлого запуска помечено aborted: %d", len(aborted))
             else:
                 log.warning("DATABASE_URL не задан: сделки пишутся только в JSONL-журнал (для сбора статистики на сервере БД обязательна)")
             events = RecordingEventLog(journal, recorder) if recorder is not None else journal
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 api = BinanceRest(session, config.REST_BASE_URL)
-                mt5_data = None
+                mt5_link = None
                 if mt5_wanted:  # импорт здесь: пакет exchange (боевой код) при чисто крипто-запуске не загружается
                     from orchestrator.mt5_feeds import Mt5KlineFeed, Mt5TickFeed, connect_mt5_data
 
-                    mt5_data = await connect_mt5_data(mt5_wanted)
-                mt5_client, mt5_mapper = mt5_data if mt5_data is not None else (None, None)
+                    # Менеджер подключения MetaApi (orchestrator/mt5_link.py): подключается в фоне, сбой связи - пауза 5 минут и переподключение;
+                    # Forex/металлы изолированы от крипты - простой MetaApi не останавливает Binance-часть процесса.
+                    mt5_link = await connect_mt5_data(mt5_wanted)
+                mt5_client = mt5_link.client if mt5_link is not None else None
                 crypto = tuple(s for s in symbols if s not in mt5_wanted)  # статичная основа: закреплённые BTC/ETH; остальные Binance-монеты подключает автоселектор
                 all_symbols = crypto if mt5_client is None else symbols  # без ключей MetaApi MT5-символы в этом запуске не участвуют
                 symbols = all_symbols
+                signal_symbols = frozenset(all_symbols)  # новые сигналы - только по ним; монеты, подписанные ради сопровождения боевой позиции, - Close-Only
                 names = SHADOW_STRATEGIES
                 mtf = D.MTF_ENABLED and SMC_PRO_TREND in names  # SMC_Pro_Trend: 1d bias -> 1h свип -> 5m вход; остальные - на opts.interval (15m), как раньше
                 if mtf and mt5_client is not None and opts.interval != "15m":
@@ -202,14 +214,32 @@ async def shadow_main(opts: Options) -> None:
                     from orchestrator.live_engine import LiveMirrorSink, build_live_engine
 
                     saved_live = universe.load_saved()[0] if universe is not None else ()  # live-уровень прошлого запуска: фильтры и сверка позиций на бирже
+                    db_open = await fetch_open_live(db) if db is not None else []  # открытые боевые сделки из БД: сверка с биржей при старте (State Recovery)
+                    log.info("State Recovery: открытых боевых сделок в БД %d %s", len(db_open), [r.row["id"] for r in db_open])
                     live = await build_live_engine(session, events, symbols=tuple(dict.fromkeys([*crypto, *saved_live])), strategy_names=names,
                                                    interval_ms=config.INTERVAL_MS[opts.interval],  # запасной таймфрейм; у каждой сделки свой (из сигнала): SMC_Pro_Trend 5m, VWAP 15m
                                                    flush=recorder.flush if recorder is not None else None,
-                                                   recorder=recorder)  # боевые сделки -> PostgreSQL (mode='live', id `<signal_id>:live`)
+                                                   recorder=recorder,  # боевые сделки -> PostgreSQL (mode='live', id `<signal_id>:live`)
+                                                   db_open=db_open)
                     sink = LiveMirrorSink(tracker, live)  # Shadow-трекер получает все сигналы как прежде; одобренные - ещё и боевой движок
+                    held = tuple(s for s in live.open_symbols() if s not in crypto and s not in config.LIVE_MT5_SYMBOLS)
+                    if held:  # боевая позиция по монете вне стартового набора: потоки свечей и тиков нужны СРАЗУ (сопровождение), новых сигналов по ней нет
+                        log.warning("State Recovery: подписка на потоки монет с открытыми боевыми позициями %s", list(held))
+                        crypto = (*crypto, *held)
+                        subscribed.update(held)
+                minutes = MinuteBars()  # 1m-свечи из тиков сделок: фильтр MARKET-входа во время импульса (orchestrator/minute_bars.py)
+                gates: list = [MarketEntryGuard(minutes)]
+                if config.WEEKEND_FILTER_ENABLED:
+                    gates.append(WeekendGate())  # суббота 00:00 - воскресенье 23:59 UTC: новых сигналов нет, открытые сделки ведутся как обычно
+                news = None
+                if config.NEWS_FILTER_ENABLED:  # High Impact ForexFactory: +-15 минут вокруг события новые сигналы по затронутым валютам не принимаются
+                    news = NewsCalendar(lambda: fetch_calendar(session, config.NEWS_CALENDAR_URL, config.NEWS_TIMEOUT_S),
+                                        cache_path=config.DATA_DIR / config.NEWS_CACHE_NAME)
+                    gates.append(news)
                 # новые сигналы - только по отслеживаемым монетам (live-уровень, Binance Test, MT5); OBI_Breakout - ещё и только где есть стакан (live-уровень), см. config.STRATEGY_SYMBOLS
-                orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder,
-                                  symbol_filter=(lambda n, s: universe.tracked(s) and strategy_allowed(n, s)) if universe is not None else strategy_allowed)
+                orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder, signal_gates=gates,
+                                  symbol_filter=(lambda n, s: universe.tracked(s) and strategy_allowed(n, s)) if universe is not None
+                                  else (lambda n, s: s in signal_symbols and strategy_allowed(n, s)))
 
                 def make_feeds(syms: tuple[str, ...]) -> tuple[list[SmcKlineFeed], list[SmcKlineFeed]]:
                     """Фиды свечей Binance для набора монет: (рабочие 15m/5m, состояния 4h/1h/1d). Для новых монет - отдельные соединения (старые не трогаются)."""
@@ -244,6 +274,7 @@ async def shadow_main(opts: Options) -> None:
                     depth_feed = MultiFeed([DepthFeed(session, micro.aggregator, symbols=tuple(sorted(book_symbols)))])
 
                 def on_tick(tick: Tick) -> None:
+                    minutes.on_tick(tick)
                     tracker.on_tick(tick)
                     if live is not None:
                         live.on_tick(tick)  # те же тики, что у Shadow: лучшая цена для трейлинга и mark price для безубытка
@@ -258,8 +289,8 @@ async def shadow_main(opts: Options) -> None:
 
                 ticks = MultiFeed([TickFeed(session, on_tick, on_gap, symbols=crypto)])
                 if mt5_client is not None:  # MT5-символы: свечи M5 (единственный запрос к MetaApi), из них производные 15m / 1h / 4h / 1d, и тики
-                    mt5_feed = Mt5KlineFeed(mt5_client, FeatureEngine(SmcParams()), broker_name=mt5_mapper.broker_name, symbols=mt5_wanted,
-                                            history_bars=opts.history, emit=mtf)
+                    mt5_feed = Mt5KlineFeed(mt5_client, FeatureEngine(SmcParams()), broker_name=mt5_link.broker_name, symbols=mt5_wanted,
+                                            history_bars=opts.history, emit=mtf, link=mt5_link)
                     if htf_feed is not None:
                         views = [mt5_feed.htf_view(FeatureEngine(SmcParams()))]
                         if mtf:
@@ -267,8 +298,8 @@ async def shadow_main(opts: Options) -> None:
                         htf_feed = MultiFeed([htf_feed, *views])
                     # Порядок: производный 15m раньше первичного M5 - M5 последним забирает снимок хранилища цикла (см. mt5_feeds.py)
                     feed = MultiFeed([feed, mt5_feed.m15_view(FeatureEngine(SmcParams())), mt5_feed])
-                    mt5_ticks = Mt5TickFeed(mt5_client, on_tick, lambda ts: [tracker.mark_gap(s, ts) for s in mt5_wanted], broker_name=mt5_mapper.broker_name,
-                                            symbols=mt5_wanted)
+                    mt5_ticks = Mt5TickFeed(mt5_client, on_tick, lambda ts: [tracker.mark_gap(s, ts) for s in mt5_wanted], broker_name=mt5_link.broker_name,
+                                            symbols=mt5_wanted, link=mt5_link)
                     ticks.add(mt5_ticks)
 
                 add_group = GroupConnector(make_feeds=make_feeds, work=feed, state=htf_feed, ticks=ticks, warmup_timeout_s=GROUP_WARMUP_TIMEOUT_S,
@@ -285,7 +316,7 @@ async def shadow_main(opts: Options) -> None:
                                                                    add_book=add_book if micro is not None else None,
                                                                    open_symbols=live.open_symbols if live is not None else None))
                 runner = ShadowRun(feed, orch, tracker, ticks, heartbeat=config.DATA_DIR / HEARTBEAT_NAME, recorder=recorder,
-                                 htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live, universe=manager)
+                                 htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live, universe=manager, news=news)
                 log.info("Shadow Mode: %s %s%s, стратегии %s, HTF-фильтр %s, микроструктура %s, эквити %.0f, журнал %s, БД %s, TRADE_MODE=%s, автоселектор монет %s",
                          all_symbols, opts.interval, f" + SMC_Pro_Trend {D.MTF_BIAS_INTERVAL}->{D.MTF_STRUCT_INTERVAL}->{D.MTF_BASE_INTERVAL}" if mtf else "",
                          list(names), D.HTF_INTERVAL if htf is not None else "выключен",
@@ -303,12 +334,16 @@ async def shadow_main(opts: Options) -> None:
                     depth_feed.start()
                 if manager is not None:
                     manager.start()
+                if news is not None:
+                    news.start()
                 try:
                     await runner.run()
                 finally:
                     runner.log_summary()
                     if manager is not None:
                         await manager.aclose()
+                    if news is not None:
+                        await news.aclose()
                     if live is not None:
                         await live.aclose()
                     await feed.aclose()

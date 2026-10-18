@@ -41,8 +41,8 @@ def test_all_drawings_reach_the_chart_script(fx):
     html = static_html(spec)
     for needle in ("Причина входа", "Результат", "FVG", "createPriceLine",  "Сигнал", "свип", "CHoCH", "Хронология", "Вход ", "Трейлинг"):
         assert needle in html or json.dumps(needle)[1:-1] in html, needle  # тексты маркеров библиотека кладёт в JSON с \uXXXX-экранированием
-    # данные свечей ушли с корректными секундами эпохи (не 1970 год)
-    first = spec["bars"][0]["t"] // 1000
+    # данные свечей ушли с корректными секундами эпохи (не 1970 год), сдвинутыми на пояс ПК (ось графика - в локальном времени)
+    first = (spec["bars"][0]["t"] + spec["tz_offset_ms"]) // 1000
     assert f'"time":{first}' in html.replace(" ", "")
     times = [int(x) for x in re.findall(r'"time":(\d+)', html.replace(" ", ""))]
     assert times and min(times) > 1_700_000_000 and max(times) < 2_000_000_000

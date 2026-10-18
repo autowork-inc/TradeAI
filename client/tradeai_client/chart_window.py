@@ -23,14 +23,15 @@ INNER_WIDTH = 0.64  # доля окна под сам график; осталь
 PANEL_WIDTH_PCT = 36
 
 
-def _ts(ms: int):
+def _ts(ms: int, offset_ms: int = 0):
+    """Метка оси. lightweight-charts рисует время как есть (UTC); чтобы ось была в поясе ПК, к метке прибавляется смещение пояса (`spec["tz_offset_ms"]`)."""
     import pandas as pd
-    return pd.Timestamp(int(ms), unit="ms")  # наивное время = UTC; ns-разрешение: lightweight-charts делит на 10**9 (pandas 3 даёт us и ломает ось)
+    return pd.Timestamp(int(ms) + int(offset_ms), unit="ms")  # наивное время; ns-разрешение: lightweight-charts делит на 10**9 (pandas 3 даёт us и ломает ось)
 
 
-def _frame(rows: list[dict[str, Any]], columns: dict[str, str]):
+def _frame(rows: list[dict[str, Any]], columns: dict[str, str], offset_ms: int = 0):
     import pandas as pd
-    df = pd.DataFrame({"time": pd.DatetimeIndex([_ts(r["t"]) for r in rows]).astype("datetime64[ns]"),
+    df = pd.DataFrame({"time": pd.DatetimeIndex([_ts(r["t"], offset_ms) for r in rows]).astype("datetime64[ns]"),
                        **{dst: [r[src] for r in rows] for dst, src in columns.items()}})
     return df
 
@@ -52,6 +53,11 @@ def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
     """Рисует spec (см. chart_spec.build_chart_spec) на `chart`: свечи, зона FVG, линии SL/TP/входа, маркеры, панели с текстом."""
     import pandas as pd
 
+    off = int(spec.get("tz_offset_ms", 0))  # ось времени - в поясе ПК (chart_spec)
+
+    def ts(ms: int):
+        return _ts(ms, off)
+
     bars = spec["bars"]
     chart.layout(background_color=BG, text_color=TEXT, font_size=FONT_PX, font_family="Segoe UI, Arial, sans-serif")
     chart.grid(color=GRID)
@@ -60,33 +66,33 @@ def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
     chart.price_line(label_visible=False, line_visible=False)  # без «последней цены» свечного ряда: пунктир и плашка перекрывали линии входа
     chart.legend(visible=True, ohlc=True, percent=False, lines=False, font_size=FONT_PX)
     chart.precision(spec["digits"])
-    chart.set(_frame(bars, {"open": "o", "high": "h", "low": "l", "close": "c", "volume": "v"}))
+    chart.set(_frame(bars, {"open": "o", "high": "h", "low": "l", "close": "c", "volume": "v"}, off))
 
     # невидимый ряд на всей сетке: продлевает ось времени за последнюю свечу и держит маркеры/линии вне диапазона свечей
     helper = chart.create_line(name="grid", color=INVISIBLE, width=1, price_line=False, price_label=False)
-    helper.set(pd.DataFrame({"time": pd.DatetimeIndex([_ts(t) for t, _ in spec["helper"]]).astype("datetime64[ns]"),
+    helper.set(pd.DataFrame({"time": pd.DatetimeIndex([ts(t) for t, _ in spec["helper"]]).astype("datetime64[ns]"),
                              "grid": [v for _, v in spec["helper"]]}))
 
     for box in spec["boxes"]:
-        chart.box(_ts(box["t1"]), box["p1"], _ts(box["t2"]), box["p2"], color=box["color"], fill_color=box["fill"], width=1)
+        chart.box(ts(box["t1"]), box["p1"], ts(box["t2"]), box["p2"], color=box["color"], fill_color=box["fill"], width=1)
     for h in spec["hlines"]:
         _price_line(chart, h)
     for i, seg in enumerate(spec["segments"]):
         line = chart.create_line(name=f"seg{i}", color=seg["color"], style="dashed", width=1, price_line=False, price_label=False)
-        line.set(pd.DataFrame({"time": pd.DatetimeIndex([_ts(seg["t1"]), _ts(max(seg["t2"], seg["t1"] + spec["interval_ms"]))]).astype("datetime64[ns]"),
+        line.set(pd.DataFrame({"time": pd.DatetimeIndex([ts(seg["t1"]), ts(max(seg["t2"], seg["t1"] + spec["interval_ms"]))]).astype("datetime64[ns]"),
                                f"seg{i}": [seg["price"], seg["price"]]}))
-        line.marker(time=_ts(seg["t1"]), position="above", shape="circle", color=seg["color"], text="")  # название уровня - в «Хронологии»
+        line.marker(time=ts(seg["t1"]), position="above", shape="circle", color=seg["color"], text="")  # название уровня - в «Хронологии»
     for v in spec["vlines"]:
-        chart.vertical_line(_ts(v["t"]), color=v["color"], width=1, style="dashed", text=v["text"])
+        chart.vertical_line(ts(v["t"]), color=v["color"], width=1, style="dashed", text=v["text"])
 
     if spec["setup_markers"]:
-        chart.marker_list([{"time": _ts(m["t"]), "position": m["position"], "shape": m["shape"], "color": m["color"], "text": m["text"]}
+        chart.marker_list([{"time": ts(m["t"]), "position": m["position"], "shape": m["shape"], "color": m["color"], "text": m["text"]}
                            for m in sorted(spec["setup_markers"], key=lambda m: m["t"])])
     if spec["trade_markers"]:
-        helper.marker_list([{"time": _ts(m["t"]), "position": m["position"], "shape": m["shape"], "color": m["color"], "text": m["text"]}
+        helper.marker_list([{"time": ts(m["t"]), "position": m["position"], "shape": m["shape"], "color": m["color"], "text": m["text"]}
                             for m in sorted(spec["trade_markers"], key=lambda m: m["t"])])
 
-    chart.set_visible_range(_ts(spec["visible"][0]), _ts(spec["visible"][1]))
+    chart.set_visible_range(ts(spec["visible"][0]), ts(spec["visible"][1]))
     _panels(chart, spec)
 
 

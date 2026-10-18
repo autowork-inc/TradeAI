@@ -23,8 +23,11 @@ Binance WebSocket этих символов не отдаёт (`kline_*` и `agg
     исполняются по проходу цены середины, а не по сделкам (❓ у Forex нет единой ленты сделок; допущение Shadow). Объёма и стороны агрессора нет (OBI_Breakout по
     этим символам сигналов не даёт: нет стакана/ленты - значения `ms_*` = null, fail-closed).
 
-Fail-Fast (R1): временные сбои MetaApi (таймаут, терминал не подключён) повторяются до `max_failures` подряд (иначе падение одной площадки роняло бы и крипту
-из того же процесса); дальше - исключение, процесс падает, Docker перезапускает. Ошибка данных (кривая свеча, свеча из будущего) - сразу.
+Сбои связи. С `link` (Mt5Link, orchestrator/mt5_link.py; так работает shadow_run с 2026-10-18) все запросы идут через менеджер подключения: сбой
+MetaApi -> пауза 5 минут -> переподключение, бесконечно; процесс (и крипта в нём) не падает, MT5-символы на время простоя молчат. После простоя
+`refresh` догружает ВСЕ пропущенные M5 (а не последние 8): иначе реальные свечи времени простоя были бы приняты за закрытый рынок (плоские).
+Без `link` (прежний режим, тесты): временные сбои MetaApi повторяются до `max_failures` подряд, дальше - исключение.
+Fail-Fast (R1) в обоих режимах: ошибка данных (кривая свеча, свеча из будущего) и конфигурации - сразу исключение.
 """
 
 import asyncio
@@ -101,7 +104,8 @@ class _Group:
     """Общее состояние одного набора MT5-символов: M5-хранилище, снимок на цикл опроса, фоновая задача."""
 
     def __init__(self, source: CandleSource, broker_name: Callable[[str], str], symbols: tuple[str, ...], interval_ms: int, history_bars: int,
-                 windows: Mapping[int, int], clock_ms: Callable[[], int], poll_s: float, settle_s: float, max_failures: int, stale_gap_bars: int, warmup_bars: int):
+                 windows: Mapping[int, int], clock_ms: Callable[[], int], poll_s: float, settle_s: float, max_failures: int, stale_gap_bars: int, warmup_bars: int,
+                 link: Any = None):
         """windows: интервал производного вида (мс) -> сколько его свечей нужно в истории; из них считается глубина M5-хранилища."""
         self.source, self.broker_name, self.symbols = source, broker_name, symbols
         self.interval_ms, self.history = interval_ms, history_bars
@@ -122,6 +126,7 @@ class _Group:
         self.ready = False
         self.task: asyncio.Task | None = None
         self.failures = 0
+        self.link = link  # Mt5Link: сбои связи -> пауза и переподключение вместо падения процесса
 
     def closed_limit(self) -> int:
         """open_time самой поздней свечи, которая уже закрыта (с запасом settle)."""
@@ -131,24 +136,35 @@ class _Group:
     async def bootstrap(self) -> None:
         need = self.depth + 2 * self.max_per  # запас на неполный край и дыры
         for symbol in self.symbols:
-            broker = self.broker_name(symbol)
-            rows: list[tuple] = []
-            start: datetime | None = None
-            while len(rows) < need:
-                page = await self.source.get_candles(broker, BASE_TIMEFRAME, CANDLES_PAGE, start_time=start)
-                fresh = [r for r in page if not rows or r[0] < min(x[0] for x in rows)]
-                if not fresh:
-                    break  # история брокера кончилась
-                rows += fresh
-                start = datetime.fromtimestamp(min(r[0] for r in rows) / 1000, tz=timezone.utc)
-            self.merge(symbol, rows)
+            self.merge(symbol, await self._back_pages(self.broker_name(symbol), lambda rows: len(rows) >= need))
         self.ready = True
         log.info("История MT5 %s загружена: %s", BASE_TIMEFRAME, {s: len(c) for s, c in self.store.items()})
 
     async def refresh(self) -> None:
+        """Новые закрытые M5. Обычно - последние 8; после простоя связи - все пропущенные с последней известной свечи (страницами назад)."""
+        limit = self.closed_limit()
         for symbol in self.symbols:
-            page = await self.source.get_candles(self.broker_name(symbol), BASE_TIMEFRAME, 8)
-            self.merge(symbol, page)
+            broker = self.broker_name(symbol)
+            store = self.store[symbol]
+            last = max(store) if store else None
+            missing = 8 if last is None else max(8, (limit - last) // self.interval_ms + 2)
+            if missing <= CANDLES_PAGE:
+                self.merge(symbol, await self.source.get_candles(broker, BASE_TIMEFRAME, missing))
+                continue
+            self.merge(symbol, sorted(await self._back_pages(broker, lambda rows: bool(rows) and min(r[0] for r in rows) <= last)))
+
+    async def _back_pages(self, broker: str, enough: Callable[[list[tuple]], bool]) -> list[tuple]:
+        """M5 страницами по CANDLES_PAGE назад от текущего момента, пока `enough(rows)` не скажет «хватит» или история брокера не кончится."""
+        rows: list[tuple] = []
+        start: datetime | None = None
+        while not enough(rows):
+            page = await self.source.get_candles(broker, BASE_TIMEFRAME, CANDLES_PAGE, start_time=start)
+            fresh = [r for r in page if not rows or r[0] < min(x[0] for x in rows)]
+            if not fresh:
+                break  # история брокера кончилась
+            rows += fresh
+            start = datetime.fromtimestamp(min(r[0] for r in rows) / 1000, tz=timezone.utc)
+        return rows
 
     def merge(self, symbol: str, candles: list[tuple]) -> None:
         """Закрытые свечи -> хранилище; пропуски между известными закрытыми свечами - плоские свечи (рынок был закрыт)."""
@@ -210,6 +226,9 @@ class _Group:
             await self._guarded(self.refresh)
 
     async def _guarded(self, op: Callable[[], Awaitable[None]]) -> None:
+        if self.link is not None:
+            await self.link.call("свечи M5", op)
+            return
         while True:
             try:
                 await op()
@@ -255,7 +274,7 @@ class Mt5KlineFeed(_FeedBase):
     def __init__(self, source: CandleSource, engine: FeatureEngine, *, broker_name: Callable[[str], str], symbols: tuple[str, ...], interval: str = BASE_TIMEFRAME,
                  history_bars: int = 300, htf_history_bars: int = 110, m15_history_bars: int = 300, h1_history_bars: int = D.MTF_STRUCT_HISTORY_BARS,
                  d1_history_bars: int = D.MTF_BIAS_HISTORY_BARS, clock_ms: Callable[[], int] = wall_clock_ms, poll_s: float = 5.0, settle_s: float = 3.0,
-                 max_failures: int = 20, stale_gap_bars: int = 12, warmup_bars: int = 60, emit: bool = True):
+                 max_failures: int = 20, stale_gap_bars: int = 12, warmup_bars: int = 60, emit: bool = True, link: Any = None):
         """emit=False: M5 не отдаётся стратегиям (мульти-таймфреймовый режим выключен), но фид по-прежнему участвует в цикле снимков: без него снимок хранилища не сбрасывался бы."""
         if interval != BASE_TIMEFRAME:
             raise ConfigError("Mt5KlineFeed: поддержан только M5 (15m, 1h, 4h и 1d собираются из него)")
@@ -263,7 +282,8 @@ class Mt5KlineFeed(_FeedBase):
             raise ConfigError(f"history_bars меньше min_bars={engine.min_bars}")
         interval_ms = M5_MS
         windows = {M15_MS: m15_history_bars, H1_MS: h1_history_bars, H4_MS: htf_history_bars, D1_MS: d1_history_bars}
-        group = _Group(source, broker_name, tuple(symbols), interval_ms, history_bars, windows, clock_ms, poll_s, settle_s, max_failures, stale_gap_bars, warmup_bars)
+        group = _Group(source, broker_name, tuple(symbols), interval_ms, history_bars, windows, clock_ms, poll_s, settle_s, max_failures, stale_gap_bars, warmup_bars,
+                       link=link)
         super().__init__(group, "m5")
         self._engine, self._clock, self.interval, self.interval_ms, self.emit = engine, clock_ms, interval, interval_ms, emit
         self._bars = {"15m": m15_history_bars, "1h": h1_history_bars, "4h": htf_history_bars, "1d": d1_history_bars}
@@ -430,8 +450,12 @@ class Mt5TickFeed:
     """Тики MT5-символов: котировка раз в `poll_s` -> два тика (trade и mark) по середине bid/ask."""
 
     def __init__(self, source: CandleSource, on_tick: Callable[[Tick], None], on_gap: Callable[[int], None], *, broker_name: Callable[[str], str],
-                 symbols: tuple[str, ...], clock_ms: Callable[[], int] = wall_clock_ms, poll_s: float = 1.0, max_failures: int = 20):
+                 symbols: tuple[str, ...], clock_ms: Callable[[], int] = wall_clock_ms, poll_s: float = 1.0, max_failures: int = 20, link: Any = None):
+        """link (Mt5Link): сбой связи -> пауза и переподключение (тики за простой потеряны: `on_gap` вызывает сам менеджер при падении связи)."""
         self._source, self._on_tick, self._on_gap = source, on_tick, on_gap
+        self._link = link
+        if link is not None:
+            link.on_down(on_gap)
         self._broker, self._symbols = broker_name, tuple(symbols)
         self._clock, self._poll_s, self._max = clock_ms, poll_s, max_failures
         self._task: asyncio.Task | None = None
@@ -466,6 +490,10 @@ class Mt5TickFeed:
             self._on_tick(Tick(symbol, mid, ts, "mark"))
 
     async def _run(self) -> None:
+        if self._link is not None:
+            while True:
+                await self._link.call("котировки", self.poll_once)
+                await asyncio.sleep(self._poll_s)
         failures = 0
         while True:
             try:
@@ -481,18 +509,21 @@ class Mt5TickFeed:
 
 
 async def connect_mt5_data(symbols: tuple[str, ...]):
-    """Подключение к MetaApi для ДАННЫХ MT5-символов: (клиент, SymbolMapper) или None, если ключей MetaApi в окружении нет (тогда MT5-символы пропускаются).
-    Ошибка подключения при заданных ключах - исключение (R1): молча торговать без данных нельзя."""
+    """Менеджер подключения MetaApi для ДАННЫХ MT5-символов (`Mt5Link`) или None, если ключей MetaApi в окружении нет (тогда MT5-символы пропускаются).
+
+    Подключения здесь НЕТ (2026-10-18): его делает `Mt5Link` в фоновых задачах фидов MT5, поэтому недоступный MetaApi не задерживает и не роняет
+    старт процесса с криптой; сбой связи - пауза 5 минут и переподключение. Ошибки конфигурации (нет ключей - выше, 401/403, символ не найден у брокера) -
+    по-прежнему исключение (R1). Список символов брокера кешируется на 24 часа в DATA_DIR."""
+    import config
     from exchange.mt5_metaapi import MetaApiCredentials, MetaApiLiveClient
     from exchange.symbol_mapper import SymbolMapper
+    from orchestrator.mt5_link import Mt5Link
 
     try:
         MetaApiCredentials.from_env()
     except ConfigError as exc:
         log.warning("MT5-символы %s пропущены: нет ключей MetaApi (%s). Задайте METAAPI_TOKEN и METAAPI_ACCOUNT_ID в .env.shadow на сервере", symbols, exc)
         return None
-    client = MetaApiLiveClient()
-    await client.connect()
+    client = MetaApiLiveClient(symbols_cache=config.DATA_DIR / config.METAAPI_SYMBOLS_CACHE_NAME)
     mapper = SymbolMapper(client, allow_disabled=True)  # закрытый рынок при старте не должен ронять сбор данных
-    await mapper.load(symbols)
-    return client, mapper
+    return Mt5Link(client, mapper, symbols)

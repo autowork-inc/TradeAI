@@ -36,6 +36,9 @@ class FakeRest:
         self.lose_next_order_response = False  # ордер дошёл до биржи и принят, но ответ потерян (NetworkError у клиента)
         self.filters: dict[str, Any] = {}  # для GET exchangeInfo: symbol -> SymbolFilters
         self._next_id = 1
+        self.now_ms = 0  # время исполнений для userTrades (тесты сверки после рестарта двигают его сами)
+        self.commission_rate = 0.0005
+        self.commission_asset = "USDT"
 
     # ------------------------------------------------------------------------------ вспомогательное
 
@@ -98,7 +101,7 @@ class FakeRest:
         if new == 0:
             self.entry_prices[symbol] = 0.0
         self.positions[symbol] = new
-        self.fills.append({"symbol": symbol, "side": side, "qty": qty, "price": price, "via": via, "opens": opens})
+        self.fills.append({"symbol": symbol, "side": side, "qty": qty, "price": price, "via": via, "opens": opens, "time": self.now_ms})
 
     # --------------------------------------------------------------------------------------- запрос
 
@@ -120,6 +123,7 @@ class FakeRest:
             ("POST", config.ALGO_ORDER_PATH): self._place_algo, ("GET", config.ALGO_ORDER_PATH): self._get_algo,
             ("DELETE", config.ALGO_ORDER_PATH): self._cancel_algo, ("GET", config.EXCHANGE_INFO_PATH): self._exchange_info,
             ("GET", config.PREMIUM_INDEX_PATH): self._premium, ("GET", config.OPEN_ALGO_ORDERS_PATH): self._open_algos,
+            ("GET", config.USER_TRADES_PATH): self._user_trades,
         }.get((method, path))
         if handler is None:
             raise AssertionError(f"FakeRest: неожиданный запрос {method} {path}")
@@ -140,6 +144,11 @@ class FakeRest:
     def _position_risk(self, p):
         return [{"symbol": p["symbol"], "positionAmt": str(self.positions.get(p["symbol"], 0.0)),
                  "entryPrice": str(self.entry_prices.get(p["symbol"], 0.0))}]
+
+    def _user_trades(self, p):
+        return [{"symbol": f["symbol"], "side": f["side"], "qty": str(f["qty"]), "price": str(f["price"]), "time": f["time"],
+                 "commission": str(self.commission_rate * f["qty"] * f["price"]), "commissionAsset": self.commission_asset, "realizedPnl": "0"}
+                for f in self.fills if f["symbol"] == p["symbol"] and p["startTime"] <= f["time"] <= p["endTime"]]
 
     def _premium(self, p):
         return {"symbol": p["symbol"], "markPrice": str(self.price)}

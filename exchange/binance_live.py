@@ -50,6 +50,9 @@ ALGO_TERMINAL = frozenset({"FINISHED", "CANCELED", "EXPIRED", "REJECTED", "TRIGG
 INCOME_TYPES = frozenset({"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"})  # то, из чего складывается суточный результат
 INCOME_PAGE = 1000  # максимум биржи на страницу /fapi/v1/income (по умолчанию она отдаёт 100)
 INCOME_MAX_PAGES = 50
+USER_TRADES_PAGE = 1000  # максимум биржи на запрос /fapi/v1/userTrades
+USER_TRADES_WINDOW_MS = 7 * 86_400_000  # окно startTime..endTime у userTrades - не больше 7 суток
+USER_TRADES_MAX_WINDOWS = 30  # сделка старше ~210 суток при сверке - ошибка, а не бесконечный перебор окон
 
 
 class OrderValidationError(TradingInfraError):
@@ -188,6 +191,32 @@ class AlgoResult:
         return self.status in ALGO_TERMINAL
 
 
+@dataclass(frozen=True)
+class UserTrade:
+    """Исполнение по счёту (`/fapi/v1/userTrades`): фактическая цена и комиссия."""
+
+    symbol: str
+    side: str  # BUY | SELL
+    qty: float
+    price: float
+    commission: float
+    commission_asset: str
+    realized_pnl: float
+    time_ms: int
+
+    @classmethod
+    def parse(cls, data: Any) -> "UserTrade":
+        if not isinstance(data, dict):
+            raise DataError(f"userTrades: строка не объект: {str(data)[:200]}")
+        what = "userTrades"
+        t = data.get("time")
+        if isinstance(t, bool) or not isinstance(t, int):
+            raise DataError(f"userTrades: нет целого поля time в {str(data)[:200]}")
+        return cls(symbol=_text(data, "symbol", what), side=_text(data, "side", what), qty=_num(data, "qty", what), price=_num(data, "price", what),
+                   commission=_num(data, "commission", what, default=0.0), commission_asset=str(data.get("commissionAsset", "")),
+                   realized_pnl=_num(data, "realizedPnl", what, default=0.0), time_ms=t)
+
+
 # --------------------------------------------------------------------------------------------- клиент
 
 
@@ -320,6 +349,26 @@ class BinanceLiveClient:
                 return total
             cursor = max(int(r["time"]) for r in rows) + 1
         raise DataError(f"income: больше {INCOME_MAX_PAGES} страниц с {start_ms}: суточный убыток недосчитан бы")
+
+    async def user_trades(self, symbol: str, start_ms: int, end_ms: int) -> list[UserTrade]:
+        """Исполнения по символу за [start_ms, end_ms] по времени (окнами по 7 суток - ограничение биржи). Окно, упёршееся в 1000 строк, - DataError:
+        недобранные исполнения дали бы неверную цену выхода при сверке."""
+        if end_ms < start_ms:
+            raise DataError(f"userTrades {symbol}: конец {end_ms} раньше начала {start_ms}")
+        out: list[UserTrade] = []
+        cursor = start_ms
+        for _ in range(USER_TRADES_MAX_WINDOWS):
+            stop = min(cursor + USER_TRADES_WINDOW_MS - 1, end_ms)
+            rows = await self._rest.request("GET", config.USER_TRADES_PATH, {"symbol": symbol, "startTime": cursor, "endTime": stop, "limit": USER_TRADES_PAGE})
+            if not isinstance(rows, list):
+                raise DataError(f"userTrades: ожидается список, получено {str(rows)[:200]}")
+            if len(rows) >= USER_TRADES_PAGE:
+                raise DataError(f"userTrades {symbol}: в окне {cursor}..{stop} не меньше {USER_TRADES_PAGE} исполнений - выборка неполная")
+            out += [UserTrade.parse(r) for r in rows]
+            if stop >= end_ms:
+                return sorted(out, key=lambda u: u.time_ms)
+            cursor = stop + 1
+        raise DataError(f"userTrades {symbol}: больше {USER_TRADES_MAX_WINDOWS} окон по 7 суток с {start_ms}")
 
     # ---------------------------------------------------------------------- плечо и режим маржи
 

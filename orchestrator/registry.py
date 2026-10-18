@@ -19,6 +19,7 @@ strategy_id - то, что пишется в колонку `strategy_id` все
 """
 
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import replace
 
 import config
 from features import defaults as D
@@ -63,7 +64,9 @@ VWAP_PLAN = ScaleOutPlan(((1.0, 0.5), (2.0, 0.5)), be_after_first=True, trail_mo
 # Пробои уровня / линии (2026-10-18): разметка - медиана R:R 1.0, но у четверти сделок цель >= 2R. Половина фиксируется на +1R (стоп в безубыток),
 # половина ждёт +2R; без runner'а - трейлинг 3 ATR на 15m для пробоя консолидации слишком широк.
 LEVEL_BREAKOUT_PLAN = ScaleOutPlan(((1.0, 0.5), (2.0, 0.5)), be_after_first=True, trail_mode=None)
-STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_COUNTER_TREND: SCALP_1R_PLAN, VWAP_REVERSION: VWAP_PLAN,
+# SMC_Pro_Trend (2026-10-18): тот же Scale Out 50/40/10, но цены уровней - от цен сигнала (вход 50% FVG, SL за экстремумом свипа), а не от фактического входа
+SMC_PRO_PLAN = replace(DEFAULT_PLAN, tp_anchor="signal")
+STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_PRO_TREND: SMC_PRO_PLAN, SMC_COUNTER_TREND: SCALP_1R_PLAN, VWAP_REVERSION: VWAP_PLAN,
                                            HORIZONTAL_BREAKOUT: LEVEL_BREAKOUT_PLAN, TRENDLINE_BREAKOUT: LEVEL_BREAKOUT_PLAN}
 
 

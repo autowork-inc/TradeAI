@@ -8,6 +8,7 @@
 Порядок записей сохраняется (FIFO): строка сделки раньше её закрытий и снапшота - иначе внешний ключ не сойдётся.
 """
 
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from orchestrator.journal import EventLog
@@ -15,6 +16,17 @@ from orchestrator.types import Event
 from utils.errors import DataError
 
 Row = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DbOpenTrade:
+    """Открытая боевая сделка из БД (mode='live', status='open') для сверки с биржей при старте (`LiveExecutionEngine.recover`).
+
+    `row` - полная строка trades в «сырых» Python-типах (мс, float, dict), с теми же ключами, что TRADE_COLUMNS: после сверки движок
+    пишет её обратно целиком (upsert). `closes` - уже записанные закрытия {seq, ts, reason, qty, price, pnl, fees, gross_r} по порядку."""
+
+    row: Row
+    closes: tuple[Row, ...] = field(default_factory=tuple)
 
 
 class TradeRecorder(Protocol):

@@ -7,8 +7,10 @@
      этого таймфрейма (бар 15m не «стареет» заявку, поданную на 5m);
   3. каждая стратегия СВОЕГО таймфрейма (`strategy.interval`; None - любого) считает `detect(ctx)`; ошибка стратегии НЕ перехватывается: процесс падает,
      Docker перезапускает (R1). Закрытия 1h/1d сюда не попадают вовсе: они обновляют состояние старших таймфреймов (orchestrator/mtf.py);
-  4. каждый сигнал: «устарел» (свеча закрылась давно: replay после обрыва) -> skipped_stale; монета занята ->
-     skipped_due_to_lock (D4); приёмник отказал по риску -> skipped_risk, блокировка снимается; иначе -> signal_accepted.
+  4. каждый сигнал: «устарел» (свеча закрылась давно: replay после обрыва) -> skipped_stale; фильтр сигналов (`signal_gates`: импульс на 1m для MARKET,
+     новости High Impact, выходные) отказал -> skipped_filter (причина и имя фильтра в detail); монета занята -> skipped_due_to_lock (D4); приёмник
+     отказал по риску -> skipped_risk, блокировка снимается; иначе -> signal_accepted. Фильтры касаются только НОВЫХ сигналов: сопровождение и закрытие
+     открытых сделок идёт через приёмники и от них не зависит.
 
 Маршрут задаётся на стратегию: `Route(Mode.SHADOW, VirtualTracker)` или `Route(Mode.LIVE, <LiveBarrier-адаптер, Этап 4>)`.
 Область блокировки: все LIVE-стратегии делят ОДНУ блокировку (на бирже одна позиция на монету, One-Way); у каждой
@@ -18,7 +20,7 @@ SHADOW-стратегии своя (3.2: «у каждой стратегии с
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from orchestrator.journal import EventLog
 from orchestrator.lock import CoinOwnershipLock, Owner
@@ -37,6 +39,14 @@ class OrchestratorError(TradingInfraError):
     """Нарушен порядок свечей или протокол маршрутизации: баг, а не рыночная ситуация (R1)."""
 
 
+class SignalGate(Protocol):
+    """Фильтр новых сигналов: причина отказа (строка) или None - сигнал проходит дальше."""
+
+    name: str
+
+    def check(self, signal: Signal, now_ms: int) -> str | None: ...
+
+
 @dataclass(frozen=True)
 class Route:
     mode: Mode
@@ -47,7 +57,7 @@ class Orchestrator:
     def __init__(
         self, strategies: Sequence[Strategy], routes: Mapping[str, Route], log_: EventLog, *,
         max_signal_age_ms: int = DEFAULT_MAX_SIGNAL_AGE_MS, recorder: TradeRecorder | None = None, snapshot_bars: int = 100,
-        symbol_filter: Callable[[str, str], bool] | None = None,
+        symbol_filter: Callable[[str, str], bool] | None = None, signal_gates: Sequence[SignalGate] = (),
     ):
         names = [s.name for s in strategies]
         if len(set(names)) != len(names):
@@ -62,6 +72,7 @@ class Orchestrator:
         self._rec: TradeRecorder = recorder or NullRecorder()
         self._snapshot_bars = snapshot_bars
         self._symbol_filter = symbol_filter  # (стратегия, символ) -> можно ли; None - всё разрешено
+        self._gates = tuple(signal_gates)
         self._setup_states: dict[tuple[str, str, str], int] = {}  # (стратегия, монета, сторона) -> последнее состояние автомата
         self._locks: dict[str, CoinOwnershipLock] = {}
         self._held: dict[str, tuple[CoinOwnershipLock, str, Owner]] = {}  # signal_id -> (блокировка, монета, владелец)
@@ -136,6 +147,10 @@ class Orchestrator:
         base = {"mode": route.mode.value, "kind": signal.kind.value, "direction": signal.direction.value}
         if stale:
             return self._event(ctx, "skipped_stale", signal, {**base, "age_ms": age})
+        for gate in self._gates:
+            reason = gate.check(signal, ctx.received_ms)
+            if reason is not None:
+                return self._event(ctx, "skipped_filter", signal, {**base, "filter": gate.name, "reason": reason})
         lock = self.lock_for(signal.strategy)
         owner = Owner(signal.strategy, signal.signal_id)
         acquisition = lock.try_acquire(signal.symbol, owner)

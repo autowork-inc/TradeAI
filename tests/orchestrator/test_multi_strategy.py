@@ -19,7 +19,7 @@ from orchestrator.multi_strategies import (
     HORIZONTAL_BREAKOUT, ICT_KILLZONES, OBI_BREAKOUT, SMC_COUNTER_TREND, TRENDLINE_BREAKOUT, VWAP_REVERSION, StrategyCounterTrend,
     StrategyHorizontalBreakout, StrategyKillzones, StrategyObiBreakout, StrategyTrendlineBreakout, StrategyVwapReversion,
 )
-from orchestrator.registry import LEVEL_BREAKOUT_PLAN, SCALP_1R_PLAN, SHADOW_STRATEGIES, VWAP_PLAN, build_strategies, plans_for
+from orchestrator.registry import LEVEL_BREAKOUT_PLAN, SCALP_1R_PLAN, SMC_PRO_PLAN, SHADOW_STRATEGIES, VWAP_PLAN, build_strategies, plans_for
 from orchestrator.strategies import SMC_PRO_TREND, StrategySMC
 from orchestrator.tracker import CLOSED, DEFAULT_PLAN, OPEN, PENDING_LIMIT, TrackerError, VirtualTracker
 from orchestrator.types import BarInfo, Direction, FeatureContext, Kind, Mode, Tick, position_key
@@ -98,7 +98,7 @@ def test_each_strategy_gets_its_own_scale_out_plan_on_the_same_coin_and_move():
     tr.submit(mk(B, kind=Kind.MARKET, bar=1), 1000)  # SCALP_1R_PLAN: 100% на +1R
     tr.on_tick(tick(100.0, 10))  # MARKET исполнены по первому тику
     ta, tb = tr.trades
-    assert ta.plan is DEFAULT_PLAN and tb.plan is SCALP_1R_PLAN and tr.plan_for(E) is VWAP_PLAN and tr.plan_for("неизвестная") is DEFAULT_PLAN
+    assert ta.plan is SMC_PRO_PLAN and tb.plan is SCALP_1R_PLAN and tr.plan_for(E) is VWAP_PLAN and tr.plan_for("неизвестная") is DEFAULT_PLAN
     tr.on_tick(tick(94.9, 20))  # +1R обеих (R = 5)
     assert ta.status == OPEN and ta.remaining == pytest.approx(0.5)
     assert tb.status == CLOSED and tb.exit_reason == "tp" and len(tb.legs) == 1 and tb.net_r == pytest.approx(tb.legs[0].net_r)
@@ -179,7 +179,7 @@ def test_registry_builds_the_seven_strategies_with_unique_ids_and_individual_pla
     assert plans[SMC_COUNTER_TREND] is SCALP_1R_PLAN and plans[VWAP_REVERSION] is VWAP_PLAN
     assert plans[HORIZONTAL_BREAKOUT] is plans[TRENDLINE_BREAKOUT] is LEVEL_BREAKOUT_PLAN
     assert LEVEL_BREAKOUT_PLAN.levels == ((1.0, 0.5), (2.0, 0.5)) and LEVEL_BREAKOUT_PLAN.be_after_first and LEVEL_BREAKOUT_PLAN.runner_frac == 0
-    assert all(plans[n] is DEFAULT_PLAN for n in (SMC_PRO_TREND, OBI_BREAKOUT, ICT_KILLZONES))
+    assert plans[SMC_PRO_TREND] is SMC_PRO_PLAN and all(plans[n] is DEFAULT_PLAN for n in (OBI_BREAKOUT, ICT_KILLZONES))  # SMC: те же уровни, якорь - цены сигнала
     assert SCALP_1R_PLAN.levels == ((1.0, 1.0),) and SCALP_1R_PLAN.runner_frac == 0 and VWAP_PLAN.runner_frac == 0
     assert build_strategies()[0].params.htf_filter is True  # Pro_Trend - только по тренду H4
 

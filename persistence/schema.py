@@ -175,6 +175,10 @@ COPY_SNAPSHOT = (
     "FROM trade_snapshots WHERE trade_id = $2::text ON CONFLICT (trade_id) DO NOTHING"
 )
 SNAPSHOT_EXISTS = "SELECT 1 FROM trade_snapshots WHERE trade_id = $1"
+# Сверка при старте боевого контура (Блок 1, 2026-10-18): открытые боевые сделки и их уже записанные закрытия
+SELECT_OPEN_LIVE = f"SELECT {', '.join(TRADE_COLUMNS)} FROM trades WHERE mode = 'live' AND status = 'open' ORDER BY entry_time"
+SELECT_CLOSES_OF = ("SELECT trade_id, seq, ts, reason, qty, price, pnl, fees, gross_r FROM trade_closes "
+                    "WHERE trade_id = ANY($1::text[]) ORDER BY trade_id, seq")
 ABORT_ORPHANS = (
     "UPDATE trades SET status = 'aborted', exit_reason = 'process_restart', updated_at = now() "
     "WHERE mode = $1 AND status IN ('pending_limit', 'pending_market', 'open') RETURNING id, coin, strategy_id"

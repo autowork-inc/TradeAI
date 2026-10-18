@@ -37,16 +37,20 @@ Fail-Fast (R1): ключи читаются из окружения в конс�
 передают оба уровня), обработка выходных и requote.
 """
 
+import json
 import logging
 import os
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import config  # noqa: F401  (подгружает .env в окружение процесса, как в exchange.binance_live)
 from exchange.binance_live import Balance, PositionInfo
 from utils.errors import ConfigError, TradingInfraError
+from utils.storage import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -320,8 +324,11 @@ class MetaApiLiveClient:
     использование - `async with MetaApiLiveClient() as client:` либо `connect()` / `close()` вручную.
     """
 
-    def __init__(self, env: Mapping[str, str] | None = None, *, id_prefix: str | None = None):
+    def __init__(self, env: Mapping[str, str] | None = None, *, id_prefix: str | None = None, symbols_cache: Path | None = None,
+                 symbols_cache_ttl_s: float = config.METAAPI_SYMBOLS_CACHE_TTL_S, wall_clock: Callable[[], float] = time.time):
+        """symbols_cache - файл кеша ответа `get_symbols` (список символов брокера живёт `symbols_cache_ttl_s`, по умолчанию 24 ч); None - без кеша."""
         self._creds = MetaApiCredentials.from_env(env)  # ConfigError здесь - раньше любого подключения
+        self._symbols_cache, self._symbols_ttl, self._wall = (Path(symbols_cache) if symbols_cache is not None else None), symbols_cache_ttl_s, wall_clock
         self.id_prefix = id_prefix if id_prefix is not None else config.CLIENT_ORDER_ID_PREFIX
         self._api: Any = None  # metaapi_cloud_sdk.MetaApi (SDK импортируется лениво, чтобы модуль грузился без него)
         self._account: Any = None  # MetatraderAccount
@@ -528,8 +535,35 @@ class MetaApiLiveClient:
         return PositionInfo(symbol, round(signed, 8), entry)
 
     async def get_symbols(self) -> list[str]:
-        """Имена всех символов, доступных у брокера (с его суффиксами: BTCUSDm, EURUSD.r...)."""
-        return list(await self._call("get_symbols", self._rpc().get_symbols()))
+        """Имена всех символов, доступных у брокера (с его суффиксами: BTCUSDm, EURUSD.r...).
+
+        С `symbols_cache`: ответ кешируется в файле на `symbols_cache_ttl_s` (24 ч) - переподключения и рестарты не повторяют тяжёлый запрос.
+        Кеш другого аккаунта, просроченный или нечитаемый - промах (запрос к MetaApi и перезапись файла): кеш - ускорение, а не источник правды."""
+        cached = self._read_symbols_cache()
+        if cached is not None:
+            return cached
+        symbols = list(await self._call("get_symbols", self._rpc().get_symbols()))
+        if self._symbols_cache is not None:
+            atomic_write_text(self._symbols_cache, json.dumps({"account_id": self._creds.account_id, "saved_at": self._wall(), "symbols": symbols},
+                                                              ensure_ascii=False))
+        return symbols
+
+    def _read_symbols_cache(self) -> list[str] | None:
+        if self._symbols_cache is None:
+            return None
+        try:
+            raw = self._symbols_cache.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        try:
+            data = json.loads(raw)
+            fresh = data["account_id"] == self._creds.account_id and 0 <= self._wall() - float(data["saved_at"]) < self._symbols_ttl
+            symbols = data["symbols"]
+            valid = isinstance(symbols, list) and all(isinstance(s, str) for s in symbols)
+        except (ValueError, KeyError, TypeError) as exc:
+            log.warning("MetaApi: кеш символов %s не читается (%s) - запрошу заново", self._symbols_cache, exc)
+            return None
+        return list(symbols) if fresh and valid else None
 
     async def realized_pnl_since(self, start_ms: int, end_ms: int | None = None) -> float:
         """Реализованный результат счёта за интервал в валюте счёта: по истории сделок терминала сумма `profit + commission + swap` сделок
