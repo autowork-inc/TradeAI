@@ -50,3 +50,10 @@ def test_repair_env_splits_the_glued_analyzer_password_and_leaves_other_keys_alo
     script.write_bytes((f'ENV_FILE="{env.as_posix()}"\n{fn}\nrepair_env\nrepair_env\n').encode())
     subprocess.run([SH, script.as_posix()], check=True, timeout=30)
     assert env.read_bytes().decode().split("\n") == ["BINANCE_API_KEY=abc", "APPROVED_STRATEGIES=SMC_Pro_Trend,VWAP_Reversion", "ANALYZER_DB_PASSWORD=49c2", "API_KEY=k", ""]
+
+
+def test_analyzer_is_recreated_and_its_healthcheck_probes_the_database():
+    sh = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8")
+    assert "up -d --build --force-recreate --no-deps analyzer" in sh  # новая переменная окружения подхватывается; postgres/бот не пересоздаются
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "127.0.0.1:8000/ready" in compose.split("  analyzer:")[1]

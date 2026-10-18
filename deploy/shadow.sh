@@ -265,7 +265,7 @@ case "$cmd" in
         ensure_analyzer_password
         apply_analyzer_role
         echo "== Сборка и запуск analyzer (бот не перезапускается)"
-        $DC --profile live --profile analytics up -d --build analyzer
+        $DC --profile live --profile analytics up -d --build --force-recreate --no-deps analyzer
         i=0
         while [ "$i" -lt 24 ]; do
             $DC --profile live --profile analytics ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | grep -q '^analyzer running healthy' && break

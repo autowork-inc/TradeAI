@@ -7,15 +7,18 @@ import asyncio
 import hmac
 import logging
 import multiprocessing
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import pandas as pd
+import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from analyzer import __version__
 from analyzer.config import Settings
+from analyzer.db import check_db
 from analyzer.errors import CalendarError, Conflict, DataError, NotFound
 from analyzer.models import DryRunRequest, RunRequest, VersionBody
 from analyzer.botcalendar import sync_bot_calendar
@@ -55,7 +58,7 @@ class WorkerSupervisor:
             self._proc.join(5)
 
 
-def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
+def create_app(settings: Settings, *, start_worker: bool = True, db_check: Callable[[Settings], None] = check_db) -> FastAPI:
     store = Store(settings.data_dir)
     supervisor = WorkerSupervisor(settings) if start_worker else None
 
@@ -104,6 +107,18 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
     async def health() -> JSONResponse:
         ok = supervisor is None or supervisor.alive
         return JSONResponse({"status": "ok" if ok else "degraded"}, status_code=200 if ok else 503)
+
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        """Готовность = воркер жив И БД бота доступна под ролью analyzer_ro. Это проверяет healthcheck контейнера (а не только ответ HTTP)."""
+        if supervisor is not None and not supervisor.alive:
+            return JSONResponse({"status": "degraded", "reason": "worker_down"}, status_code=503)
+        try:
+            await asyncio.to_thread(db_check, settings)
+        except psycopg.Error as exc:
+            log.error("Проверка БД не пройдена: %s", exc)
+            return JSONResponse({"status": "degraded", "reason": "db_unavailable", "detail": str(exc).splitlines()[0][:200]}, status_code=503)
+        return JSONResponse({"status": "ok"})
 
     @app.get("/status", dependencies=[Depends(auth)])
     async def status() -> dict[str, Any]:

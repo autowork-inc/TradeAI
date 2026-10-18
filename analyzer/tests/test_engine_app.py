@@ -253,3 +253,17 @@ def test_news_window_default_is_5_before_5_after():
 def test_query_from_params():
     q = query_from({"mode": "all", "strategies": ["A"], "coins": None, "since": "2026-01-01T00:00:00", "until": None})
     assert q.mode == "all" and q.strategies == ("A",) and q.coins is None and q.since.tzinfo is not None and q.until is None
+
+
+def test_ready_checks_the_database_not_just_the_http_server(cfg):
+    import psycopg
+
+    def broken(_):
+        raise psycopg.OperationalError('FATAL:  password authentication failed for user "analyzer_ro"')
+
+    bad = TestClient(create_app(cfg, start_worker=False, db_check=broken))
+    assert bad.get("/health").status_code == 200  # процесс жив...
+    r = bad.get("/ready")  # ...но готовым не считается: healthcheck контейнера увидит 503
+    assert r.status_code == 503 and r.json()["reason"] == "db_unavailable" and "password authentication failed" in r.json()["detail"]
+    good = TestClient(create_app(cfg, start_worker=False, db_check=lambda s: None))
+    assert good.get("/ready").json() == {"status": "ok"}

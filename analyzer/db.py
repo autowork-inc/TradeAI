@@ -32,6 +32,13 @@ SELECT {', '.join('t.' + c for c in TRADE_COLUMNS)}, s.meta AS meta, s.candles A
 FETCH_SIZE = 200
 
 
+def check_db(settings: Settings) -> None:
+    """Проверка соединения с PostgreSQL ролью analyzer_ro (`SELECT 1`) - для /ready и healthcheck: неверный пароль / недоступная БД видны сразу,
+    а не при первом задании (2026-10-18: `password authentication failed for user analyzer_ro` всплыл только в UI)."""
+    with psycopg.connect(settings.database_url, connect_timeout=5, options="-c default_transaction_read_only=on -c application_name=tradeai-analyzer-health") as conn:
+        conn.execute("SELECT 1")
+
+
 @dataclass(frozen=True)
 class LoadQuery:
     mode: str = "shadow"  # shadow | live | all

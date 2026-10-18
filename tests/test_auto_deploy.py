@@ -63,3 +63,11 @@ def test_metaapi_secret_not_in_command_or_error(capsys):
     with pytest.raises(SystemExit):
         ad.validate_metaapi("sekret value", "abcd1234-ef56")
     assert "sekret" not in capsys.readouterr().err
+
+
+def test_parse_health_and_step9_scans_every_required_service():
+    out = "postgres running healthy\nshadow-live running\nanalyzer running unhealthy\n"
+    assert ad.parse_services(out)["analyzer"] == "running" and ad.parse_health(out) == {"postgres": "healthy", "analyzer": "unhealthy"}
+    src = open(ad.__file__, encoding="utf-8").read()
+    assert "for s_ in required:" in src and "--profile analytics logs" in src and "unhealthy" in src  # логи всех обязательных сервисов + health
+    assert "analyzer" in ad.REQUIRED_SERVICES and "analyzer" in ad.LIVE_REQUIRED_SERVICES

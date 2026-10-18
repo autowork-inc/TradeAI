@@ -40,6 +40,7 @@ TIMEOUT = 20
 TOTAL = 9
 DC = "docker compose --env-file .env.shadow"
 REQUIRED_SERVICES = ("postgres", "shadow-run", "api", "analyzer")  # analyzer - изолированный сервис профиля analytics (его поднимает apply.sh / analyzer-up)
+LOG_WINDOW = "10m"  # окно логов шага 9: только свежее (старые ошибки прошлых запусков не считаются)
 LIVE_REQUIRED_SERVICES = ("postgres", "shadow-live", "api", "analyzer")
 INCOMING = "trading_incoming"  # каталог на сервере для присланных архивов (его же читает cron: deploy/apply.sh --pending)
 EX_DEFERRED = 75  # deploy/apply.sh: обновление отложено до закрытия боевых позиций
@@ -97,6 +98,11 @@ def parse_services(ps_output: str) -> dict[str, str]:
         if len(parts) >= 2:
             result[parts[0]] = parts[1]
     return result
+
+
+def parse_health(ps_output: str) -> dict[str, str]:
+    """Строки `<service> <state> <health>` -> {service: health} (у сервисов без healthcheck колонки нет)."""
+    return {p[0]: p[2] for p in (line.split() for line in ps_output.splitlines()) if len(p) >= 3}
 
 
 def validate_metaapi(token: str | None, account: str | None) -> dict[str, str]:
@@ -297,11 +303,17 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(a.health_wait)
         required = LIVE_REQUIRED_SERVICES if contour == "live" else REQUIRED_SERVICES
         svc = "shadow-live" if contour == "live" else "shadow-run"
-        _, ps = run(cli, f"cd {d} && {DC} --profile live --profile analytics ps -a --format '{{{{.Service}}}} {{{{.State}}}}'", "docker compose ps", quiet=True)
-        states = parse_services(ps)
+        _, ps = run(cli, f"cd {d} && {DC} --profile live --profile analytics ps -a --format '{{{{.Service}}}} {{{{.State}}}} {{{{.Health}}}}'", "docker compose ps", quiet=True)
+        states, health = parse_services(ps), parse_health(ps)
         bad = {s: states.get(s, "нет") for s in required if states.get(s) != "running"}
-        _, logs = run(cli, f"cd {d} && {DC} --profile live logs --no-color --tail 200 {svc}", f"логи {svc}", quiet=True)
-        blocked, errors = scan_logs(logs)
+        bad.update({s: "unhealthy (healthcheck не проходит)" for s in required if health.get(s) == "unhealthy"})
+        blocked: list[str] = []
+        errors: list[str] = []
+        for s_ in required:  # логи ВСЕХ обязательных сервисов (а не только бота): ошибка анализатора/БД/API не должна проходить незамеченной
+            _, logs = run(cli, f"cd {d} && {DC} --profile live --profile analytics logs --no-color --since {LOG_WINDOW} --tail 200 {s_}", f"логи {s_}", quiet=True)
+            b, e = scan_logs(logs)
+            blocked += b if s_ == svc else []  # блокировка IP Binance - только про бота
+            errors += [f"[{s_}] {x}" for x in e]
         if blocked:
             print("\n".join("    " + x for x in blocked[:10]), file=sys.stderr)
             fail("VPS IP blocked by Binance (HTTP 451/429/418 или Handshake failed). Выберите VPS в другом регионе "
@@ -313,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
             fail("контейнеры не в состоянии running")
         if errors:
             print("\n".join("    " + x for x in errors[:10]), file=sys.stderr)
-            fail(f"в последних 200 строках лога {svc} есть ошибки (Traceback/CRITICAL/FATAL/ConfigError)")
+            fail("в логах сервисов за последние " + LOG_WINDOW + " есть ошибки (Traceback/CRITICAL/FATAL/ConfigError)")
         ok(f"{', '.join(required)} running, блокировки IP и ошибок в логах нет")
     except (TimeoutError, socket.timeout):
         fail("таймаут во время выполнения команды на сервере")
