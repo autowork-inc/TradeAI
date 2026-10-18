@@ -306,5 +306,5 @@ def test_shadow_script_has_analyzer_commands_and_apply_runs_it_after_a_successfu
     fn = apply[apply.index("deploy_analyzer() {"):apply.index("unpack() {")]
     assert "return 0" in fn and "exit" not in fn and "die " not in fn  # сбой анализатора не откатывает и не валит выкатку бота
     ad = (ROOT / "scripts" / "auto_deploy.py").read_text(encoding="utf-8")
-    assert '"analyzer")' in ad and ad.count('"analyzer"') >= 2 and "--profile analytics ps" in ad  # шаг 9 проверяет анализатор
-    assert "printf 'ANALYZER_DB_PASSWORD=%s" + chr(92) + "n'" in text  # перевод строки записан литералом \n, а не настоящим переводом
+    assert '"analyzer")' in ad and ad.count('"analyzer"') >= 2 and "--profile analytics ps -a" in ad  # шаг 9 проверяет анализатор
+    assert 'env_append "ANALYZER_DB_PASSWORD=$pw"' in text

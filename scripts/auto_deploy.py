@@ -297,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(a.health_wait)
         required = LIVE_REQUIRED_SERVICES if contour == "live" else REQUIRED_SERVICES
         svc = "shadow-live" if contour == "live" else "shadow-run"
-        _, ps = run(cli, f"cd {d} && {DC} --profile live --profile analytics ps --format '{{{{.Service}}}} {{{{.State}}}}'", "docker compose ps", quiet=True)
+        _, ps = run(cli, f"cd {d} && {DC} --profile live --profile analytics ps -a --format '{{{{.Service}}}} {{{{.State}}}}'", "docker compose ps", quiet=True)
         states = parse_services(ps)
         bad = {s: states.get(s, "нет") for s in required if states.get(s) != "running"}
         _, logs = run(cli, f"cd {d} && {DC} --profile live logs --no-color --tail 200 {svc}", f"логи {svc}", quiet=True)
@@ -308,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
                  "и повторите деплой")
         if bad:
             print("\n".join(f"    {s}: {st}" for s, st in bad.items()), file=sys.stderr)
+            for s_ in bad:  # причина падения: последние строки лога каждого неработающего сервиса (в т.ч. уже вышедшего)
+                run(cli, f"cd {d} && {DC} --profile live --profile analytics logs --no-color --tail 40 {s_}", f"лог {s_}", check=False)
             fail("контейнеры не в состоянии running")
         if errors:
             print("\n".join("    " + x for x in errors[:10]), file=sys.stderr)

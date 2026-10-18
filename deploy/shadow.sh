@@ -60,6 +60,13 @@ rand_hex() {
     printf '%s' "$out"
 }
 
+# Дописать строку в .env.shadow: если файл не кончается переводом строки, сначала дописывается он - иначе новая переменная склеивается с последней
+# (2026-10-18: `APPROVED_STRATEGIES=...VWAP_ReversionANALYZER_DB_PASSWORD=...` уронил shadow-live).
+env_append() {
+    [ ! -s "$ENV_FILE" ] || [ -z "$(tail -c1 "$ENV_FILE")" ] || echo >> "$ENV_FILE"
+    printf '%s\n' "$1" >> "$ENV_FILE"
+}
+
 ensure_password() {
     if [ -s "$ENV_FILE" ] && grep -q '^POSTGRES_PASSWORD=.\{16,\}' "$ENV_FILE"; then
         return
@@ -71,7 +78,7 @@ ensure_password() {
     [ -f "$ENV_FILE" ] && sed -i '/^POSTGRES_PASSWORD=$/d' "$ENV_FILE"  # пустая заготовка из примера
     pw="$(rand_hex 24)"
     umask 077
-    printf 'POSTGRES_PASSWORD=%s\n' "$pw" >> "$ENV_FILE"
+    env_append "POSTGRES_PASSWORD=$pw"
     chmod 600 "$ENV_FILE"
     echo "В $ENV_FILE создан пароль БД (chmod 600). Сохраните файл: без пароля данные тома pgdata не открыть."
 }
@@ -87,7 +94,7 @@ ensure_api_key() {
     sed -i '/^API_KEY=$/d' "$ENV_FILE"
     key="$(rand_hex 32)"
     umask 077
-    printf 'API_KEY=%s\n' "$key" >> "$ENV_FILE"
+    env_append "API_KEY=$key"
     chmod 600 "$ENV_FILE"
     echo "В $ENV_FILE создан ключ API мониторинга (показать: ./deploy/shadow.sh apikey)."
 }
@@ -100,7 +107,7 @@ ensure_analyzer_password() {
     sed -i '/^ANALYZER_DB_PASSWORD=$/d' "$ENV_FILE"
     pw="$(rand_hex 24)"
     umask 077
-    printf 'ANALYZER_DB_PASSWORD=%s\n' "$pw" >> "$ENV_FILE"
+    env_append "ANALYZER_DB_PASSWORD=$pw"
     chmod 600 "$ENV_FILE"
     echo "В $ENV_FILE создан пароль роли analyzer_ro (только чтение БД)."
 }
