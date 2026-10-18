@@ -8,18 +8,19 @@ import flet as ft
 
 from tradeai_client import APP_NAME, __version__, fmt
 from tradeai_client.api import ApiClient, ApiError, LiveStateStream
-from tradeai_client.binance import BinanceError, BinanceNoData, fetch_klines
+from tradeai_client.binance import BinanceError, BinanceNoData, fetch_klines_filled
 from tradeai_client.chart_spec import ChartDataError, build_chart_spec, interval_to_ms
 from tradeai_client.chart_window import open_chart
 from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings
 from tradeai_client.ui import widgets as w
+from tradeai_client.ui.analysis_view import AnalysisView
 from tradeai_client.ui.dashboard import DashboardView
 from tradeai_client.ui.history_view import HistoryView
 from tradeai_client.ui.stats_view import StatsView
 
 log = logging.getLogger("tradeai_client")
 STATUS_COLORS = {"connected": w.GREEN, "connecting": w.AMBER, "reconnecting": w.AMBER, "auth": w.RED, "throttled": w.RED, "error": w.RED, "idle": w.MUTED}
-TAB_DASHBOARD, TAB_STATS, TAB_HISTORY = 0, 1, 2
+TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS = 0, 1, 2, 3
 ACCOUNT_REFRESH_S = 30.0  # как часто обновлять баланс в шапке (движок пишет снимок счёта раз в ~30 с)
 POST_BARS_MARGIN = 5  # свечей после выхода, которые показываем за последним маркером
 
@@ -39,7 +40,7 @@ class Shell:
         self.saved_mode = self.settings.mode_filter if self.settings.mode_filter in fmt.MODE_KEYS else ""  # выбор пользователя (Statistics/History) переживает перезапуск
         self.default_mode = "shadow"  # активный контур: live, пока боевой счёт присылает баланс (фильтры History / Statistics стартуют с него)
         self._account_at = 0.0
-        self.dashboard, self.stats, self.history = DashboardView(), StatsView(self), HistoryView(self)
+        self.dashboard, self.stats, self.history, self.analysis = DashboardView(), StatsView(self), HistoryView(self), AnalysisView(self)
         self._dot = w.dot(w.MUTED, 12)
         self._status_text = ft.Text("Не подключено", size=13, color=w.MUTED)
         self._account_data: dict | None = None
@@ -61,10 +62,10 @@ class Shell:
         header = ft.Row([ft.Icon(ft.Icons.CANDLESTICK_CHART, color=w.ACCENT), ft.Text(APP_NAME, size=20, weight=ft.FontWeight.W_700), ft.Container(expand=True),
                          self._account, self._eye, ft.VerticalDivider(width=12, color=w.BORDER), self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
                         spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-        tabs = ft.Tabs(length=3, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
+        tabs = ft.Tabs(length=4, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label="Dashboard", icon=ft.Icons.DASHBOARD), ft.Tab(label="Statistics", icon=ft.Icons.BAR_CHART),
-                            ft.Tab(label="History", icon=ft.Icons.HISTORY)]),
-            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control], expand=True)], expand=True))
+                            ft.Tab(label="History", icon=ft.Icons.HISTORY), ft.Tab(label="Analysis", icon=ft.Icons.ANALYTICS)]),
+            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control], expand=True)], expand=True))
         p.add(header, ft.Container(height=6), tabs)
 
     def run(self, coro) -> None:
@@ -191,6 +192,8 @@ class Shell:
             await self.stats.refresh()
         elif self._tab == TAB_HISTORY:
             await self.history.refresh()
+        elif self._tab == TAB_ANALYSIS:
+            await self.analysis.refresh()
 
     # ------------------------------------------------------------------------------------------ настройки
 
@@ -295,11 +298,14 @@ class Shell:
             return None, None
         async with aiohttp.ClientSession() as session:  # отдельная сессия: заголовок X-API-Key к Binance не отправляется никогда
             try:
-                klines = await fetch_klines(session, self.settings.binance_rest, t["coin"], snap["meta"]["interval"], start, min(end, now_ms),
-                                            interval_ms=iv, now_ms=now_ms)
+                klines, gaps = await fetch_klines_filled(session, self.settings.binance_rest, t["coin"], snap["meta"]["interval"], start, min(end, now_ms),
+                                                         interval_ms=iv, now_ms=now_ms)  # хвост догружается страницами, разрывы - отдельными запросами
             except BinanceNoData as exc:
                 log.info("Свечи после сигнала %s: %s - график по снимку из БД", t["coin"], exc)
                 return None, None
             except BinanceError as exc:
                 return None, f"Свечи после сигнала не загружены: {exc}."
-        return klines, ("Свечи после сигнала — публичные данные Binance (в БД не хранятся)." if klines else None)
+        note = "Свечи после сигнала — публичные данные Binance (в БД не хранятся)." if klines else None
+        if klines and gaps:
+            note += f" Не удалось догрузить свечей: {gaps} (разрыв у биржи/сети)."
+        return klines, note

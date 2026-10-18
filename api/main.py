@@ -17,10 +17,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 import asyncpg
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import StringConstraints
 
+from api import analysis_proxy
 from api.livestate import SETUP_STRATEGIES, LiveStateHub, current_coins, freshest_heartbeat_age_s, read_account
 from api.reason import build_reason
 from api.security import FailureThrottle, check_key
@@ -100,7 +102,7 @@ def where_clause(prefix: str, mode: str, statuses=None, coins=None, strategies=N
     return " AND ".join(parts), args
 
 
-def create_app(settings: Settings) -> FastAPI:
+def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     throttle = FailureThrottle(settings.auth_max_failures, settings.auth_window_s)
     state: dict[str, Any] = {"pool": None, "hub": None, "ws": 0}
 
@@ -125,6 +127,8 @@ def create_app(settings: Settings) -> FastAPI:
 
     def pool() -> asyncpg.Pool:
         return state["pool"]
+
+    analysis_proxy.install(app, settings, auth, analyzer_transport)  # /api/analysis/* -> Strategy Quant Analyzer (отдельный контейнер, наружу не публикуется)
 
     # ---------------------------------------------------------------------------------- ошибки
 
@@ -213,6 +217,7 @@ def create_app(settings: Settings) -> FastAPI:
             "trade": t, "closes": [close_out(c) for c in closes], "snapshot_created_at": iso(snap["created_at"]),
             "candles": snap["candles"], "geometry": geometry, "meta": meta,
             "reason": build_reason(t, meta, geometry), "events": [event_out(e) for e in events],
+            "fills": (t.get("plan") or {}).get("fills") or [],  # реальные исполнения биржи (userTrades, мс UTC): боевые сделки, записаны при закрытии
             "setup_path": [event_out(e) for e in reversed(path)],
         }
 

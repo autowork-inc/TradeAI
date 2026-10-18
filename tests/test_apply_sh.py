@@ -29,6 +29,7 @@ esac
 SHADOW_STUB = """#!/bin/sh
 # поддельный shadow.sh: запоминает вызов, поднимает сервис контура (или роняет, если задан $STUB/fail_version)
 echo "$*" >> "$STUB/calls"
+if [ "$1" = analyzer-up ]; then [ -f "$STUB/analyzer_fails" ] && exit 1; exit 0; fi
 case "$1" in up-live) svc=shadow-live; dir=live ;; *) svc=shadow-run; dir=shadow ;; esac
 mkdir -p "data/$dir"
 version="$(cat VERSION 2>/dev/null || echo none)"
@@ -41,10 +42,12 @@ touch "data/$dir/.shadow_heartbeat"
 """
 
 
-def make_archive(path: Path, version: str) -> str:
+def make_archive(path: Path, version: str, analyzer: bool = False) -> str:
     """Архив «версии»: файл VERSION, настоящий deploy/apply.sh и поддельный shadow.sh."""
     files = {"VERSION": version.encode(), "deploy/apply.sh": (ROOT / "deploy" / "apply.sh").read_bytes().replace(b"\r\n", b"\n"),
              "deploy/shadow.sh": SHADOW_STUB.encode(), "docker-compose.yml": b"services: {}\n"}
+    if analyzer:
+        files["analyzer/Dockerfile"] = b"FROM scratch"
     with tarfile.open(path, "w:gz") as tar:
         for name, data in files.items():
             info = tarfile.TarInfo(name)
@@ -161,3 +164,35 @@ def test_corrupted_archive_is_refused_and_status_reports_pending(env):
     assert r.returncode == 1 and "sha256" in r.stdout + r.stderr and calls(stub) == [] and (proj / "VERSION").read_text() == "v1"
     s = run("--status")
     assert s.returncode == 0 and "ОТЛОЖЕНО" in s.stdout and "нет" in s.stdout
+
+
+def test_analyzer_is_brought_up_after_a_successful_apply(env):
+    proj, stub, incoming, run = env
+    set_running(stub, "shadow-live")
+    make_archive(incoming / "trading_shadow.tar.gz", "v2", analyzer=True)
+    r = run("--pending")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls(stub) == ["up-live --yes", "analyzer-up"]
+
+
+def test_analyzer_failure_does_not_fail_or_roll_back_the_bot_deploy(env):
+    proj, stub, incoming, run = env
+    set_running(stub, "shadow-run")
+    (stub / "analyzer_fails").write_text("", encoding="utf-8")
+    make_archive(incoming / "trading_shadow.tar.gz", "v2", analyzer=True)
+    r = run("--pending")
+    assert r.returncode == 0 and (proj / "VERSION").read_text() == "v2" and "анализатор не запустился" in r.stderr
+    assert calls(stub) == ["up", "analyzer-up"]
+
+
+def test_analyzer_is_not_started_when_the_bot_update_is_rolled_back_or_switched_off(env):
+    proj, stub, incoming, run = env
+    set_running(stub, "shadow-run")
+    (stub / "fail_version").write_text("v2", encoding="utf-8")
+    make_archive(incoming / "trading_shadow.tar.gz", "v2", analyzer=True)
+    assert run("--pending").returncode == 1
+    assert "analyzer-up" not in calls(stub)
+    (stub / "fail_version").unlink()
+    make_archive(incoming / "trading_shadow.tar.gz", "v3", analyzer=True)
+    assert run("--pending", extra_env={"APPLY_ANALYZER": "false"}).returncode == 0
+    assert "analyzer-up" not in calls(stub)

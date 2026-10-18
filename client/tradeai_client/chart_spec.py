@@ -2,7 +2,7 @@
 
 Здесь вся «геометрия» графика, но нет ни Flet, ни lightweight-charts: spec легко тестировать и безопасно передавать в
 отдельный процесс (multiprocessing). Время везде - миллисекунды UTC; бары привязаны к сетке таймфрейма. Человеку время показывается в поясе ПК:
-подписи панели - `fmt.fmt_ms_local` (с подписью пояса, «UTC+3»), ось графика сдвигается окном на `tz_offset_ms` (одно смещение на весь график).
+подписи панели - `fmt.fmt_ms_local` , ось графика сдвигается окном на `tz_offset_ms` (одно смещение на весь график).
 
 Единый формат геометрии `{type: zone|line|marker, t1, t2, p1, p2, label}` приходит из снапшота: клиент рисует его, ничего не зная о
 стратегиях. Линии плана (SL/TP/вход) рисуются из полей самой сделки (фактические цены), а не из геометрии - чтобы не дублировать.
@@ -81,10 +81,8 @@ def _wrap(text: str) -> list[str]:
 
 
 def _local(ms: int | None) -> str:
-    """Время события в поясе ПК с подписью пояса: «21.09 13:00 UTC+3»."""
-    if ms is None:
-        return fmt.DASH
-    return f"{fmt.fmt_ms_local(ms)} {fmt.tz_label(ms)}"
+    """Время события в поясе ПК (по системным часам, без подписи пояса): «21.09 13:00»."""
+    return fmt.fmt_ms_local(ms)
 
 
 def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] | None = None, *, now_ms: int,
@@ -141,7 +139,24 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         if bar_at is not None:
             trade_markers.append({"t": at, "price": bar_at["c"], "position": "above" if long else "below", "shape": "circle", "color": GREY, "text": "Р",
                                   "full": clean_text(fmt.EXIT_RU.get("process_restart", "Прервана")), "ts": exit_ms})
+    # реальные исполнения биржи (userTrades, боевые сделки): точные маркеры по цене и времени; несколько исполнений одной свечи и роли - один маркер
+    fills = [f for f in (snap.get("fills") or (trade.get("plan") or {}).get("fills") or []) if f.get("qty") and f.get("price")]
+    fill_total: dict[str, list[float]] = {"entry": [0.0, 0.0], "exit": [0.0, 0.0]}  # роль -> [объём, объём * цена]
+    grouped: dict[tuple[int, str], list[float]] = {}
+    for f in sorted(fills, key=lambda x: x["ts"]):
+        role, qty, price = ("entry" if f.get("role") == "entry" else "exit"), float(f["qty"]), float(f["price"])
+        fill_total[role][0] += qty
+        fill_total[role][1] += qty * price
+        g = grouped.setdefault((snap_t(int(f["ts"])), role), [0.0, 0.0, 0.0])
+        g[0], g[1], g[2] = g[0] + qty, g[1] + qty * price, float(f["ts"])
+    for (t, role), (qty, notional, ts) in grouped.items():
+        px, entry_role = notional / qty, role == "entry"
+        trade_markers.append({"t": t, "price": px, "position": ("below" if long else "above") if entry_role else ("above" if long else "below"),
+                              "shape": "circle", "color": BLUE if entry_role else GREY, "text": "И",
+                              "full": f"Исполнение на бирже: {'вход' if entry_role else 'выход'} {qty:g} @ {fmt.fmt_price(px)}", "ts": int(ts)})
     trade_markers = [m for m in trade_markers if m["t"] <= grid_end]
+    entry_fact = fill_total["entry"][1] / fill_total["entry"][0] if fill_total["entry"][0] else None
+    exit_fact = fill_total["exit"][1] / fill_total["exit"][0] if fill_total["exit"][0] else None
 
     # геометрия сетапа
     boxes, segments, setup_markers = [], [], []
@@ -168,13 +183,15 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
     # горизонтальные линии плана
     hlines: list[dict[str, Any]] = []
     sl, tp = trade.get("sl"), trade.get("tp")
-    planned, entry = trade.get("planned_entry"), trade.get("entry_price")
+    planned, entry = trade.get("planned_entry"), (entry_fact if entry_fact is not None else trade.get("entry_price"))  # линия входа - по факту биржи
     if sl is not None:
         hlines.append({"price": sl, "color": LINE_SL, "style": "solid", "text": f"SL {fmt.fmt_price(sl)}", "title": "SL", "width": 3})
     if tp is not None:
         hlines.append({"price": tp, "color": LINE_TP, "style": "solid", "text": f"TP {fmt.fmt_price(tp)}", "title": "TP", "width": 3})
     if entry is not None:
         hlines.append({"price": entry, "color": LINE_ENTRY, "style": "solid", "text": f"Вход {fmt.fmt_price(entry)}", "title": "ВХОД", "width": 3})
+    if exit_fact is not None:
+        hlines.append({"price": exit_fact, "color": GREY, "style": "solid", "text": f"Выход (факт) {fmt.fmt_price(exit_fact)}", "title": "ВЫХОД", "width": 3})
     if planned is not None and (entry is None or abs(planned - entry) > 1e-5 * max(1.0, abs(entry))):
         hlines.append({"price": planned, "color": BLUE, "style": "dotted", "text": f"План входа {fmt.fmt_price(planned)}", "title": "ПЛАН", "width": 2})
     base, risk = (entry if entry is not None else planned), None
@@ -256,7 +273,7 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
         "title": clean_text(f"{trade['coin']} {meta.get('interval', '')} · {fmt.SIDE_RU.get(trade['side'], trade['side'])} · {fmt.STATUS_RU.get(trade['status'], trade['status'])}"),
         "trade_id": trade["id"], "interval_ms": iv, "snapshot_last_t": snapshot_last,
         # ось времени - в поясе ПК: окно графика прибавляет это смещение ко всем меткам (одно на график: у оси не бывает «повторного часа» перехода на зимнее время)
-        "tz_offset_ms": fmt.local_offset_ms(signal_ms if signal_ms is not None else snapshot_last), "tz_label": fmt.tz_label(signal_ms if signal_ms is not None else snapshot_last),
+        "tz_offset_ms": fmt.local_offset_ms(signal_ms if signal_ms is not None else snapshot_last),
         "bars": bars, "helper": helper, "trade_markers": trade_markers, "setup_markers": setup_markers,
         "boxes": boxes, "segments": segments, "hlines": hlines, "vlines": vlines,
         "visible": [max(first_t, (snap_t(signal_ms) if signal_ms else snapshot_last) - 45 * iv), (min(grid_end, snap_t(exit_ms) + 40 * iv) if aborted else grid_end) + 2 * iv],

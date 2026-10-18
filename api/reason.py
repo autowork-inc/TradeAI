@@ -4,7 +4,6 @@
 прогнозов. Неизвестная стратегия - общий текст со всеми полями meta, чтобы новая стратегия не ломала просмотр сделки.
 """
 
-from datetime import datetime, timezone
 from typing import Any
 
 SIDE_RU = {"long": "лонг", "short": "шорт"}
@@ -18,9 +17,11 @@ def fmt_price(v: float | None) -> str:
 
 
 def fmt_ms(ms: Any) -> str:
+    """Момент времени в тексте - метка `{ts:<мс UTC>}`: часового пояса сервер в строку не пишет, клиент подставляет время ПК
+    (`client/tradeai_client/fmt.py::localize_utc_text`; для MCP - `mcp_server/analytics.py::plain_time_tokens`)."""
     if isinstance(ms, bool) or not isinstance(ms, (int, float)):
         return "—"
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"{{ts:{int(ms)}}}"
 
 
 def _num(meta: dict[str, Any], key: str) -> float | None:
@@ -129,7 +130,7 @@ def _killzones(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tu
     short = trade["side"] == "short"
     hi, lo, session = _num(meta, "asia_high"), _num(meta, "asia_low"), {"london": "London", "new_york": "New York"}.get(meta.get("session"), "—")
     steps = [
-        f"1. Диапазон Азии (00:00-07:00 UTC): High {fmt_price(hi)}, Low {fmt_price(lo)}.",
+        f"1. Диапазон Азии ({{hm:0}}-{{hm:420}}): High {fmt_price(hi)}, Low {fmt_price(lo)}.",
         f"2. Killzone {session}: ложный пробой {'Asia High' if short else 'Asia Low'} - прокол и закрытие обратно в диапазоне.",
         f"3. {_entry_line(trade)}",
     ]

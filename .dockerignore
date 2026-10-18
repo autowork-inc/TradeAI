@@ -13,3 +13,6 @@ requirements-dev.txt
 backups
 client
 mcp_server
+analyzer/.venv
+analyzer/tests
+analyzer/data

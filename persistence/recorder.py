@@ -8,6 +8,7 @@
 Порядок записей сохраняется (FIFO): строка сделки раньше её закрытий и снапшота - иначе внешний ключ не сойдётся.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -92,6 +93,16 @@ class MemoryRecorder:
 
     def state_event(self, row: Row) -> None:
         self.state_events.append(dict(row))
+
+    async def replace_closes(self, trade_row: Row, remove_seqs: Sequence[int], add: Sequence[Row]) -> None:
+        """Эталон `PgResyncStore` (ретро-сверка): удалить закрытия по seq, добавить новые, записать строку сделки."""
+        tid = trade_row["id"]
+        self.closes = [c for c in self.closes if not (c["trade_id"] == tid and int(c["seq"]) in set(remove_seqs))]
+        self.closes += [dict(a) for a in add]
+        self.trade(trade_row)
+
+    async def mark_attempt(self, trade_row: Row) -> None:
+        self.trade(trade_row)
 
 
 # ----------------------------------------------------------------------------- журнал событий -> state_events

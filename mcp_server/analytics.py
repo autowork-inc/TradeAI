@@ -5,9 +5,10 @@
 """
 
 import math
+import re
 import sys
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -248,4 +249,20 @@ def reason_for(row: dict[str, Any], meta: dict[str, Any] | None, geometry: list[
         return {"title": f"{row['strategy_id']} · {row['side']} · {row['coin']}", "summary": "Снапшота сделки нет - причина входа не записана.", "facts": [], "geometry_labels": []}
     trade = {"strategy_id": row["strategy_id"], "strategy_name": row["strategy_name"], "side": row["side"], "coin": row["coin"],
              "planned_entry": row.get("planned_entry"), "sl": row.get("sl"), "tp": row.get("tp"), "entry_price": row.get("entry_price")}
-    return build_reason(jsonable(trade), meta, geometry or [])
+    return plain_time_tokens(build_reason(jsonable(trade), meta, geometry or []))
+
+
+_TS_TOKEN = re.compile(r"\{ts:(-?\d+)\}")
+_HM_TOKEN = re.compile(r"\{hm:(\d{1,4})\}")
+
+
+def plain_time_tokens(value: Any) -> Any:
+    """Метки времени `{ts:мс}` / `{hm:минуты}` из `api.reason` (сервер пояса не пишет) -> явный UTC для ИИ-аналитика: он не видит часов ПК пользователя."""
+    if isinstance(value, str):
+        value = _TS_TOKEN.sub(lambda m: datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), value)
+        return _HM_TOKEN.sub(lambda m: f"{int(m.group(1)) // 60:02d}:{int(m.group(1)) % 60:02d} UTC", value)
+    if isinstance(value, list):
+        return [plain_time_tokens(v) for v in value]
+    if isinstance(value, dict):
+        return {k: plain_time_tokens(v) for k, v in value.items()}
+    return value

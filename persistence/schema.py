@@ -177,6 +177,10 @@ COPY_SNAPSHOT = (
 SNAPSHOT_EXISTS = "SELECT 1 FROM trade_snapshots WHERE trade_id = $1"
 # Сверка при старте боевого контура (Блок 1, 2026-10-18): открытые боевые сделки и их уже записанные закрытия
 SELECT_OPEN_LIVE = f"SELECT {', '.join(TRADE_COLUMNS)} FROM trades WHERE mode = 'live' AND status = 'open' ORDER BY entry_time"
+# Ретро-сверка закрытых боевых сделок с Binance (live_resync): неизвестный выход или флаг gap_affected, попытка ещё не делалась (plan.resync пуст)
+SELECT_RESYNC = (f"SELECT {', '.join(TRADE_COLUMNS)} FROM trades WHERE mode = 'live' AND status = 'closed' "
+                 "AND (exit_reason = 'unknown' OR gap_affected) AND (plan IS NULL OR plan->'resync' IS NULL) ORDER BY entry_time")
+DELETE_CLOSES = "DELETE FROM trade_closes WHERE trade_id = $1 AND seq = ANY($2::int[])"
 SELECT_CLOSES_OF = ("SELECT trade_id, seq, ts, reason, qty, price, pnl, fees, gross_r FROM trade_closes "
                     "WHERE trade_id = ANY($1::text[]) ORDER BY trade_id, seq")
 ABORT_ORPHANS = (

@@ -21,7 +21,7 @@ RECONNECT_DELAYS = (1, 2, 4, 8, 15)  # секунды; после последн
 
 
 class ApiError(Exception):
-    """kind: auth (401) | throttled (429) | not_found (404) | server (5xx/503) | network | protocol | bad_request (422)."""
+    """kind: auth (401) | throttled (429) | not_found (404) | conflict (409) | server (5xx/503) | analyzer (анализатор недоступен/отказал) | network | protocol | bad_request (422)."""
 
     def __init__(self, kind: str, message: str, status: int | None = None):
         super().__init__(message)
@@ -33,6 +33,15 @@ _HINTS = {
     "throttled": "Слишком много неверных попыток: сервер временно блокирует вход. Подождите минуту.",
     "network": "Сервер недоступен. Проверьте адрес и порт (по умолчанию http://193.233.75.254:8001), доступ к порту в файрволе сервера и что контейнер api запущен (если задан адрес 127.0.0.1 - что запущен SSH-туннель).",
     "server": "Сервер API получил ошибку базы данных (shadow-run/postgres недоступны?). Смотрите ./deploy/shadow.sh logs api",
+}
+
+
+_ANALYZER_HINTS = {
+    "analyzer_unavailable": "Анализатор не запущен. На сервере: ./deploy/shadow.sh analyzer-up (бот и мониторинг работают как раньше).",
+    "analyzer_not_configured": "API не знает адрес анализатора (ANALYZER_URL): обновите docker-compose.yml на сервере и перезапустите api.",
+    "analyzer_timeout": "Анализатор не ответил вовремя. Смотрите ./deploy/shadow.sh logs analyzer",
+    "analyzer_auth_failed": "Анализатор отклонил секрет API (ANALYZER_TOKEN расходится с API_KEY): пересоздайте контейнеры api и analyzer.",
+    "analyzer_bad_response": "Анализатор вернул не JSON: смотрите ./deploy/shadow.sh logs analyzer",
 }
 
 
@@ -58,24 +67,35 @@ class ApiClient:
             await self._session.close()
 
     async def _get(self, path: str, params: list[tuple[str, str]] | None = None) -> Any:
+        return await self._request("GET", path, params)
+
+    async def _request(self, method: str, path: str, params: list[tuple[str, str]] | None = None, *, json_body: Any = None, data: bytes | None = None,
+                       content_type: str | None = None) -> Any:
         url = self._s.normalized_url + path
+        headers = {HEADER: self._s.api_key}
+        if content_type:
+            headers["Content-Type"] = content_type
         try:
-            async with self.session.get(url, params=params, headers={HEADER: self._s.api_key}) as resp:
+            async with self.session.request(method, url, params=params, headers=headers, json=json_body, data=data) as resp:
                 try:
                     body = await resp.json(content_type=None)
                 except (json.JSONDecodeError, aiohttp.ContentTypeError) as exc:
                     raise ApiError("protocol", f"Сервер вернул не JSON (HTTP {resp.status}): адрес указывает на API?", resp.status) from exc
         except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
             raise ApiError("network", _HINTS["network"]) from exc
-        if resp.status == 200:
+        if resp.status in (200, 201, 202):
             return body
         detail = _detail(body)
+        if detail in _ANALYZER_HINTS:  # отказ анализатора через прокси API: это не «неверный ключ» и не «ошибка БД»
+            raise ApiError("analyzer", _ANALYZER_HINTS[detail], resp.status)
         if resp.status == 401:
             raise ApiError("auth", _HINTS["auth"], 401)
         if resp.status == 429:
             raise ApiError("throttled", _HINTS["throttled"], 429)
         if resp.status == 404:
             raise ApiError("not_found", f"Не найдено: {detail or path}", 404)
+        if resp.status == 409:
+            raise ApiError("conflict", detail or "Конфликт состояния (повторите позже)", 409)
         if resp.status == 422:
             raise ApiError("bad_request", f"Сервер отклонил параметры запроса: {detail}", 422)
         raise ApiError("server", f"{_HINTS['server']} (HTTP {resp.status}: {detail})", resp.status)
@@ -102,6 +122,26 @@ class ApiClient:
 
     async def snapshot(self, trade_id: str) -> dict[str, Any]:
         return await self._get(f"/api/trades/{quote(trade_id, safe=':')}/snapshot")
+
+    # ---- Strategy Quant Analyzer (через прокси основного API: /api/analysis/*)
+
+    async def analysis_status(self) -> dict[str, Any]:
+        return await self._get("/api/analysis/status")
+
+    async def analysis_runs(self, limit: int = 10) -> dict[str, Any]:
+        return await self._get("/api/analysis/runs", [("limit", str(limit))])
+
+    async def analysis_start(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", "/api/analysis/runs", json_body=body)
+
+    async def analysis_job(self, job_id: str) -> dict[str, Any]:
+        return await self._get(f"/api/analysis/runs/{quote(job_id, safe='')}")
+
+    async def analysis_report(self, job_id: str) -> dict[str, Any]:
+        return await self._get(f"/api/analysis/runs/{quote(job_id, safe='')}/report")
+
+    async def analysis_dry_run(self, run_id: str, recommendation_ids: list[str] | None = None) -> dict[str, Any]:
+        return await self._request("POST", "/api/analysis/dry-run", json_body={"run_id": run_id, "recommendation_ids": recommendation_ids})
 
 
 class LiveStateStream:

@@ -77,6 +77,8 @@ UNKNOWN_OUTCOME = (NetworkError, HttpServerError)  # запрос мог дой�
 TRIGGERED = ("TRIGGERING", "TRIGGERED", "FINISHED")  # algo-ордер сработал (порождённый ордер исполняется/исполнен)
 STATE_VERSION = 1
 LIVE_ID_SUFFIX = ":live"  # id боевой сделки в БД = `<signal_id>:live`: у теневой сделки с тем же signal_id своя строка (mode='shadow'), upsert её не затрёт
+MANUAL_EXIT = "manual_binance"  # причина выхода: позицию (или её часть) закрыли руками на Binance; цена и комиссия - из userTrades
+FILLS_MAX = 100  # потолок исполнений в `plan.fills` одной сделки (JSONB)
 LEG_SOURCES = ("unknown", "last_tick", "trigger", "exchange")  # источник цены выхода, от худшего к лучшему; у сделки - худший из источников её закрытий
 MT5_EVENT_KINDS = {"opened": "live_entry_filled", "protected": "live_protected", "partial_close": "live_partial_close", "be_armed": "live_be_armed",
                    "trail_moved": "live_trail_moved", "closed": "live_closed", "cancelled": "live_trade_cancelled",
@@ -154,6 +156,7 @@ class LiveTrade:
     legs_put: int = 0  # сколько закрытий уже поставлено в очередь записи в БД
     db_open: bool = False  # строка сделки поставлена в очередь записи (после рестарта сбрасывается: пишем заново)
     recovered: bool = False  # сделка поднята из файла состояния: отсутствие исходного снапшота не роняет процесс
+    fills: list[dict[str, Any]] = field(default_factory=list)  # фактические исполнения счёта по сделке (userTrades), собираются при закрытии; уходят в `plan.fills`
 
     @property
     def trade_id(self) -> str:
@@ -796,20 +799,43 @@ class LiveExecutionEngine:
         rest = trade.remaining - amt - fired_qty  # уменьшение позиции, не объяснённое сработавшими уровнями
         if rest > _EPS:
             if stop_hit:
-                reason = trade.stop_kind
                 price, source = (stop_state.actual_price, "exchange") if stop_state.actual_price > 0 else (trade.stop_price, "trigger")
+                self._add_leg(trade, trade.stop_kind, rest, price, source)
             else:
-                reason = "unknown"
-                price, source = self._fallback_price(trade)
-            self._add_leg(trade, reason, rest, price, source)
+                await self._add_manual_legs(trade, rest)
         return stop_hit
+
+    async def _add_manual_legs(self, trade: LiveTrade, rest: float) -> None:
+        """Позицию уменьшили вне бота (вручную на Binance): объём `rest` берётся из фактических исполнений счёта (`GET /fapi/v1/userTrades` от входа
+        до сейчас), закрывающая сторона, от самых свежих к старым (ордера бота уже учтены сработавшими уровнями/стопом, ручное закрытие - последнее
+        событие). Закрытие `manual_binance`: средневзвешенная цена, фактическая комиссия (если в USDT), источник `exchange` - сделка остаётся в
+        статистике. Чего биржа не отдала, закрывается как раньше (`unknown`, последняя цена / цена входа), такая часть выводит сделку из R-статистики."""
+        close_side = "SELL" if trade.plan.direction is Direction.LONG else "BUY"
+        since = trade.fill_ms if trade.fill_ms is not None else trade.created_ms
+        fills = [u for u in await self.client.user_trades(trade.plan.symbol, since, self._now()) if u.side == close_side]
+        got = notional = commission = 0.0
+        usdt, ts = True, 0
+        for u in reversed(fills):
+            if got >= rest - _EPS:
+                break
+            q = min(u.qty, rest - got)
+            got, notional, commission, ts = got + q, notional + q * u.price, commission + u.commission * q / u.qty, max(ts, u.time_ms)
+            usdt = usdt and u.commission_asset in ("USDT", "")
+        if got > _EPS:
+            self._add_leg(trade, MANUAL_EXIT, got, notional / got, "exchange", ts=ts, fee_out=commission if usdt else None)
+            self._emit_trade(trade, "live_manual_close", {"qty": got, "price": notional / got, "fee": commission if usdt else None, "remaining": trade.remaining - got})
+        if rest - got > _EPS:
+            price, source = self._fallback_price(trade)
+            self._add_leg(trade, "unknown", rest - got, price, source)
 
     def _exit_reason(self, trade: LiveTrade, stop_hit: bool) -> str:
         if stop_hit:
             return trade.stop_kind
         if trade.levels and trade.levels[-1].done and trade.plan.exit_plan.runner_frac <= _EPS:
             return "tp"
-        return "unknown"  # позицию закрыли вне бота (вручную) или биржа сняла ордера: PnL всё равно придёт в income
+        if trade.legs and trade.legs[-1]["reason"] == MANUAL_EXIT:
+            return MANUAL_EXIT  # последнее закрытие - руками на бирже, цена и комиссия из userTrades
+        return "unknown"  # позицию закрыли вне бота, а исполнений биржа не отдала: PnL всё равно придёт в income
 
     async def _apply_stop(self, trade: LiveTrade, amt: float) -> None:
         """Переводит стоп на бирже: безубыток (стоп на вход), трейлинг, размер = остаток позиции. Только в сторону прибыли."""
@@ -885,7 +911,18 @@ class LiveExecutionEngine:
             trade.remaining = 0.0
         await self._finish_closed(trade, reason, self._now())
 
+    async def _collect_fills(self, trade: LiveTrade) -> None:
+        """Фактические исполнения счёта по монете с момента отправки входа до закрытия (`userTrades`): клиент рисует по ним точные маркеры входа и выхода.
+        Исполнения других сделок по монете в окно не попадают: по монете одна позиция, окно - от ордера входа до закрытия этой сделки."""
+        since = trade.created_ms
+        out = []
+        for u in await self.client.user_trades(trade.plan.symbol, since, max(self._now(), since)):
+            out.append({"ts": u.time_ms, "side": u.side, "qty": u.qty, "price": u.price, "fee": u.commission, "fee_asset": u.commission_asset,
+                        "role": "entry" if u.side == trade.plan.side else "exit"})
+        trade.fills = out[:FILLS_MAX]
+
     async def _finish_closed(self, trade: LiveTrade, reason: str, now: int) -> None:
+        await self._collect_fills(trade)
         for cid in self._all_cids(trade):  # без позиции парные защитные ордера не нужны и опасны для следующей сделки по монете
             await self._cancel_algo(cid)
         self._emit_trade(trade, "live_closed", {"reason": reason, "filled_qty": trade.filled_qty, "fill_price": trade.fill_price,
@@ -1081,10 +1118,22 @@ class LiveExecutionEngine:
         px = self._last_price.get(trade.plan.symbol)
         return (px, "last_tick") if px is not None else (trade.fill_price, "unknown")
 
-    def _add_leg(self, trade: LiveTrade, reason: str, qty: float, price: float, source: str) -> None:
+    def _add_leg(self, trade: LiveTrade, reason: str, qty: float, price: float, source: str, *, ts: int | None = None, fee_out: float | None = None) -> None:
+        """`ts` - момент исполнения (иначе - сейчас), `fee_out` - фактическая комиссия выхода в USDT (иначе считается по ставке)."""
         if not (qty > _EPS and 0 < price < float("inf")):
             raise DataError(f"{trade.trade_id}: некорректное закрытие {reason!r}: объём {qty}, цена {price}")
-        trade.legs.append({"seq": len(trade.legs) + 1, "ts": self._now(), "reason": reason, "qty": qty, "price": price, "source": source})
+        leg = {"seq": len(trade.legs) + 1, "ts": self._now() if ts is None else ts, "reason": reason, "qty": qty, "price": price, "source": source}
+        if fee_out is not None:
+            leg["fee_out"] = fee_out
+        trade.legs.append(leg)
+
+    def _leg_money(self, trade: LiveTrade, side: float, leg: dict[str, Any]) -> tuple[float, float, float]:
+        """(грязный PnL, комиссия, чистый PnL) закрытия: комиссия выхода - фактическая (`fee_out`), если биржа её прислала, иначе по ставке."""
+        gross, fees, net = leg_pnl(side, trade.fill_price, leg["price"], leg["qty"], *self._fee_rates(trade))
+        if leg.get("fee_out") is not None:
+            fees = self._fee_rates(trade)[0] * trade.fill_price * leg["qty"] + leg["fee_out"]
+            net = gross - fees
+        return gross, fees, net
 
     def _fee_rates(self, trade: LiveTrade) -> tuple[float, float]:
         """(ставка входа, ставка выхода): вход post-only лимиткой - maker 0.02%, иначе taker 0.05%; выход всегда taker (стоп/тейк - рыночные, закрытие - рынок)."""
@@ -1099,7 +1148,7 @@ class LiveExecutionEngine:
 
     def _leg_row(self, trade: LiveTrade, leg: dict[str, Any]) -> dict[str, Any]:
         side = 1.0 if trade.plan.direction is Direction.LONG else -1.0
-        gross, fees, net = leg_pnl(side, trade.fill_price, leg["price"], leg["qty"], *self._fee_rates(trade))
+        gross, fees, net = self._leg_money(trade, side, leg)
         unit = self._risk_unit(trade)
         ra = None if unit is None else trade.filled_qty * unit
 
@@ -1117,7 +1166,7 @@ class LiveExecutionEngine:
         ra = None if unit is None else qty * unit
         gross = fees = net = 0.0
         for leg in trade.legs:
-            g, f, n = leg_pnl(side, trade.fill_price, leg["price"], leg["qty"], *self._fee_rates(trade))
+            g, f, n = self._leg_money(trade, side, leg)
             gross, fees, net = gross + g, fees + f, net + n
         done = bool(trade.legs)
         sources = [leg["source"] for leg in trade.legs]
@@ -1126,6 +1175,8 @@ class LiveExecutionEngine:
         plan_json: dict[str, Any] = {**p.exit_plan.describe(), "live": True, "fees_estimated": True, "fee_rates": {"entry": fee_in, "exit": fee_out}}
         if trade.adopted:
             plan_json["adopted"] = True
+        if trade.fills:
+            plan_json["fills"] = trade.fills  # реальные исполнения биржи: клиент рисует по ним маркеры (ts - мс UTC)
         if worst is not None:
             plan_json["exit_price_source"] = worst  # exchange | trigger (биржа не прислала actualPrice) | last_tick | unknown
             plan_json["exit_price_sources"] = sources

@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import math
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -87,6 +88,37 @@ async def fetch_open_live(db: Database) -> list[DbOpenTrade]:
         for c in await db.fetch(schema.SELECT_CLOSES_OF, [r["id"] for r in rows]):
             closes.setdefault(c["trade_id"], []).append({k: from_db(kinds[k], c[k]) for k in c.keys()})
     return [DbOpenTrade(r, tuple(closes.get(r["id"], ()))) for r in rows]
+
+
+async def fetch_resync_candidates(db: Database) -> list[DbOpenTrade]:
+    """Закрытые боевые сделки с `exit_reason='unknown'` или `gap_affected` (и без прежней попытки сверки) вместе с записанными закрытиями."""
+    rows = [{name: from_db(kind, r[name]) for name, kind in schema.TRADE_COLUMNS.items()} for r in await db.fetch(schema.SELECT_RESYNC)]
+    closes: dict[str, list[Row]] = {}
+    if rows:
+        kinds = {**schema.CLOSE_COLUMNS, "trade_id": "text"}
+        for c in await db.fetch(schema.SELECT_CLOSES_OF, [r["id"] for r in rows]):
+            closes.setdefault(c["trade_id"], []).append({k: from_db(kinds[k], c[k]) for k in c.keys()})
+    return [DbOpenTrade(r, tuple(closes.get(r["id"], ()))) for r in rows]
+
+
+class PgResyncStore:
+    """Запись результатов ретро-сверки: удаление неточных закрытий, новые закрытия и итоговая строка сделки - ОДНОЙ транзакцией."""
+
+    def __init__(self, db: Database):
+        self._db = db
+
+    async def replace_closes(self, trade_row: Row, remove_seqs: Sequence[int], add: Sequence[Row]) -> None:
+        async with self._db.pool.acquire() as conn:
+            async with conn.transaction():
+                if remove_seqs:
+                    await conn.execute(schema.DELETE_CLOSES, trade_row["id"], list(remove_seqs))
+                for leg in add:
+                    await conn.execute(schema.INSERT_CLOSE, *to_args(leg, schema.CLOSE_COLUMNS))
+                await conn.execute(schema.UPSERT_TRADE, *to_args(trade_row, schema.TRADE_COLUMNS))
+
+    async def mark_attempt(self, trade_row: Row) -> None:
+        async with self._db.pool.acquire() as conn:
+            await conn.execute(schema.UPSERT_TRADE, *to_args(trade_row, schema.TRADE_COLUMNS))
 
 
 def to_args(row: Row, columns: dict[str, str]) -> list[Any]:

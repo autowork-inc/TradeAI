@@ -359,3 +359,13 @@ def test_current_coins_adds_universe_coins_from_freshest_snapshot_and_ignores_ga
     (live / UNIVERSE_FILE).write_text("{broken", encoding="utf-8")
     assert read_universe_coins([live, shadow]) == ["BTCUSDT", "OLDUSDT"]  # нечитаемый файл пропускается, API не падает
     assert read_universe_coins([None, Path(tmp_path / "none")]) == []
+
+
+def test_reason_times_are_machine_tokens_without_a_zone_label():
+    """Сервер не пишет часовой пояс в строки (2026-10-18): момент времени - `{ts:мс UTC}`, часы сессии - `{hm:минуты UTC}`; время ПК подставляет клиент."""
+    from api.reason import fmt_ms
+
+    assert fmt_ms(1_790_000_000_000) == "{ts:1790000000000}" and fmt_ms(None) == "—" and fmt_ms(True) == "—"
+    text = build_reason({"strategy_id": "ICT_Killzones", "side": "short", "coin": "BTCUSDT", "planned_entry": None, "sl": None, "tp": None, "entry_price": None},
+                        {"asia_high": 101.0, "asia_low": 99.0, "session": "london", "interval": "15m"}, [])["summary"]
+    assert "{hm:0}-{hm:420}" in text and "UTC" not in text

@@ -27,7 +27,7 @@ RUN_FILES = ("docker-compose.yml", "Dockerfile", ".dockerignore", "requirements.
              "README.md", "deploy/shadow.sh", "deploy/apply.sh")
 FULL_ONLY = (".env",)
 EXCLUDED_PARTS = {"__pycache__", ".venv", ".git", "tests", ".pytest_cache", "data", "logs", "backups", "node_modules", "algo_live", "client", "mcp_server"}
-EXTRA_DOCKERFILES = ("api/Dockerfile",)  # образы дополнительных сервисов; контекст сборки у всех - корень проекта
+EXTRA_DOCKERFILES = ("api/Dockerfile", "analyzer/Dockerfile")  # образы дополнительных сервисов; контекст сборки у всех - корень проекта
 FORBIDDEN_NAMES = {".env", ".env.shadow"}  # в shadow-архиве недопустимы
 FORBIDDEN_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 EXECUTABLE = {"deploy/shadow.sh", "deploy/apply.sh"}

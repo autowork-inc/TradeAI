@@ -8,7 +8,8 @@ STATUS_RU = {"closed": "Закрыта", "open": "Открыта", "pending_limi
              "cancelled": "Отменена", "aborted": "Прервана"}
 EXIT_RU = {"sl": "Стоп", "be": "Безубыток", "trail": "Трейлинг", "tp": "Тейк", "timeout": "Таймаут", "process_restart": "Прервана (Рестарт бота)",
            "scale_1r": "+1R (50%)", "scale_2r": "+2R", "scale_3r": "+3R (40%)", "ttl": "Срок заявки", "invalidated": "Сетап отменён", "tp_before_fill": "Цена ушла до входа",
-           "impulse_bar": "Импульсная свеча", "closed_offline": "Закрыта без бота (сверка)"}
+           "impulse_bar": "Импульсная свеча", "closed_offline": "Закрыта без бота (сверка)",
+           "manual_binance": "Закрыта вручную (Binance)"}
 SIDE_RU = {"long": "Лонг", "short": "Шорт"}
 # strategy_id -> подпись. Пять стратегий мульти-стратегийного Shadow (с 2026-10-11) и прежние имена («smc», «breakout») - сделки до этой даты.
 STRATEGY_RU = {"SMC_Pro_Trend": "SMC Pro Trend", "SMC_Counter_Trend": "SMC Counter Trend", "OBI_Breakout": "OBI Breakout",
@@ -114,25 +115,24 @@ def local_offset_ms(ms: int) -> int:
     return 0 if off is None else int(off.total_seconds() * 1000)
 
 
-def tz_label(ms: int) -> str:
-    """Подпись пояса ПК на момент `ms`: «UTC+3», «UTC-4:30», «UTC»."""
-    off = local_offset_ms(ms) // 60_000
-    if off == 0:
-        return "UTC"
-    sign, off = ("+" if off > 0 else "-"), abs(off)
-    return f"UTC{sign}{off // 60}" + (f":{off % 60:02d}" if off % 60 else "")
-
-
-_UTC_STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC")
+_TS_TOKEN = re.compile(r"\{ts:(-?\d+)\}")  # момент времени из текстов сервера (api/reason.py): миллисекунды UTC
+_HM_TOKEN = re.compile(r"\{hm:(\d{1,4})\}")  # время суток UTC в минутах от 00:00 (часы сессии)
+_UTC_STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC")  # метки прежних версий сервера
 
 
 def localize_utc_text(text: str) -> str:
-    """Метки «2026-09-21 10:00 UTC» в текстах сервера (api/reason.py) -> время ПК «21.09.2026 13:00 UTC+3». Прочий текст не меняется
-    (правила вида «00:00-07:00 UTC» - это часы сессии по UTC, а не момент времени: их шаблон не совпадает и они остаются как есть)."""
-    def local(m: re.Match) -> str:
-        ms = int(datetime(*(int(g) for g in m.groups()), tzinfo=timezone.utc).timestamp() * 1000)
-        return f"{fmt_ms_local(ms, '%d.%m.%Y %H:%M')} {tz_label(ms)}"
-    return _UTC_STAMP.sub(local, text)
+    """Метки времени в текстах сервера -> время ПК без подписи пояса: `{ts:мс}` -> «21.09.2026 13:00», `{hm:минуты}` (часы сессии по UTC) -> «03:00»
+    (по смещению ПК на сегодня). Метки вида «2026-09-21 10:00 UTC» (сервер до 2026-10-18) переводятся так же."""
+    def stamp(ms: int) -> str:
+        return fmt_ms_local(ms, "%d.%m.%Y %H:%M")
+
+    def hm(m: re.Match) -> str:
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        return fmt_ms_local(now - now % 86_400_000 + int(m.group(1)) * 60_000, "%H:%M")
+
+    text = _TS_TOKEN.sub(lambda m: stamp(int(m.group(1))), text)
+    text = _HM_TOKEN.sub(hm, text)
+    return _UTC_STAMP.sub(lambda m: stamp(int(datetime(*(int(g) for g in m.groups()), tzinfo=timezone.utc).timestamp() * 1000)), text)
 
 
 def fmt_ms_local(ms: int | None, pattern: str = "%d.%m %H:%M") -> str:

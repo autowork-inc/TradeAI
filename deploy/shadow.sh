@@ -11,6 +11,8 @@
 #   ./deploy/shadow.sh psql      # консоль SQL
 #   ./deploy/shadow.sh up-live   # БОЕВОЙ режим (shadow-live вместо shadow-run): реальные ордера на Binance, см. docker-compose.yml и .env.shadow.example
 #   ./deploy/shadow.sh api       # поднять API мониторинга, если он не работает (то же делают up, up-live и status)
+#   ./deploy/shadow.sh analyzer-init  # Strategy Quant Analyzer: пароль роли analyzer_ro (.env.shadow) + SQL-роль в PostgreSQL (идемпотентно)
+#   ./deploy/shadow.sh analyzer-up    # собрать и запустить анализатор (профиль analytics; бот не затрагивается); analyzer-down - остановить
 #   ./deploy/shadow.sh down      # остановить (данные БД и журнал СОХРАНЯЮТСЯ)
 #
 # Что скрипт НЕ делает: не трогает live-run и ключи биржи (в архиве Shadow их нет и быть не должно), не публикует порт БД наружу,
@@ -88,6 +90,27 @@ ensure_api_key() {
     printf 'API_KEY=%s\n' "$key" >> "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     echo "В $ENV_FILE создан ключ API мониторинга (показать: ./deploy/shadow.sh apikey)."
+}
+
+# Strategy Quant Analyzer (analyzer/, профиль analytics): пароль роли только на чтение и сама роль. Бот и его контейнеры не затрагиваются.
+ensure_analyzer_password() {
+    if grep -q '^ANALYZER_DB_PASSWORD=.\{16,\}' "$ENV_FILE"; then
+        return
+    fi
+    sed -i '/^ANALYZER_DB_PASSWORD=$/d' "$ENV_FILE"
+    pw="$(rand_hex 24)"
+    umask 077
+    printf 'ANALYZER_DB_PASSWORD=%s\n' "$pw" >> "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    echo "В $ENV_FILE создан пароль роли analyzer_ro (только чтение БД)."
+}
+
+apply_analyzer_role() {
+    [ -f analyzer/sql/001_analyzer_ro.sql ] || { echo "ОШИБКА: нет analyzer/sql/001_analyzer_ro.sql (архив собран без анализатора?)" >&2; exit 1; }
+    $DC --profile live ps --status running --services 2>/dev/null | grep -qx postgres || { echo "ОШИБКА: postgres не запущен (./deploy/shadow.sh up)." >&2; exit 1; }
+    pw="$(grep '^ANALYZER_DB_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)"
+    $DC --profile live exec -T postgres psql -U tradeai -d tradeai -v ON_ERROR_STOP=1 -v analyzer_password="$pw" -f - < analyzer/sql/001_analyzer_ro.sql >/dev/null
+    echo "Роль analyzer_ro применена (SELECT на trades, trade_closes, trade_snapshots, state_events; read-only, REPEATABLE READ)."
 }
 
 cmd="${1:-up}"
@@ -168,10 +191,10 @@ case "$cmd" in
         check_docker; ensure_env
         svc="${2:-shadow-run}"
         case "$svc" in
-            shadow-run|shadow-live|api|postgres) ;;
-            *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | shadow-live | api | postgres)" >&2; exit 2 ;;
+            shadow-run|shadow-live|api|postgres|analyzer) ;;
+            *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | shadow-live | api | postgres | analyzer)" >&2; exit 2 ;;
         esac
-        $DC --profile live logs -f --tail 50 "$svc"
+        $DC --profile live --profile analytics logs -f --tail 50 "$svc"
         ;;
     apikey)
         check_docker; ensure_env
@@ -214,13 +237,38 @@ case "$cmd" in
         ensure_api
         $DC --profile live ps api
         ;;
+    analyzer-init)
+        check_docker; ensure_env
+        ensure_analyzer_password
+        apply_analyzer_role
+        ;;
+    analyzer-up)
+        check_docker; ensure_env
+        ensure_analyzer_password
+        apply_analyzer_role
+        echo "== Сборка и запуск analyzer (бот не перезапускается)"
+        $DC --profile live --profile analytics up -d --build analyzer
+        i=0
+        while [ "$i" -lt 24 ]; do
+            $DC --profile live --profile analytics ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | grep -q '^analyzer running healthy' && break
+            $DC --profile live --profile analytics ps --format '{{.Service}} {{.State}}' 2>/dev/null | grep -q '^analyzer exited' && { echo "ОШИБКА: analyzer остановился:" >&2; $DC --profile live --profile analytics logs --tail 40 analyzer >&2; exit 1; }
+            i=$((i + 1)); sleep 5
+        done
+        $DC --profile live --profile analytics ps analyzer
+        echo "Готово. Лог: ./deploy/shadow.sh logs analyzer. API бота проксирует /api/analysis/* к анализатору (Monitor -> вкладка Analysis)."
+        ;;
+    analyzer-down)
+        check_docker; ensure_env
+        $DC --profile live --profile analytics stop analyzer
+        echo "Анализатор остановлен (том analyzer_data с отчётами сохранён)."
+        ;;
     down)
         check_docker; ensure_env
         $DC --profile live stop api shadow-run shadow-live postgres
         echo "Остановлено. Данные БД (том pgdata) и журнал ./data/shadow сохранены. Запуск: ./deploy/shadow.sh up"
         ;;
     *)
-        echo "Использование: $0 {up|up-live|status|api|logs [сервис]|stats|backup|psql|apikey|down}" >&2
+        echo "Использование: $0 {up|up-live|status|api|logs [сервис]|stats|backup|psql|apikey|analyzer-init|analyzer-up|analyzer-down|down}" >&2
         exit 2
         ;;
 esac

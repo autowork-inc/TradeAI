@@ -17,6 +17,9 @@
 #      (для live - `up-live --yes`: подтверждение REAL заменено явным LIVE_ALLOW_MAINNET=true / USE_TESTNET=true в .env.shadow, они обязательны).
 #   4. Проверка здоровья: контейнер running, «пульс» свежее запуска, в логе нет Traceback/CRITICAL/ConfigError. Провал -> автоматический откат
 #      на prev.tar.gz и перезапуск прежней версии (код 1).
+#   5. После УСПЕШНОГО (не отложенного) применения - Strategy Quant Analyzer: `shadow.sh analyzer-up` (пароль роли analyzer_ro в .env.shadow, SQL-роль,
+#      сборка и запуск контейнера профиля analytics). Он изолирован: его сбой НЕ откатывает бота (только предупреждение в логе; шаг 9 auto_deploy его проверяет).
+#      Отключить: APPLY_ANALYZER=false (окружение или .env.shadow).
 #   Данные (БД, ./data, ./logs, .env*) не трогаются. Сборка образа не удалась -> прежний контейнер продолжает работать, файлы возвращаются.
 set -eu
 
@@ -96,6 +99,15 @@ healthy() {  # $1 = live|shadow, $2 = маркер времени запуска
     return 1
 }
 
+deploy_analyzer() {  # изолированный сервис: любой сбой - предупреждение, бот и его откат не затрагиваются
+    flag="${APPLY_ANALYZER:-$(env_value APPLY_ANALYZER)}"
+    case "${flag:-true}" in false|0|no|off) log "анализатор: автоуправление выключено (APPLY_ANALYZER)"; return 0 ;; esac
+    [ -f analyzer/Dockerfile ] || { log "анализатор: в архиве нет analyzer/Dockerfile - пропуск"; return 0; }
+    log "анализатор: пароль роли, SQL-роль, сборка и запуск (shadow.sh analyzer-up)"
+    if ./deploy/shadow.sh analyzer-up; then log "анализатор запущен"; else log "ПРЕДУПРЕЖДЕНИЕ: анализатор не запустился (бот работает; ./deploy/shadow.sh logs analyzer)" >&2; fi
+    return 0
+}
+
 unpack() {  # $1 = архив
     tar --force-local -xzf "$1" -C "$ROOT"
     chmod +x deploy/shadow.sh deploy/apply.sh
@@ -160,6 +172,7 @@ apply_archive() {  # $1 = архив, $2 = force|normal
         mv -f "$archive" "$INCOMING/applied/$ARCHIVE_NAME" 2>/dev/null || true
         rm -f "$archive.sha256" "$marker"
         log "ГОТОВО: версия ${sha%"${sha#????????????}"} применена, контур $contour"
+        deploy_analyzer
         return 0
     fi
     log "ПРОВАЛ применения: откат на прежнюю версию" >&2

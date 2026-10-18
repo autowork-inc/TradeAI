@@ -173,7 +173,7 @@ def test_chart_labels_are_one_or_two_characters_and_details_go_to_the_timeline(f
     assert [e["code"] for e in tl].count("В") == 1 and {"С", "CH", "БУ"} - {e["code"] for e in tl} <= {"БУ"}
     texts = " | ".join(e["text"] for e in tl)
     assert "Сигнал стратегии" in texts and "Вход " in texts and "свип" in texts and "CHoCH" in texts and "Трейлинг" in texts
-    assert all(e["time"].split()[-1].startswith("UTC") for e in tl) and len(tl) == len(sp["trade_markers"]) + len(sp["setup_markers"]) + 1  # пояс ПК: «UTC+3»
+    assert all("UTC" not in e["time"] for e in tl) and len(tl) == len(sp["trade_markers"]) + len(sp["setup_markers"]) + 1  # время ПК без подписи пояса
 
 
 def test_aborted_trade_gets_a_restart_marker_and_candles_continue_to_now(fx):

@@ -32,6 +32,8 @@ class Settings:
     port: int = 8000
     auth_max_failures: int = 10  # неверных ключей с одного адреса за auth_window_s, после чего 429
     auth_window_s: float = 60.0
+    analyzer_url: str = ""  # http://analyzer:8000 (внутренняя сеть compose); пусто - прокси /api/analysis/* отвечает 503 analyzer_not_configured
+    analyzer_token: str = ""  # общий секрет с анализатором (X-Analyzer-Token); пусто - берётся api_key
 
     def __post_init__(self) -> None:
         parts = urlsplit(self.database_url)
@@ -45,6 +47,10 @@ class Settings:
             raise ApiConfigError("poll_interval_s > 0, keepalive_s >= poll_interval_s, state_window_days >= 1")
         if self.auth_max_failures < 1 or self.auth_window_s <= 0:
             raise ApiConfigError("auth_max_failures >= 1 и auth_window_s > 0")
+        if self.analyzer_url:
+            u = urlsplit(self.analyzer_url)
+            if u.scheme not in ("http", "https") or not u.hostname:
+                raise ApiConfigError("ANALYZER_URL должен иметь вид http://analyzer:8000")
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -59,5 +65,6 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         database_url=e.get("DATABASE_URL", ""), api_key=e.get("API_KEY", ""),
         shadow_data_dir=Path(e.get("SHADOW_DATA_DIR", "/app/data/shadow")),
         live_data_dir=Path(e["LIVE_DATA_DIR"]) if e.get("LIVE_DATA_DIR") else None, coins=coins, poll_interval_s=poll, port=port,
+        analyzer_url=e.get("ANALYZER_URL", ""), analyzer_token=e.get("ANALYZER_TOKEN", ""),
         host=e.get("API_HOST", "0.0.0.0"),  # в контейнере - все интерфейсы (наружу порт публикует compose); локально задайте 127.0.0.1
     )

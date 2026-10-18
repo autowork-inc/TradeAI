@@ -39,8 +39,8 @@ ARCHIVE = "trading_shadow.tar.gz"
 TIMEOUT = 20
 TOTAL = 9
 DC = "docker compose --env-file .env.shadow"
-REQUIRED_SERVICES = ("postgres", "shadow-run", "api")
-LIVE_REQUIRED_SERVICES = ("postgres", "shadow-live", "api")
+REQUIRED_SERVICES = ("postgres", "shadow-run", "api", "analyzer")  # analyzer - изолированный сервис профиля analytics (его поднимает apply.sh / analyzer-up)
+LIVE_REQUIRED_SERVICES = ("postgres", "shadow-live", "api", "analyzer")
 INCOMING = "trading_incoming"  # каталог на сервере для присланных архивов (его же читает cron: deploy/apply.sh --pending)
 EX_DEFERRED = 75  # deploy/apply.sh: обновление отложено до закрытия боевых позиций
 ENV_FILE = ".env.shadow"
@@ -270,7 +270,8 @@ def main(argv: list[str] | None = None) -> int:
             step(7, "Запуск профиля shadow (deploy/shadow.sh up)")
             run(cli, f"cd {d} && ./deploy/shadow.sh up", "запуск shadow")
             run(cli, f"cd {d} && chmod 600 .env.shadow && ./deploy/apply.sh --install-cron", "chmod .env.shadow, cron автоприменения")
-            ok("postgres + shadow-run + api запущены")
+            run(cli, f"cd {d} && ./deploy/shadow.sh analyzer-up", "запуск анализатора (пароль роли, SQL-роль, сборка)", check=False)  # сбой покажет шаг 9
+            ok("postgres + shadow-run + api запущены, анализатор запрошен")
 
         if deferred:  # старый код ещё работает: схему БД и логи нового кода проверять рано
             ok("проверка нового кода отложена вместе с обновлением")
@@ -296,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(a.health_wait)
         required = LIVE_REQUIRED_SERVICES if contour == "live" else REQUIRED_SERVICES
         svc = "shadow-live" if contour == "live" else "shadow-run"
-        _, ps = run(cli, f"cd {d} && {DC} --profile live ps --format '{{{{.Service}}}} {{{{.State}}}}'", "docker compose ps", quiet=True)
+        _, ps = run(cli, f"cd {d} && {DC} --profile live --profile analytics ps --format '{{{{.Service}}}} {{{{.State}}}}'", "docker compose ps", quiet=True)
         states = parse_services(ps)
         bad = {s: states.get(s, "нет") for s in required if states.get(s) != "running"}
         _, logs = run(cli, f"cd {d} && {DC} --profile live logs --no-color --tail 200 {svc}", f"логи {svc}", quiet=True)

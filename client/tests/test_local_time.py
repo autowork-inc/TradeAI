@@ -16,17 +16,8 @@ def local(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone()
 
 
-def test_offset_and_label_follow_the_os_time_zone():
-    off = local(MS).utcoffset().total_seconds() * 1000
-    assert fmt.local_offset_ms(MS) == off
-    label = fmt.tz_label(MS)
-    assert label.startswith("UTC") and (label == "UTC") == (off == 0)
-
-
-def test_tz_label_formats_half_hours_and_negative_offsets(monkeypatch):
-    for off_min, text in ((180, "UTC+3"), (-270, "UTC-4:30"), (330, "UTC+5:30"), (0, "UTC")):
-        monkeypatch.setattr(fmt, "local_offset_ms", lambda ms, o=off_min: o * 60_000)
-        assert fmt.tz_label(MS) == text
+def test_offset_follows_the_os_time_zone():
+    assert fmt.local_offset_ms(MS) == local(MS).utcoffset().total_seconds() * 1000
 
 
 def test_ms_and_iso_are_shown_in_local_time():
@@ -35,11 +26,10 @@ def test_ms_and_iso_are_shown_in_local_time():
     assert fmt.fmt_local(iso) == fmt.fmt_ms_local(MS)
 
 
-def test_utc_stamps_in_server_texts_are_localized_and_session_hours_are_not():
+def test_legacy_utc_stamps_in_server_texts_are_localized_without_a_label():
     stamp = datetime.fromtimestamp(MS / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    out = fmt.localize_utc_text(f"Свип в {stamp}. Диапазон Азии (00:00-07:00 UTC).")
-    assert stamp not in out and f"{local(MS).strftime('%d.%m.%Y %H:%M')} {fmt.tz_label(MS)}" in out
-    assert out.endswith("Диапазон Азии (00:00-07:00 UTC).")
+    out = fmt.localize_utc_text(f"Свип в {stamp}.")
+    assert stamp not in out and local(MS).strftime("%d.%m.%Y %H:%M") in out and "UTC" not in out
 
 
 def test_chart_axis_is_shifted_by_the_local_offset():
@@ -51,11 +41,11 @@ def test_chart_spec_carries_one_offset_and_local_panel_times(fx):
     snap = fx("snapshot_smc_short.json")
     sig = fmt.to_ms(snap["trade"]["signal_time"])
     spec = build_chart_spec(snap, None, now_ms=sig + 300 * 900_000)
-    assert spec["tz_offset_ms"] == fmt.local_offset_ms(sig) and spec["tz_label"] == fmt.tz_label(sig)
+    assert spec["tz_offset_ms"] == fmt.local_offset_ms(sig) and "tz_label" not in spec
     signal_event = next(e for e in spec["panel"]["timeline"] if e["text"] == "Сигнал стратегии")
-    assert signal_event["time"] == f"{fmt.fmt_ms_local(sig)} {fmt.tz_label(sig)}"
+    assert signal_event["time"] == fmt.fmt_ms_local(sig)
 
 
-@pytest.mark.parametrize("reason, text", [("impulse_bar", "Импульсная свеча"), ("closed_offline", "Закрыта без бота (сверка)")])
+@pytest.mark.parametrize("reason, text", [("impulse_bar", "Импульсная свеча"), ("closed_offline", "Закрыта без бота (сверка)"), ("manual_binance", "Закрыта вручную (Binance)")])
 def test_new_exit_reasons_have_russian_labels(reason, text):
     assert fmt.EXIT_RU[reason] == text

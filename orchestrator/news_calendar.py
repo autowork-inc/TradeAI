@@ -189,6 +189,11 @@ class NewsCalendar:
         self.events, self.loaded_ms = events, loaded
 
 
+def weekend_gate(trade_mode: str, enabled: bool) -> "WeekendGate | None":
+    """Фильтр выходных действует ТОЛЬКО при TRADE_MODE=live (деньги на бирже). В Shadow сигналы ищутся и симулируются и в сб-вс: статистика не теряет выходные."""
+    return WeekendGate() if enabled and trade_mode == "live" else None
+
+
 def is_weekend(ts_ms: int) -> bool:
     """Суббота 00:00 UTC ... воскресенье 23:59:59.999 UTC."""
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).weekday() >= 5

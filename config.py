@@ -199,7 +199,9 @@ NEWS_BLACKOUT_BEFORE_MS = 15 * 60_000  # новые сигналы задерж�
 NEWS_BLACKOUT_AFTER_MS = 15 * 60_000  # ...и 15 минут после
 NEWS_MAX_AGE_MS = 8 * 86_400_000  # календарь старше (недельный + запас) - фильтр новостей не блокирует (fail-open), в лог предупреждение
 NEWS_CACHE_NAME = ".news_calendar.json"  # последний удачный календарь в DATA_DIR
-WEEKEND_FILTER_ENABLED = os.environ.get("WEEKEND_FILTER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")  # суббота 00:00 - воскресенье 23:59 UTC
+# Ретроспективная сверка закрытых боевых сделок (exit_reason='unknown' / gap_affected) с userTrades Binance при старте TRADE_MODE=live (orchestrator/live_resync.py)
+RESYNC_CLOSED_TRADES = os.environ.get("RESYNC_CLOSED_TRADES", "true").strip().lower() not in ("0", "false", "no", "off")
+WEEKEND_FILTER_ENABLED = os.environ.get("WEEKEND_FILTER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")  # суббота 00:00 - воскресенье 23:59 UTC; действует ТОЛЬКО при TRADE_MODE=live
 USE_TESTNET = _env_bool("USE_TESTNET")  # ордера боевого контура идут на testnet; данные Shadow (свечи/тики) по-прежнему mainnet
 TESTNET_REST_URL = "https://testnet.binancefuture.com"
 LIVE_REST_URL = TESTNET_REST_URL if USE_TESTNET else REST_BASE_URL  # базовый адрес клиента ордеров (exchange/binance_live.py)

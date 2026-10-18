@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 from datetime import datetime, timezone
 
 import aiohttp
@@ -11,7 +12,7 @@ import pytest
 import config
 from orchestrator.core import Orchestrator, Route
 from orchestrator.journal import MemoryEventLog
-from orchestrator.news_calendar import (NewsCalendar, NewsEvent, NewsFetchError, WeekendGate, fetch_calendar, is_weekend, parse_calendar,
+from orchestrator.news_calendar import (NewsCalendar, NewsEvent, NewsFetchError, WeekendGate, fetch_calendar, weekend_gate, is_weekend, parse_calendar,
                                         symbol_currencies)
 from orchestrator.tracker import CLOSED, OPEN, VirtualTracker
 from orchestrator.types import Direction, Kind, Mode
@@ -234,3 +235,14 @@ def test_news_gate_in_the_orchestrator():
     (ev,) = orch.on_context(ctx(idx=bar, received=NFP + 1000))
     assert ev.kind == "skipped_filter" and ev.detail["filter"] == "news" and "Non-Farm" in ev.detail["reason"] and tr.trades == []
     assert isinstance(cal.events[0], NewsEvent)
+
+
+def test_weekend_filter_applies_only_in_live_mode():
+    assert isinstance(weekend_gate("live", True), WeekendGate)
+    assert weekend_gate("shadow", True) is None  # Shadow ищет сигналы и симулирует сделки и в сб-вс
+    assert weekend_gate("live", False) is None  # выключатель WEEKEND_FILTER_ENABLED
+
+
+def test_shadow_run_wires_weekend_gate_through_trade_mode():
+    src = (Path(__file__).resolve().parents[2] / "scripts" / "shadow_run.py").read_text(encoding="utf-8")
+    assert "weekend_gate(config.TRADE_MODE, config.WEEKEND_FILTER_ENABLED)" in src and "WeekendGate()" not in src

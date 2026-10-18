@@ -1,6 +1,7 @@
 """Мелкие переиспользуемые виджеты в одном стиле: карточки, KPI, «таблетки», горизонтальные полосы, столбцы кривой капитала."""
 
 import flet as ft
+import flet.canvas as cv
 
 from tradeai_client import fmt
 
@@ -110,3 +111,37 @@ def table_row(cells: list[ft.Control], *, widths: list[float | None], bgcolor: s
 def cell(text: str, *, color: str = TEXT, weight: ft.FontWeight | None = None, size: float = 13, align_right: bool = False) -> ft.Text:
     return ft.Text(text, color=color, weight=weight, size=size, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS,
                    text_align=ft.TextAlign.RIGHT if align_right else ft.TextAlign.LEFT)
+
+
+SERIES_COLORS = ("#4aa3ff", "#2bb673", "#d9a441", "#e05a5a", "#b07cf0", "#4cd1c7", "#f08a4b", "#9aa4b5")
+
+
+def line_chart(series: list[dict], *, width: float = 860, height: float = 260, x_label: str = "номер сделки", y_label: str = "накопленный R") -> ft.Control:
+    """Линейный график нескольких кривых (canvas, без внешних пакетов). series: [{"name", "color", "x": [...], "y": [...]}]; пустой список - подпись."""
+    drawable = [s for s in series if len(s["x"]) >= 2]
+    if not drawable:
+        return label("Нет кривых для отображения (включите хотя бы одну серию; нужно >= 2 сделок)")
+    left, bottom, top, right = 52.0, 22.0, 8.0, 12.0
+    xs = [x for s in drawable for x in s["x"]]
+    ys = [y for s in drawable for y in s["y"]] + [0.0]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    if y1 - y0 < 1e-9:
+        y1 = y0 + 1.0
+    if x1 - x0 < 1e-9:
+        x1 = x0 + 1.0
+    pw, ph = width - left - right, height - top - bottom
+    px = lambda x: left + (x - x0) / (x1 - x0) * pw  # noqa: E731
+    py = lambda y: top + (y1 - y) / (y1 - y0) * ph  # noqa: E731
+    muted = ft.Paint(color=BORDER, stroke_width=1, style=ft.PaintingStyle.STROKE)
+    shapes: list = [cv.Line(left, py(0.0), width - right, py(0.0), paint=ft.Paint(color=MUTED, stroke_width=1, style=ft.PaintingStyle.STROKE)),
+                    cv.Line(left, top, left, top + ph, paint=muted), cv.Line(left, top + ph, width - right, top + ph, paint=muted)]
+    tick = ft.TextStyle(size=10, color=MUTED)
+    for v in (y0, 0.0, y1):
+        shapes.append(cv.Text(2, py(v) - 7, f"{v:+.1f}".replace("-", "−") if v else "0", style=tick))
+    shapes.append(cv.Text(left, height - 14, f"{x0:g}", style=tick))
+    shapes.append(cv.Text(width - right - 30, height - 14, f"{x1:g} · {x_label}", style=tick, max_width=160))
+    for s in drawable:
+        pts = list(zip(s["x"], s["y"]))
+        elements = [cv.Path.MoveTo(px(pts[0][0]), py(pts[0][1]))] + [cv.Path.LineTo(px(x), py(y)) for x, y in pts[1:]]
+        shapes.append(cv.Path(elements, paint=ft.Paint(color=s["color"], stroke_width=2, style=ft.PaintingStyle.STROKE)))
+    return ft.Column([cv.Canvas(shapes, width=width, height=height), label(f"Ось Y — {y_label}", size=11)], spacing=2, tight=True)

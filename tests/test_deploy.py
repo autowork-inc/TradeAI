@@ -258,3 +258,53 @@ def test_apply_script_ships_in_the_archive_and_keeps_contour_without_interactive
     workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
     assert "scripts.deploy_pack --target shadow" in workflow and "StrictHostKeyChecking=yes" in workflow and "needs: test" in workflow
     assert "BINANCE_API" not in workflow and "METAAPI" not in workflow  # ключи биржи в CI не попадают
+
+
+# ================================================================================== Strategy Quant Analyzer (изоляция от бота)
+
+
+def test_analyzer_image_ships_to_the_server_without_tests_or_venv(tmp_path):
+    archive = deploy_pack.build_archive(tmp_path / "shadow.tar.gz", "shadow")
+    names = set(members(archive))
+    assert {"analyzer/Dockerfile", "analyzer/requirements.txt", "analyzer/main.py", "analyzer/app.py", "analyzer/current_params.json", "analyzer/sql/001_analyzer_ro.sql",
+            "api/analysis_proxy.py"} <= names
+    assert not any(n.startswith(("analyzer/tests/", "analyzer/.venv/")) for n in names)
+
+
+def test_analyzer_is_a_separate_internal_service_that_cannot_break_the_bot_deploy():
+    text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    block = service_block(text, "analyzer")
+    assert "dockerfile: analyzer/Dockerfile" in block and 'profiles: ["analytics"]' in block  # не входит в up / up-live / автодеплой (apply.sh)
+    assert "ports:" not in block and "BINANCE_API" not in block and "env_file" not in block  # наружу не смотрит, ключей биржи нет
+    assert "postgresql://analyzer_ro@postgres" in block and "ANALYZER_DB_PASSWORD: ${ANALYZER_DB_PASSWORD" in block and "postgresql://tradeai" not in block  # под ролью только на чтение, не под учёткой бота
+    assert "read_only: true" in block and "cap_drop" in block and "no-new-privileges" in block and "mem_limit: 1g" in block and "cpus: 1.0" in block
+    assert "analyzer_data:/data" in block and "analyzer_data:" in text.split("volumes:")[-1]
+    api = service_block(text, "api")
+    assert "ANALYZER_URL: http://analyzer:8000" in api and "ANALYZER_TOKEN: ${API_KEY" in api
+    for bot in ("shadow-run", "shadow-live"):
+        assert "analyzer" not in service_block(text, bot)
+    df = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "analyzer" not in df  # образ бота о нём не знает
+
+
+def test_analyzer_dockerfile_is_light_and_unprivileged():
+    df = (ROOT / "analyzer" / "Dockerfile").read_text(encoding="utf-8")
+    assert "USER app" in df and "COPY analyzer ./analyzer" in df and "COPY config.py" not in df and "COPY orchestrator" not in df and "COPY exchange" not in df
+    reqs = (ROOT / "analyzer" / "requirements.txt").read_text(encoding="utf-8")
+    assert "pandas" in reqs and "fastapi" in reqs and "psycopg" in reqs and "polars" not in reqs and "flet" not in reqs
+
+
+@pytest.mark.skipif(SH is None, reason="нужен sh")
+def test_shadow_script_has_analyzer_commands_and_apply_runs_it_after_a_successful_bot_deploy():
+    text = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8")
+    for cmd in ("analyzer-init)", "analyzer-up)", "analyzer-down)"):
+        assert cmd in text
+    apply = (ROOT / "deploy" / "apply.sh").read_text(encoding="utf-8")
+    assert "./deploy/shadow.sh analyzer-up" in apply and "APPLY_ANALYZER" in apply
+    ok_at, call_at = apply.index('ГОТОВО: версия'), apply.index("        deploy_analyzer")
+    assert ok_at < call_at < apply.index("ПРОВАЛ применения")  # только после успешного применения и проверки здоровья бота, не в ветке отката
+    fn = apply[apply.index("deploy_analyzer() {"):apply.index("unpack() {")]
+    assert "return 0" in fn and "exit" not in fn and "die " not in fn  # сбой анализатора не откатывает и не валит выкатку бота
+    ad = (ROOT / "scripts" / "auto_deploy.py").read_text(encoding="utf-8")
+    assert '"analyzer")' in ad and ad.count('"analyzer"') >= 2 and "--profile analytics ps" in ad  # шаг 9 проверяет анализатор
+    assert "printf 'ANALYZER_DB_PASSWORD=%s" + chr(92) + "n'" in text  # перевод строки записан литералом \n, а не настоящим переводом

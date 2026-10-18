@@ -49,7 +49,7 @@ from orchestrator.journal import JsonlEventLog
 from orchestrator.kline_feed import MultiFeed, SmcKlineFeed
 from orchestrator.microstructure import DepthFeed, MicroStructure
 from orchestrator.minute_bars import MarketEntryGuard, MinuteBars
-from orchestrator.news_calendar import NewsCalendar, WeekendGate, fetch_calendar
+from orchestrator.news_calendar import NewsCalendar, fetch_calendar, weekend_gate
 from orchestrator.mtf import MtfState
 from orchestrator.registry import NEEDS_MICRO, OBI_BREAKOUT, SHADOW_STRATEGIES, build_strategies, ensure_history_depth, plans_for, strategy_allowed
 from orchestrator.strategies import SMC_PRO_TREND
@@ -58,7 +58,7 @@ from orchestrator.tracker import VirtualTracker
 from orchestrator.universe import GroupConnector, Hooks, Universe, UniverseManager
 from orchestrator.types import Mode, Tick
 from persistence.db import Database, check_dsn
-from persistence.pg import PgRecorder, fetch_open_live
+from persistence.pg import PgRecorder, PgResyncStore, fetch_open_live, fetch_resync_candidates
 from persistence.recorder import RecordingEventLog
 from utils import ban_lock
 from utils.binance_rest import BinanceRest
@@ -221,6 +221,9 @@ async def shadow_main(opts: Options) -> None:
                                                    flush=recorder.flush if recorder is not None else None,
                                                    recorder=recorder,  # боевые сделки -> PostgreSQL (mode='live', id `<signal_id>:live`)
                                                    db_open=db_open)
+                    if db is not None and config.RESYNC_CLOSED_TRADES:  # однократно: старые сделки с exit_reason='unknown' / gap_affected -> по исполнениям Binance (userTrades)
+                        from orchestrator.live_resync import resync_closed_trades
+                        await resync_closed_trades(live.client, PgResyncStore(db), await fetch_resync_candidates(db), now_ms=int(time.time() * 1000))
                     sink = LiveMirrorSink(tracker, live)  # Shadow-трекер получает все сигналы как прежде; одобренные - ещё и боевой движок
                     held = tuple(s for s in live.open_symbols() if s not in crypto and s not in config.LIVE_MT5_SYMBOLS)
                     if held:  # боевая позиция по монете вне стартового набора: потоки свечей и тиков нужны СРАЗУ (сопровождение), новых сигналов по ней нет
@@ -229,8 +232,9 @@ async def shadow_main(opts: Options) -> None:
                         subscribed.update(held)
                 minutes = MinuteBars()  # 1m-свечи из тиков сделок: фильтр MARKET-входа во время импульса (orchestrator/minute_bars.py)
                 gates: list = [MarketEntryGuard(minutes)]
-                if config.WEEKEND_FILTER_ENABLED:
-                    gates.append(WeekendGate())  # суббота 00:00 - воскресенье 23:59 UTC: новых сигналов нет, открытые сделки ведутся как обычно
+                weekend = weekend_gate(config.TRADE_MODE, config.WEEKEND_FILTER_ENABLED)  # только TRADE_MODE=live; в Shadow выходные не блокируются
+                if weekend is not None:
+                    gates.append(weekend)  # суббота 00:00 - воскресенье 23:59 UTC: новых сигналов нет, открытые сделки ведутся как обычно
                 news = None
                 if config.NEWS_FILTER_ENABLED:  # High Impact ForexFactory: +-15 минут вокруг события новые сигналы по затронутым валютам не принимаются
                     news = NewsCalendar(lambda: fetch_calendar(session, config.NEWS_CALENDAR_URL, config.NEWS_TIMEOUT_S),

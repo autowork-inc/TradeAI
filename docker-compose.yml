@@ -219,6 +219,8 @@ services:
       API_KEY: ${API_KEY:-}
       SHADOW_DATA_DIR: /app/data/shadow
       LIVE_DATA_DIR: /app/data/live  # «пульс» боевого shadow-live; API берёт самый свежий из двух каталогов
+      ANALYZER_URL: http://analyzer:8000  # прокси /api/analysis/* -> Strategy Quant Analyzer (профиль analytics); контейнера нет - прокси отвечает 503 analyzer_unavailable
+      ANALYZER_TOKEN: ${API_KEY:-}  # общий секрет API и анализатора (заголовок X-Analyzer-Token); анализатор наружу не публикуется
     ports:
       - "${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000"
     volumes:
@@ -240,5 +242,50 @@ services:
       retries: 3
       start_period: 30s
 
+  # ------------------------------------------------------------------------------------------------------------------------------
+  # Strategy Quant Analyzer (2026-10-18, CLAUDE.md разд. 3.17): ОТДЕЛЬНЫЙ сервис математического анализа сделок (FastAPI + Pandas).
+  # Изоляция от бота: свой образ без кода бота и ключей биржи; профиль `analytics` (НЕ входит в up / up-live / автодеплой - его падение или
+  # пересборка не могут сорвать выкатку бота); порт наружу НЕ публикуется (его зовёт только основной api по внутренней сети);
+  # в БД бота - только SELECT ролью analyzer_ro (analyzer/sql/001_analyzer_ro.sql), снимок REPEATABLE READ + READ ONLY; свои данные
+  # (задания, отчёты, версии, календарь новостей) - SQLite в томе analyzer_data. Лимиты: 1 CPU, 1 ГБ, низкий приоритет воркера (nice 19).
+  # Запуск: ./deploy/shadow.sh analyzer-init (один раз: пароль роли + SQL), затем ./deploy/shadow.sh analyzer-up.
+  analyzer:
+    build:
+      context: .
+      dockerfile: analyzer/Dockerfile
+    profiles: ["analytics"]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://analyzer_ro@postgres:5432/tradeai  # без пароля: его достраивает analyzer/config.py из ANALYZER_DB_PASSWORD (с кодированием)
+      ANALYZER_DB_PASSWORD: ${ANALYZER_DB_PASSWORD:-}  # пусто -> анализатор не стартует (код 3): ./deploy/shadow.sh analyzer-init
+      ANALYZER_TOKEN: ${API_KEY:-}
+      ANALYZER_DATA_DIR: /data
+      ANALYZER_INITIAL_EQUITY: ${ANALYZER_INITIAL_EQUITY:-10000}
+    volumes:
+      - analyzer_data:/data
+      - ./data/live:/botdata/live:ro  # календарь новостей бота (.news_calendar.json): только чтение
+      - ./data/shadow:/botdata/shadow:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 200
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
 volumes:
   pgdata:
+  analyzer_data:
