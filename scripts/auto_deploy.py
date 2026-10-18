@@ -9,7 +9,7 @@
 
 Шаги: 1 архив (deploy_pack, цель shadow, без ключей) · 2 SSH + SFTP · 3 Docker · 4 распаковка · 5 права .env* ·
 6 остановка старых контейнеров · 7 запуск · 8 PostgreSQL и миграции · 9 глубокая проверка (контейнеры, логи, блокировка IP Binance).
-Первый деплой (нет ~/trading/.env.shadow и deploy/apply.sh): распаковка и `deploy/shadow.sh up`. Повторный деплой (2026-10-18): шаги 4/6/7 заменены на
+Первый деплой (нет ~/trading/.env.shadow): распаковка и `deploy/shadow.sh up`. Повторный деплой (2026-10-18): шаги 4/6/7 заменены на
 `deploy/apply.sh --from ...` - контур (Shadow или боевой shadow-live) СОХРАНЯЕТСЯ, `up-live` вводить не нужно, обновление боевого контура откладывается, пока
 есть открытые позиции (код 75: деплой считается принятым, дальше применяет cron), при провале запуска - автоматический откат на прежнюю версию. Любая ошибка команды на сервере немедленно прерывает деплой (R1). Данные БД не удаляются:
 `shadow.sh down` только останавливает контейнеры, том `pgdata` и `./data/shadow` сохраняются.
@@ -228,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         ok("Docker и compose v2 готовы")
 
         step(4, f"Распаковка в {d}")
-        incremental = run(cli, f"test -f {d}/.env.shadow && test -f {d}/deploy/apply.sh", "первый деплой?", check=False, quiet=True)[0] == 0
+        incremental = run(cli, f"test -f {d}/.env.shadow", "первый деплой?", check=False, quiet=True)[0] == 0
         contour, deferred = "shadow", False
         if incremental:
             run(cli, f"mkdir -p ~/{INCOMING} {d}/deploy && mv -f {shlex.quote(ARCHIVE)} ~/{INCOMING}/ && mv -f {shlex.quote(ARCHIVE + '.sha256')} ~/{INCOMING}/ 2>/dev/null || true",
