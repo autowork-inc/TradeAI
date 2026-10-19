@@ -271,10 +271,11 @@
       if (b.label) label(ctx, b.label, Math.min(x1, x2) + 2, Math.min(y1, y2) - 10, b.color);
     }
     for (const g of CFG.chr ? [] : spec.segments || []) {
-      const x1 = X(g.t1 / 1000), x2 = X(g.t2 / 1000 + ivSec()), y = Y(g.price);
-      if (x1 == null || x2 == null || y == null) continue;
-      lineBetween(ctx, { x: x1, y }, { x: x2, y }, g.color, 1.5, [5, 4]);
-      if (g.label) label(ctx, g.label, x1 + 2, y - 10, g.color);
+      // линия геометрии сигнала - ровно от (t1, p1) до (t2, p2): наклонные линии (трендовые) рисуются с настоящим наклоном, горизонтальные - p1 == p2
+      const x1 = X(g.t1 / 1000), x2 = X(g.t2 / 1000 + ivSec()), y1 = Y(g.price), y2 = Y(g.price2 == null ? g.price : g.price2);
+      if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
+      lineBetween(ctx, { x: x1, y: y1 }, { x: x2, y: y2 }, g.color, 1.5, [5, 4]);
+      if (g.label) label(ctx, g.label, x1 + 2, y1 - 10, g.color);
     }
     for (const v of spec.vlines || []) {
       const x = X(v.t / 1000); if (x == null) continue;

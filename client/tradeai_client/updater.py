@@ -36,6 +36,7 @@ class UpdateInfo:
     sha256: str
     size: int
     notes: str = ""
+    changelog: tuple = ()  # релизы из version.json сервера (changelog.Release, новые первыми): что нового в версии - ещё до загрузки
 
 
 def parse_version(text: str) -> tuple[int, ...]:
@@ -59,7 +60,15 @@ def parse_info(raw: dict) -> UpdateInfo:
         raise UpdateError(f"version.json на сервере неполный или повреждён: {exc}") from exc
     if not SHA_RE.match(sha) or size <= 0:
         raise UpdateError("version.json: нужны sha256 (64 hex-символа) и size > 0")
-    return UpdateInfo(version, sha, size, str(raw.get("notes") or ""))
+    releases: tuple = ()
+    if raw.get("changelog"):
+        from tradeai_client import changelog  # локально: changelog импортирует этот модуль
+
+        try:
+            releases = tuple(changelog.parse(raw["changelog"]))
+        except changelog.ChangelogError as exc:
+            log.warning("История версий на сервере повреждена, показываем только заметки: %s", exc)
+    return UpdateInfo(version, sha, size, str(raw.get("notes") or ""), releases)
 
 
 async def check_for_update(client: ApiClient, local_version: str) -> UpdateInfo | None:

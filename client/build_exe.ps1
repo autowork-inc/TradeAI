@@ -8,7 +8,8 @@
 # Автообновление (2026-10-19): с ключом -Publish после успешной сборки готовый .exe и version.json отправляются на VPS в ./data/updates (по SSH-ключу):
 #   -Publish            выложить сборку для автообновления клиентов (клиенты при старте сравнивают версию и предлагают обновиться)
 #   -Version 0.3.0      сменить версию клиента (tradeai_client\__init__.py); без параметра берётся текущая. Клиенты обновляются, только если версия на сервере НОВЕЕ.
-#   -Notes "..."        текст «что нового» в окне обновления
+#   -Notes "..."        краткий текст в version.json (по умолчанию - изменения версии из tradeai_client\changelog.json). История версий (changelog.json) уходит на сервер целиком.
+#                       Перед сборкой добавьте запись новой версии в НАЧАЛО tradeai_client\changelog.json: без неё скрипт остановится.
 #   -PublishHost/-PublishUser/-PublishKey/-PublishDir  куда класть (по умолчанию хост из адреса сервера, root, ~/.ssh/id_ed25519, trading/data/updates)
 # Публикуется только сборка в один файл (без -OneDir). Ключ API, зашитый в .exe (-ApiKey), попадёт на сервер вместе с файлом; отдаётся он только по ключу API.
 param([switch]$OneDir, [switch]$SkipTests, [string]$ServerUrl = "", [string]$ApiKey = $env:TRADEAI_BUILD_API_KEY,
@@ -28,6 +29,12 @@ if ($Version) {
 $appVersion = [regex]::Match([System.IO.File]::ReadAllText($initFile), '(?m)^__version__ = "([^"]+)"').Groups[1].Value
 if (-not $appVersion) { throw "Не найден __version__ в $initFile" }
 Write-Host "== Версия клиента: $appVersion"
+# История версий (Блок 5): запись для собираемой версии обязана быть в changelog.json - иначе «Что нового» и «История обновлений» были бы пустыми.
+$changelogFile = Join-Path $PSScriptRoot "tradeai_client\changelog.json"
+$changelog = [System.IO.File]::ReadAllText($changelogFile, (New-Object System.Text.UTF8Encoding($false))) | ConvertFrom-Json
+$releaseNotes = @($changelog.versions | Where-Object { $_.version -eq $appVersion })
+if ($releaseNotes.Count -ne 1) { throw "В tradeai_client\changelog.json нет (или дважды) записи для версии ${appVersion}: добавьте release notes и повторите сборку" }
+$productVersion = (($appVersion.Split(".") + @("0", "0", "0", "0"))[0..3]) -join "."   # ресурс версии Windows: 4 числа (1.0 -> 1.0.0.0)
 
 if (-not (Test-Path .venv\Scripts\python.exe)) {
     Write-Host "== Создаю окружение .venv"
@@ -56,9 +63,9 @@ if ($ServerUrl -or $ApiKey) {
 }
 Write-Host "== flet pack"
 $packArgs = @("pack", "app.py", "--name", "TradeAI-Monitor", "--product-name", "TradeAI Monitor", "--file-description", "TradeAI Monitor",
-          "--product-version", $appVersion, "--distpath", "dist", "-y",
+          "--product-version", $productVersion, "--distpath", "dist", "-y",
           # страница графика (chart_web: html/js/css + библиотека lightweight-charts) и ресурсы pywebview PyInstaller сам не находит
-          "--add-data", "tradeai_client/chart_web:tradeai_client/chart_web",
+          "--add-data", "tradeai_client/chart_web:tradeai_client/chart_web", "tradeai_client/changelog.json:tradeai_client",
           "--pyinstaller-build-args=--collect-all=webview")
 if ($OneDir) { $packArgs += "-D" }
 try {
@@ -81,8 +88,10 @@ if ($Publish) {
     if (-not $PublishHost) { throw "Не удалось определить хост сервера: задайте -PublishHost" }
     if (-not (Test-Path $PublishKey)) { throw "Нет SSH-ключа $PublishKey (параметр -PublishKey)" }
     $versionJson = Join-Path $env:TEMP "tradeai_version.json"
-    $payload = [ordered]@{ version = $appVersion; sha256 = $hash; size = $size; notes = $Notes; built_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
-    [System.IO.File]::WriteAllText($versionJson, ($payload | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+    if (-not $Notes) { $Notes = (@($releaseNotes[0].changes | ForEach-Object { if ($_ -is [string]) { $_ } else { $_.text } }) -join " ") }   # краткие заметки - из changelog.json
+    # version.json = версия + контрольная сумма + ВСЯ история версий: клиент покажет «что нового» до загрузки обновления
+    $payload = [ordered]@{ version = $appVersion; sha256 = $hash; size = $size; notes = $Notes; built_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"); changelog = @($changelog.versions) }
+    [System.IO.File]::WriteAllText($versionJson, ($payload | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     $target = "$PublishUser@$PublishHost"
     $sshOpts = @("-i", $PublishKey, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new")
     & ssh @sshOpts $target "mkdir -p $PublishDir"

@@ -7,15 +7,16 @@ import time
 import aiohttp
 import flet as ft
 
-from tradeai_client import APP_NAME, __version__, fmt, profiles, updater
+from tradeai_client import APP_NAME, __version__, changelog, fmt, profiles, updater
 from tradeai_client.api import ApiClient, ApiError, LiveStateStream
 from tradeai_client.binance import BinanceError, BinanceNoData, fetch_klines_filled
 from tradeai_client.chart_spec import ChartDataError, build_chart_spec, interval_to_ms
 from tradeai_client.chart_window import open_chart
 from tradeai_client.golden_image import render_png
-from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings
+from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings, settings_path
 from tradeai_client.ui import widgets as w
 from tradeai_client.ui.analysis_view import AnalysisView
+from tradeai_client.ui.changelog_view import release_card, releases_list
 from tradeai_client.ui.dashboard import DashboardView
 from tradeai_client.ui.history_view import HistoryView
 from tradeai_client.ui.stats_view import StatsView
@@ -34,11 +35,14 @@ class Shell:
         self._stream: LiveStateStream | None = None
         self._events_seen: tuple = ()
         self._tab = TAB_DASHBOARD
+        first_run = not settings_path().exists()  # самый первый запуск на этом ПК: «Приложение обновлено» показывать не с чего
         try:
             self.settings = load_settings()
             self._settings_error = None
         except SettingsError as exc:
             self.settings, self._settings_error = ClientSettings(), str(exc)
+        if first_run:
+            self.settings.last_seen_version = __version__
         self.saved_mode = self.settings.mode_filter if self.settings.mode_filter in fmt.MODE_KEYS else ""  # выбор пользователя (Statistics/History) переживает перезапуск
         self.default_mode = "shadow"  # активный контур: live, пока боевой счёт присылает баланс (фильтры History / Statistics стартуют с него)
         self._account_at = 0.0
@@ -129,7 +133,11 @@ class Shell:
             self.show_settings(note="Введите адрес сервера и API-ключ (на сервере: ./deploy/shadow.sh apikey).")
         else:
             await self.connect()
-            self.page.run_task(self._check_update)
+            # после обновления сначала «Что нового» (один раз на версию), и только потом предложение следующего обновления - окна не должны наслаиваться
+            if changelog.should_show_whats_new(self.settings.last_seen_version, __version__):
+                self.show_whats_new(then=lambda: self.page.run_task(self._check_update))
+            else:
+                self.page.run_task(self._check_update)
 
     # ------------------------------------------------------------------------------------------ подключение
 
@@ -274,7 +282,9 @@ class Shell:
         url = ft.TextField(label="Адрес сервера", value=s.base_url, hint_text="http://193.233.75.254:8001", autofocus=True, dense=True)
         key = ft.TextField(label="API-ключ", value=s.api_key, password=True, can_reveal_password=True, dense=True)
         remember = ft.Switch(label="Запомнить ключ на этом ПК", value=s.remember_key)
-        user_row = ft.Row([ft.OutlinedButton(f"Сменить пользователя ({s.profile})", icon=ft.Icons.SWITCH_ACCOUNT, on_click=lambda e: (self.page.pop_dialog(), self.show_profile_dialog())),
+        user_row = ft.Row([ft.OutlinedButton(f"История обновлений (v{__version__})", icon=ft.Icons.HISTORY_EDU, tooltip="Что и когда добавлено в клиент",
+                                             on_click=lambda e: (self.page.pop_dialog(), self.show_changelog())),
+                           ft.OutlinedButton(f"Сменить пользователя ({s.profile})", icon=ft.Icons.SWITCH_ACCOUNT, on_click=lambda e: (self.page.pop_dialog(), self.show_profile_dialog())),
                            ft.OutlinedButton("Монеты CHR…", icon=ft.Icons.PLAYLIST_ADD, disabled=s.profile != profiles.CHR,
                                              tooltip="Добавить монеты в пул профиля CHR" if s.profile == profiles.CHR else "Доступно в профиле CHR",
                                              on_click=lambda e: (self.page.pop_dialog(), self.show_chr_coins_dialog()))], spacing=10, wrap=True)
@@ -289,7 +299,7 @@ class Shell:
             candidate = ClientSettings(base_url=url.value or "", api_key=(key.value or "").strip(), remember_key=bool(remember.value),
                                        post_signal_candles=bool(post.value), binance_rest=self.settings.binance_rest,
                                        balance_visible=self.settings.balance_visible, mode_filter=self.settings.mode_filter,
-                                       profile=self.settings.profile, chr_extra_coins=list(self.settings.chr_extra_coins))
+                                       last_seen_version=self.settings.last_seen_version, profile=self.settings.profile, chr_extra_coins=list(self.settings.chr_extra_coins))
             msg.color = w.AMBER
             try:
                 candidate.validate()
@@ -389,6 +399,54 @@ class Shell:
         self.run(self._refresh_tab())
         self.show_chr_coins_dialog(note)
 
+    # ------------------------------------------------------------------------------------------ версии клиента
+
+    def _load_releases(self) -> list["changelog.Release"] | None:
+        try:
+            return changelog.load()
+        except changelog.ChangelogError as exc:
+            log.error("%s", exc)
+            self.notify(f"История обновлений недоступна: {exc}", error=True)
+            return None
+
+    def mark_version_seen(self) -> None:
+        self.settings.last_seen_version = __version__
+        self._persist_prefs()
+
+    def show_whats_new(self, then=None) -> None:
+        """«Приложение обновлено до версии X»: изменения именно этой версии (+ строка про пропущенные). После закрытия last_seen_version = текущая версия."""
+        releases = self._load_releases()
+        current = changelog.release_for(releases, __version__) if releases else None
+        skipped = [r for r in changelog.missed(releases or [], self.settings.last_seen_version, __version__) if r is not current]
+        if current is None:
+            self.mark_version_seen()
+            if then:
+                then()
+            return
+
+        def close(_=None) -> None:
+            self.mark_version_seen()
+            self.page.pop_dialog()
+            if then:
+                then()
+
+        body: list[ft.Control] = [release_card(current)]
+        if skipped:
+            body.append(ft.Text("Пропущенные версии: " + ", ".join(f"v{r.version}" for r in skipped) + " — подробности в Настройки → «История обновлений».", size=12, color=w.MUTED))
+        self.page.show_dialog(ft.AlertDialog(
+            modal=True, title=ft.Text(f"Приложение обновлено до версии {__version__}", size=20, weight=ft.FontWeight.W_700),
+            content=ft.Container(width=600, content=ft.Column(body, spacing=10, scroll=ft.ScrollMode.AUTO, tight=True), height=min(480, 150 + 52 * len(current.changes))),
+            actions=[ft.FilledButton("Отлично", icon=ft.Icons.CHECK, on_click=close)], actions_alignment=ft.MainAxisAlignment.END, on_dismiss=lambda e: None))
+
+    def show_changelog(self) -> None:
+        """«История обновлений»: все версии клиента (с v1.0), новые сверху, окно со скроллом."""
+        releases = self._load_releases()
+        if releases is None:
+            return
+        self.page.show_dialog(ft.AlertDialog(
+            modal=False, title=ft.Text("История обновлений", size=20, weight=ft.FontWeight.W_700), content=releases_list(releases, __version__),
+            actions=[ft.TextButton("Закрыть", on_click=lambda e: self.page.pop_dialog())], actions_alignment=ft.MainAxisAlignment.END))
+
     # ------------------------------------------------------------------------------------------ автообновление
 
     async def _check_update(self) -> None:
@@ -400,8 +458,11 @@ class Shell:
             self._offer_update(info)
 
     def _offer_update(self, info: "updater.UpdateInfo") -> None:
-        body = [ft.Text(f"Доступна версия {info.version} (у вас {__version__}).", size=14)]
-        if info.notes:
+        body: list[ft.Control] = [ft.Text(f"Доступна версия {info.version} (у вас {__version__}).", size=14)]
+        news = changelog.release_for(list(info.changelog), info.version) if info.changelog else None
+        if news is not None:  # история с сервера: что именно изменится - красиво, до загрузки
+            body.append(release_card(news))
+        elif info.notes:
             body.append(ft.Text(info.notes, size=12, color=w.MUTED, selectable=True))
         body.append(ft.Text(f"Файл {info.size / 1_048_576:.0f} МБ. После загрузки программа перезапустится сама.", size=12, color=w.MUTED))
 
@@ -412,7 +473,7 @@ class Shell:
             self.page.pop_dialog()
             self.run(self._install_update(info))
 
-        self.page.show_dialog(ft.AlertDialog(modal=True, title=ft.Text("Доступно обновление"), content=ft.Container(width=440, content=ft.Column(body, spacing=8, tight=True)),
+        self.page.show_dialog(ft.AlertDialog(modal=True, title=ft.Text("Доступно обновление"), content=ft.Container(width=600, content=ft.Column(body, spacing=8, tight=True, scroll=ft.ScrollMode.AUTO), height=min(520, 120 + 48 * (len(news.changes) if news else 2))),
                                              actions=[ft.TextButton("Позже", on_click=later), ft.FilledButton("Обновить", icon=ft.Icons.SYSTEM_UPDATE, on_click=go)]))
 
     async def _install_update(self, info: "updater.UpdateInfo") -> None:

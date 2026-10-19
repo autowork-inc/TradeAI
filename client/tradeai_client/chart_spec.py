@@ -168,7 +168,10 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
                           "color": AMBER, "fill": "rgba(255,179,0,0.20)"})
         elif g["type"] == "line":
             if not _PLAN_LABEL.match(label):
-                segments.append({"t1": snap_t(max(int(g["t1"]), first_t)), "t2": snap_t(min(int(g["t2"]), grid_end)), "price": float(g["p1"]),
+                g_t1, g_t2, g_p1, g_p2 = int(g["t1"]), int(g["t2"]), float(g["p1"]), float(g["p2"])
+                c_t1, c_t2 = max(g_t1, first_t), min(g_t2, grid_end)  # обрезка по окну графика: цены концов - на самой линии (наклон сохраняется)
+                on_line = lambda t: g_p1 + (g_p2 - g_p1) * (t - g_t1) / (g_t2 - g_t1) if g_t2 != g_t1 else g_p1  # noqa: E731
+                segments.append({"t1": snap_t(c_t1), "t2": snap_t(c_t2), "price": on_line(c_t1), "price2": on_line(c_t2),
                                  "label": label, "color": VIOLET if "пул" in label.lower() else AMBER})
         elif g["type"] == "marker":
             t = snap_t(int(g["t1"]))
