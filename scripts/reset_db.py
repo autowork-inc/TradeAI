@@ -25,7 +25,7 @@ from utils.errors import ConfigError, TradingInfraError
 
 ROOT = Path(__file__).resolve().parent.parent
 ENV_FILES = (ROOT / "mcp_server" / ".env", ROOT / ".env")
-TABLES = ("trades", "trade_closes", "trade_snapshots", "state_events")  # порядок для отчёта; TRUNCATE одним оператором + CASCADE
+TABLES = ("trades", "trade_closes", "trade_snapshots", "state_events", "favorites")  # порядок для отчёта; TRUNCATE одним оператором + CASCADE
 _LINE = re.compile(r"""^\s*(?:export\s+)?DATABASE_URL\s*=\s*(?P<v>.*?)\s*$""")
 
 

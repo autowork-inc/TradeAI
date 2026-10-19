@@ -1,7 +1,7 @@
 """FastAPI-сервер мониторинга Shadow Mode (Этап 6, CLAUDE.md разд. 3.19). Запуск: `python -m api.main` (в контейнере - `api` из docker-compose.yml).
 
 Принципы:
-  * ТОЛЬКО ЧТЕНИЕ. Все соединения с БД открываются с `default_transaction_read_only = on`: даже ошибка в коде API не сможет записать
+  * ТОЛЬКО ЧТЕНИЕ (единственное исключение - звёздочки избранного, api/favorites.py: отдельный пул, SQL только над таблицей favorites). Все соединения с БД открываются с `default_transaction_read_only = on`: даже ошибка в коде API не сможет записать
     или удалить сделку. Миграции делает shadow-run, не API.
   * Всё, кроме /api/health, требует заголовок X-API-Key (см. api/security.py). /docs, /redoc и схема OpenAPI отключены.
   * Fail-Fast там, где это уместно: без ключа/DATABASE_URL процесс не стартует (код 3). Недоступная БД во время работы - 503 и
@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, WebSo
 from fastapi.responses import JSONResponse
 from pydantic import StringConstraints
 
-from api import analysis_proxy
+from api import analysis_proxy, favorites, updates
 from api.livestate import SETUP_STRATEGIES, LiveStateHub, current_coins, freshest_heartbeat_age_s, read_account
 from api.reason import build_reason
 from api.security import FailureThrottle, check_key
@@ -43,8 +43,9 @@ _ONE_MINUTE = timedelta(minutes=1)  # события автомата пишут
 TRADE_LIST_SQL = """
 SELECT t.id, t.strategy_name, t.strategy_id, t.coin, t.side, t.kind, t.mode, t.status, t.qty, t.remaining_frac, t.signal_time, t.entry_time,
        t.exit_time, t.planned_entry, t.entry_price, t.exit_price, t.sl, t.tp, t.stop_price, t.risk, t.risk_amount, t.pnl, t.fees,
-       t.r_multiple, t.gross_r, t.mfe_r, t.mae_r, t.exit_reason, t.be_armed, t.gap_affected, (s.trade_id IS NOT NULL) AS has_snapshot
-  FROM trades t LEFT JOIN trade_snapshots s ON s.trade_id = t.id
+       t.r_multiple, t.gross_r, t.mfe_r, t.mae_r, t.exit_reason, t.be_armed, t.gap_affected, (s.trade_id IS NOT NULL) AS has_snapshot,
+       (f.trade_id IS NOT NULL) AS is_favorite
+  FROM trades t LEFT JOIN trade_snapshots s ON s.trade_id = t.id LEFT JOIN favorites f ON f.trade_id = t.id
  WHERE {where}
  ORDER BY t.signal_time DESC, t.id
  LIMIT ${limit} OFFSET ${offset}
@@ -59,7 +60,7 @@ SELECT ts, coin, strategy, strategy_id, signal_id, from_state, to_state, kind, r
  ORDER BY ts DESC, id DESC LIMIT 12
 """
 STATS_SQL = """
-SELECT id, coin, strategy_id, side, exit_reason, r_multiple, exit_time FROM trades
+SELECT id, coin, strategy_id, side, exit_reason, r_multiple, pnl, exit_time FROM trades
  WHERE status = 'closed' AND NOT gap_affected AND {where} ORDER BY exit_time, id
 """
 COUNTS_SQL = "SELECT status, gap_affected, count(*) AS n FROM trades WHERE (mode = $1 OR $1 = 'all') GROUP BY status, gap_affected"
@@ -104,20 +105,22 @@ def where_clause(prefix: str, mode: str, statuses=None, coins=None, strategies=N
 
 def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     throttle = FailureThrottle(settings.auth_max_failures, settings.auth_window_s)
-    state: dict[str, Any] = {"pool": None, "hub": None, "ws": 0}
+    state: dict[str, Any] = {"pool": None, "write_pool": None, "hub": None, "ws": 0}
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         pool = await connect_pool(settings.database_url)
+        write_pool = await favorites.connect_write_pool(settings.database_url)
         hub = LiveStateHub(pool, settings)
         await hub.start()
-        state["pool"], state["hub"] = pool, hub
+        state["pool"], state["write_pool"], state["hub"] = pool, write_pool, hub
         log.info("API запущен: монеты %s, опрос БД каждые %.1f с", ",".join(settings.coins), settings.poll_interval_s)
         try:
             yield
         finally:
             await hub.stop()
             await pool.close()
+            await write_pool.close()
 
     app = FastAPI(title="TradeAI monitor", version="1", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.hub_state = state  # для тестов
@@ -128,6 +131,8 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
     def pool() -> asyncpg.Pool:
         return state["pool"]
 
+    favorites.install(app, settings, auth, pool, lambda: state["write_pool"])  # PUT/DELETE /api/favorites/{id}: единственная запись API в БД
+    updates.install(app, settings.update_dir, auth)  # /api/update/version.json, /api/update/TradeAI-Monitor.exe
     analysis_proxy.install(app, settings, auth, analyzer_transport)  # /api/analysis/* -> Strategy Quant Analyzer (отдельный контейнер, наружу не публикуется)
 
     # ---------------------------------------------------------------------------------- ошибки
@@ -144,6 +149,10 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
     async def integrity_error(request: Request, exc: DataIntegrityError) -> JSONResponse:
         log.error("%s %s: данные в БД нечитаемы: %s", request.method, request.url.path, exc)
         return JSONResponse({"detail": "data_integrity"}, status_code=500)
+
+    async def _is_favorite(trade_id: str) -> bool:
+        async with pool().acquire() as conn:
+            return await conn.fetchval(favorites.EXISTS_SQL, trade_id) is not None
 
     # ---------------------------------------------------------------------------------- REST
 
@@ -184,14 +193,16 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
     async def trades(limit: Annotated[int, Query(ge=1, le=500)] = 50, offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
                      mode: Mode = "shadow", status: Annotated[list[Status] | None, Query()] = None,
                      coin: Annotated[list[Token] | None, Query()] = None, strategy: Annotated[list[Token] | None, Query()] = None,
-                     side: Annotated[list[Side] | None, Query()] = None) -> dict[str, Any]:
+                     side: Annotated[list[Side] | None, Query()] = None, favorite: bool = False) -> dict[str, Any]:
         where, args = where_clause("t.", mode, status, coin, strategy, side)
+        if favorite:
+            where += " AND f.trade_id IS NOT NULL"  # вкладка «Избранное»: только отмеченные звёздочкой (общие для всех профилей)
         sql = TRADE_LIST_SQL.format(where=where, limit=len(args) + 1, offset=len(args) + 2)
         async with pool().acquire() as conn:
             async with conn.transaction(readonly=True, isolation="repeatable_read"):
                 rows = await conn.fetch(sql, *args, limit, offset)
-                total = await conn.fetchval(f"SELECT count(*) FROM trades t WHERE {where}", *args)
-        items = [{**trade_out(r), "has_snapshot": r["has_snapshot"]} for r in rows]
+                total = await conn.fetchval(f"SELECT count(*) FROM trades t LEFT JOIN favorites f ON f.trade_id = t.id WHERE {where}", *args)
+        items = [{**trade_out(r), "has_snapshot": r["has_snapshot"], "is_favorite": r["is_favorite"]} for r in rows]
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     @app.get("/api/trades/{trade_id}/snapshot", dependencies=[Depends(auth)])
@@ -211,7 +222,8 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
                                             sig + _ONE_MINUTE)
         if snap is None:
             raise HTTPException(status_code=404, detail="snapshot_not_found")  # снапшот пишется следом за строкой сделки: возможна короткая гонка
-        t = {**trade_out(trade), "plan": trade["plan"]}  # план Scale Out ({levels: [[R, доля], ...], trail_mode, ...}) нужен клиенту для уровней на графике
+        fav = await _is_favorite(trade_id)
+        t = {**trade_out(trade), "plan": trade["plan"], "is_favorite": fav}  # план Scale Out ({levels: [[R, доля], ...], trail_mode, ...}) нужен клиенту для уровней на графике
         geometry, meta = snap["geometry"], snap["meta"] or {}
         return {
             "trade": t, "closes": [close_out(c) for c in closes], "snapshot_created_at": iso(snap["created_at"]),

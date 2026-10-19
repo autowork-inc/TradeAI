@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import base64
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -114,14 +115,50 @@ class ApiClient:
         return await self._get("/api/stats", params)
 
     async def trades(self, *, limit: int = 50, offset: int = 0, statuses: list[str] | None = None, coins: list[str] | None = None,
-                     strategies: list[str] | None = None, sides: list[str] | None = None, mode: str = "shadow") -> dict[str, Any]:
+                     strategies: list[str] | None = None, sides: list[str] | None = None, mode: str = "shadow", favorite: bool = False) -> dict[str, Any]:
         params = [("limit", str(limit)), ("offset", str(offset)), ("mode", mode)]
+        if favorite:
+            params.append(("favorite", "true"))
         params += [("status", s) for s in statuses or []] + [("coin", c) for c in coins or []]
         params += [("strategy", s) for s in strategies or []] + [("side", s) for s in sides or []]
         return await self._get("/api/trades", params)
 
     async def snapshot(self, trade_id: str) -> dict[str, Any]:
         return await self._get(f"/api/trades/{quote(trade_id, safe=':')}/snapshot")
+
+    # ---- Избранное (Golden Set): звёздочка хранится на сервере и общая для профилей
+
+    async def favorite_add(self, trade_id: str, profile: str, png: bytes | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"profile": profile}
+        if png:
+            body["image_png_b64"] = base64.b64encode(png).decode("ascii")
+        return await self._request("PUT", f"/api/favorites/{quote(trade_id, safe=':')}", json_body=body)
+
+    async def favorite_remove(self, trade_id: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/api/favorites/{quote(trade_id, safe=':')}")
+
+    # ---- автообновление клиента
+
+    async def update_version(self) -> dict[str, Any] | None:
+        """version.json с сервера; ничего не опубликовано (404) - None."""
+        try:
+            return await self._get("/api/update/version.json")
+        except ApiError as exc:
+            if exc.kind == "not_found":
+                return None
+            raise
+
+    async def download_update(self):
+        """Асинхронный итератор кусков TradeAI-Monitor.exe. Общего таймаута нет (файл ~100 МБ): только на паузу в потоке."""
+        timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=60)
+        try:
+            async with self.session.get(self._s.normalized_url + "/api/update/TradeAI-Monitor.exe", headers={HEADER: self._s.api_key}, timeout=timeout) as resp:
+                if resp.status != 200:
+                    raise ApiError("not_found" if resp.status == 404 else "server", f"Сервер не отдал файл обновления (HTTP {resp.status})", resp.status)
+                async for chunk in resp.content.iter_chunked(256 * 1024):
+                    yield chunk
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+            raise ApiError("network", _HINTS["network"]) from exc
 
     # ---- Strategy Quant Analyzer (через прокси основного API: /api/analysis/*)
 

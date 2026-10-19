@@ -1,16 +1,18 @@
 """Оболочка приложения: заголовок со статусом связи, вкладки, диалог настроек, подключение к API и открытие графиков сделок."""
 
+import asyncio
 import logging
 import time
 
 import aiohttp
 import flet as ft
 
-from tradeai_client import APP_NAME, __version__, fmt
+from tradeai_client import APP_NAME, __version__, fmt, profiles, updater
 from tradeai_client.api import ApiClient, ApiError, LiveStateStream
 from tradeai_client.binance import BinanceError, BinanceNoData, fetch_klines_filled
 from tradeai_client.chart_spec import ChartDataError, build_chart_spec, interval_to_ms
 from tradeai_client.chart_window import open_chart
+from tradeai_client.golden_image import render_png
 from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings
 from tradeai_client.ui import widgets as w
 from tradeai_client.ui.analysis_view import AnalysisView
@@ -20,7 +22,7 @@ from tradeai_client.ui.stats_view import StatsView
 
 log = logging.getLogger("tradeai_client")
 STATUS_COLORS = {"connected": w.GREEN, "connecting": w.AMBER, "reconnecting": w.AMBER, "auth": w.RED, "throttled": w.RED, "error": w.RED, "idle": w.MUTED}
-TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS = 0, 1, 2, 3
+TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS, TAB_FAVORITES = 0, 1, 2, 3, 4
 ACCOUNT_REFRESH_S = 30.0  # как часто обновлять баланс в шапке (движок пишет снимок счёта раз в ~30 с)
 POST_BARS_MARGIN = 5  # свечей после выхода, которые показываем за последним маркером
 
@@ -40,7 +42,11 @@ class Shell:
         self.saved_mode = self.settings.mode_filter if self.settings.mode_filter in fmt.MODE_KEYS else ""  # выбор пользователя (Statistics/History) переживает перезапуск
         self.default_mode = "shadow"  # активный контур: live, пока боевой счёт присылает баланс (фильтры History / Statistics стартуют с него)
         self._account_at = 0.0
-        self.dashboard, self.stats, self.history, self.analysis = DashboardView(), StatsView(self), HistoryView(self), AnalysisView(self)
+        self._last_state: dict | None = None  # последнее состояние Dashboard (перерисовывается при смене профиля)
+        self._chr_pnl: float | None = None  # баланс профиля CHR: накопленный PnL его сделок от нуля
+        self.dashboard, self.stats, self.history, self.analysis = DashboardView(self), StatsView(self), HistoryView(self), AnalysisView(self)
+        self.favorites = HistoryView(self, favorites=True)
+        self._profile_btn = ft.TextButton(f"Пользователь: {self.settings.profile}", icon=ft.Icons.PERSON, tooltip="Сменить пользователя (SANTA / CHR)", on_click=lambda e: self.show_profile_dialog())
         self._dot = w.dot(w.MUTED, 12)
         self._status_text = ft.Text("Не подключено", size=13, color=w.MUTED)
         self._account_data: dict | None = None
@@ -60,12 +66,12 @@ class Shell:
         p.on_error = lambda e: log.error("Необработанная ошибка интерфейса: %s", getattr(e, "data", e))
         p.window.width, p.window.height, p.window.min_width, p.window.min_height = 1280, 820, 980, 600
         header = ft.Row([ft.Icon(ft.Icons.CANDLESTICK_CHART, color=w.ACCENT), ft.Text(APP_NAME, size=20, weight=ft.FontWeight.W_700), ft.Container(expand=True),
-                         self._account, self._eye, ft.VerticalDivider(width=12, color=w.BORDER), self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
+                         self._profile_btn, self._account, self._eye, ft.VerticalDivider(width=12, color=w.BORDER), self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
                         spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-        tabs = ft.Tabs(length=4, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
+        tabs = ft.Tabs(length=5, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label="Dashboard", icon=ft.Icons.DASHBOARD), ft.Tab(label="Statistics", icon=ft.Icons.BAR_CHART),
-                            ft.Tab(label="History", icon=ft.Icons.HISTORY), ft.Tab(label="Analysis", icon=ft.Icons.ANALYTICS)]),
-            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control], expand=True)], expand=True))
+                            ft.Tab(label="History", icon=ft.Icons.HISTORY), ft.Tab(label="Analysis", icon=ft.Icons.ANALYTICS), ft.Tab(label="Favorites", icon=ft.Icons.STAR)]),
+            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control, self.favorites.control], expand=True)], expand=True))
         p.add(header, ft.Container(height=6), tabs)
 
     def run(self, coro) -> None:
@@ -77,13 +83,52 @@ class Shell:
     def notify(self, text: str, *, error: bool = False) -> None:
         self.page.show_dialog(ft.SnackBar(content=ft.Text(text, color=w.TEXT), bgcolor="#3a1d1d" if error else "#1d2b3a", duration=6000 if error else 3500))
 
+    # ------------------------------------------------------------------------------------------ профили
+
+    @property
+    def profile(self) -> str:
+        return self.settings.profile
+
+    def profile_strategies(self) -> list[str] | None:
+        """Стратегии активного профиля (None - все): SANTA без ограничений, CHR - две свои."""
+        return profiles.strategies_for(self.settings.profile)
+
+    def profile_coins(self) -> list[str] | None:
+        """Пул монет активного профиля (None - все): CHR - умолчания плюс добавленные пользователем."""
+        return profiles.coins_for(self.settings.profile, self.settings.chr_extra_coins)
+
+    async def set_profile(self, profile: str) -> None:
+        profile = profiles.normalize_profile(profile)
+        if profile == self.settings.profile:
+            return
+        self.settings.profile = profile
+        self._persist_prefs()
+        self._apply_profile_ui()
+        await self._refresh_account()
+        await self._refresh_tab()
+        self.notify(f"Пользователь: {profile}")
+
+    def _apply_profile_ui(self) -> None:
+        """Профиль сменился или изменился его пул монет: фильтры, подписи, Dashboard, баланс."""
+        self._profile_btn.content = f"Пользователь: {self.settings.profile}"
+        self._profile_btn.update()
+        for view in (self.stats, self.history):
+            view.apply_profile()
+        self.analysis.reset()
+        if self._last_state is not None:
+            self.dashboard.on_message(self._last_state)
+            self.dashboard.control.update()
+        self._render_account()
+
     async def start(self) -> None:
+        self.page.run_task(self.stats._goal.shimmer)  # переливающаяся рамка карточки значимости
         if self._settings_error:
             self.show_settings(note=self._settings_error)
         elif not self.settings.api_key:
             self.show_settings(note="Введите адрес сервера и API-ключ (на сервере: ./deploy/shadow.sh apikey).")
         else:
             await self.connect()
+            self.page.run_task(self._check_update)
 
     # ------------------------------------------------------------------------------------------ подключение
 
@@ -102,8 +147,10 @@ class Shell:
             info = await client.info()
         except ApiError:
             return
-        for view in (self.stats, self.history):
+        for view in (self.stats, self.history, self.favorites):
             view.set_coins(list(info.get("coins") or []))
+        if self.profile == profiles.CHR:
+            await self._refresh_chr_balance(client)
         account = info.get("account")
         live = bool(account and account.get("available"))
         self._account_data = account
@@ -112,8 +159,28 @@ class Shell:
         if self.stats.follow_default_mode(self.default_mode) | self.history.follow_default_mode(self.default_mode):
             await self._refresh_tab()
 
+    async def _refresh_chr_balance(self, client) -> None:
+        """Баланс CHR всегда с нуля: сумма PnL закрытых сделок его стратегий (виртуальные Shadow-сделки), а не счёт биржи."""
+        try:
+            data = await client.stats(coins=self.profile_coins(), strategies=self.profile_strategies(), mode="shadow")
+        except ApiError:
+            return
+        self._chr_pnl = float(data["overall"].get("net_pnl") or 0.0)
+        self._render_account()
+
     def _render_account(self) -> None:
         shown = self.settings.balance_visible
+        if self.profile == profiles.CHR:
+            self._account.value = fmt.chr_balance_text(self._chr_pnl, shown)
+            self._account.color = fmt.r_color(self._chr_pnl) if shown and self._chr_pnl else w.AMBER
+            self._account.tooltip = "Баланс профиля CHR: накопленный результат сделок CHR в USDT, отсчёт от 0$ (не счёт биржи)."
+            self._eye.visible = True
+            self._eye.icon, self._eye.tooltip = (ft.Icons.VISIBILITY, "Скрыть баланс") if shown else (ft.Icons.VISIBILITY_OFF, "Показать баланс")
+            if w.attached(self._account):
+                self._account.update()
+                self._eye.update()
+            return
+        self._account.tooltip = "Баланс боевого счёта (Binance + MT5). В режиме Shadow ордера не отправляются."
         self._account.value = fmt.account_text(self._account_data, shown)
         self._account.color = w.GREEN if fmt.has_balance(self._account_data) else w.AMBER
         self._eye.visible = fmt.has_balance(self._account_data)
@@ -172,6 +239,8 @@ class Shell:
             self.show_settings(note=text)
 
     async def _on_message(self, msg: dict) -> None:
+        if msg.get("type") == "state":
+            self._last_state = msg
         self.dashboard.on_message(msg)
         self.dashboard.control.update()
         if time.monotonic() - self._account_at >= ACCOUNT_REFRESH_S:
@@ -194,6 +263,8 @@ class Shell:
             await self.history.refresh()
         elif self._tab == TAB_ANALYSIS:
             await self.analysis.refresh()
+        elif self._tab == TAB_FAVORITES:
+            await self.favorites.refresh()
 
     # ------------------------------------------------------------------------------------------ настройки
 
@@ -202,6 +273,10 @@ class Shell:
         url = ft.TextField(label="Адрес сервера", value=s.base_url, hint_text="http://193.233.75.254:8001", autofocus=True, dense=True)
         key = ft.TextField(label="API-ключ", value=s.api_key, password=True, can_reveal_password=True, dense=True)
         remember = ft.Switch(label="Запомнить ключ на этом ПК", value=s.remember_key)
+        user_row = ft.Row([ft.OutlinedButton(f"Сменить пользователя ({s.profile})", icon=ft.Icons.SWITCH_ACCOUNT, on_click=lambda e: (self.page.pop_dialog(), self.show_profile_dialog())),
+                           ft.OutlinedButton("Монеты CHR…", icon=ft.Icons.PLAYLIST_ADD, disabled=s.profile != profiles.CHR,
+                                             tooltip="Добавить монеты в пул профиля CHR" if s.profile == profiles.CHR else "Доступно в профиле CHR",
+                                             on_click=lambda e: (self.page.pop_dialog(), self.show_chr_coins_dialog()))], spacing=10, wrap=True)
         post = ft.Switch(label="Достраивать свечи после сигнала (публичный REST Binance)", value=s.post_signal_candles)
         msg = ft.Text(note or "", size=12, color=w.AMBER, selectable=True)
         busy = ft.ProgressRing(width=16, height=16, stroke_width=2, visible=False)
@@ -212,7 +287,8 @@ class Shell:
         async def save(_=None) -> None:
             candidate = ClientSettings(base_url=url.value or "", api_key=(key.value or "").strip(), remember_key=bool(remember.value),
                                        post_signal_candles=bool(post.value), binance_rest=self.settings.binance_rest,
-                                       balance_visible=self.settings.balance_visible, mode_filter=self.settings.mode_filter)
+                                       balance_visible=self.settings.balance_visible, mode_filter=self.settings.mode_filter,
+                                       profile=self.settings.profile, chr_extra_coins=list(self.settings.chr_extra_coins))
             msg.color = w.AMBER
             try:
                 candidate.validate()
@@ -253,10 +329,163 @@ class Shell:
 
         url.on_change = on_url_change
         dialog = ft.AlertDialog(modal=True, title=ft.Text("Подключение к серверу мониторинга"),
-                                content=ft.Container(width=520, content=ft.Column([url, key, remember, post, warning, hint, ft.Row([busy, msg], spacing=8)], spacing=12, tight=True)),
+                                content=ft.Container(width=520, content=ft.Column([url, key, remember, post, user_row, warning, hint, ft.Row([busy, msg], spacing=8)], spacing=12, tight=True)),
                                 actions=[ft.TextButton("Отмена", on_click=lambda e: self.page.pop_dialog()), ft.FilledButton("Проверить и сохранить", on_click=save)],
                                 actions_alignment=ft.MainAxisAlignment.END)
         self.page.show_dialog(dialog)
+
+    def show_profile_dialog(self) -> None:
+        """Выбор пользователя: SANTA (всё как раньше) или CHR (свои стратегии, свой пул монет, баланс с нуля). Выбор запоминается."""
+        def pick(name: str) -> None:
+            self.page.pop_dialog()
+            self.run(self.set_profile(name))
+
+        about = {profiles.SANTA: "Все стратегии и монеты, баланс боевого счёта.",
+                 profiles.CHR: "Только Trendline Breakout (CHR) и Horizontal Breakout (CHR); монеты EUR, GBP, JPY, XAU, BTC, ETH (+ ваши); баланс и PnL с нуля."}
+        buttons = [ft.Container(content=ft.Column([ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE if self.profile == name else ft.Icons.PERSON, color=w.GREEN if self.profile == name else w.MUTED),
+                                                          ft.Text(name, size=16, weight=ft.FontWeight.W_700)], spacing=8), ft.Text(about[name], size=12, color=w.MUTED)], spacing=4),
+                                   padding=12, border_radius=10, bgcolor=w.CARD_HI if self.profile == name else w.CARD, border=ft.Border.all(1, w.ACCENT if self.profile == name else w.BORDER),
+                                   on_click=lambda e, n=name: pick(n)) for name in profiles.PROFILES]
+        self.page.show_dialog(ft.AlertDialog(modal=False, title=ft.Text("Сменить пользователя"), content=ft.Container(width=460, content=ft.Column(buttons, spacing=10, tight=True)),
+                                             actions=[ft.TextButton("Закрыть", on_click=lambda e: self.page.pop_dialog())]))
+
+    def show_chr_coins_dialog(self, note: str = "") -> None:
+        """Пул монет профиля CHR: умолчания фиксированы, свои монеты добавляются и удаляются. Новые символы бот должен торговать (иначе сделок по ним не будет)."""
+        field = ft.TextField(label="Тикер", hint_text="SOL, SOLUSDT, GBPUSD…", dense=True, width=240, autofocus=True)
+        msg = ft.Text(note, size=12, color=w.AMBER)
+        extra = list(self.settings.chr_extra_coins)
+
+        def add(_=None) -> None:
+            try:
+                coin = profiles.normalize_coin(field.value or "")
+            except profiles.ProfileError as exc:
+                msg.value = str(exc)
+                msg.update()
+                return
+            if coin in (profiles.coins_for(profiles.CHR, self.settings.chr_extra_coins) or []):
+                msg.value = f"{coin} уже в пуле"
+                msg.update()
+                return
+            self.settings.chr_extra_coins = [*self.settings.chr_extra_coins, coin]
+            self._after_coin_pool_change(f"Добавлено: {coin}")
+
+        def remove(coin: str) -> None:
+            self.settings.chr_extra_coins = [c for c in self.settings.chr_extra_coins if c != coin]
+            self._after_coin_pool_change(f"Удалено: {coin}")
+
+        rows = [ft.Row([ft.Text(fmt.coin_short(c), width=110), ft.Text("по умолчанию", size=12, color=w.MUTED)]) for c in profiles.CHR_DEFAULT_COINS]
+        rows += [ft.Row([ft.Text(fmt.coin_short(c), width=110), ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, icon_size=18, tooltip="Убрать из пула", on_click=lambda e, c=c: remove(c))]) for c in extra]
+        self.page.show_dialog(ft.AlertDialog(
+            modal=False, title=ft.Text("Монеты профиля CHR"),
+            content=ft.Container(width=420, content=ft.Column([ft.Row([field, ft.FilledButton("Добавить", icon=ft.Icons.ADD, on_click=add)], spacing=8), msg,
+                                                               ft.Column(rows, spacing=0, scroll=ft.ScrollMode.AUTO, height=min(300, 40 * len(rows)))], spacing=8, tight=True)),
+            actions=[ft.TextButton("Готово", on_click=lambda e: self.page.pop_dialog())]))
+
+    def _after_coin_pool_change(self, note: str) -> None:
+        self._persist_prefs()
+        self.page.pop_dialog()
+        self._apply_profile_ui()
+        self.run(self._refresh_tab())
+        self.show_chr_coins_dialog(note)
+
+    # ------------------------------------------------------------------------------------------ автообновление
+
+    async def _check_update(self) -> None:
+        client = self.client
+        if client is None:
+            return
+        info = await updater.check_for_update(client, __version__)
+        if info is not None:
+            self._offer_update(info)
+
+    def _offer_update(self, info: "updater.UpdateInfo") -> None:
+        body = [ft.Text(f"Доступна версия {info.version} (у вас {__version__}).", size=14)]
+        if info.notes:
+            body.append(ft.Text(info.notes, size=12, color=w.MUTED, selectable=True))
+        body.append(ft.Text(f"Файл {info.size / 1_048_576:.0f} МБ. После загрузки программа перезапустится сама.", size=12, color=w.MUTED))
+
+        def later(_=None) -> None:
+            self.page.pop_dialog()
+
+        def go(_=None) -> None:
+            self.page.pop_dialog()
+            self.run(self._install_update(info))
+
+        self.page.show_dialog(ft.AlertDialog(modal=True, title=ft.Text("Доступно обновление"), content=ft.Container(width=440, content=ft.Column(body, spacing=8, tight=True)),
+                                             actions=[ft.TextButton("Позже", on_click=later), ft.FilledButton("Обновить", icon=ft.Icons.SYSTEM_UPDATE, on_click=go)]))
+
+    async def _install_update(self, info: "updater.UpdateInfo") -> None:
+        client = self.client
+        if client is None:
+            return
+        if not updater.is_frozen():
+            self.notify("Обновление ставится только в собранном .exe (из исходников обновите код через git).", error=True)
+            return
+        bar = ft.ProgressBar(value=0, width=420, color=w.ACCENT, bgcolor=w.BORDER)
+        label = ft.Text("Загрузка…", size=12, color=w.MUTED)
+        self.page.show_dialog(ft.AlertDialog(modal=True, title=ft.Text(f"Обновление до {info.version}"), content=ft.Container(width=440, content=ft.Column([bar, label], spacing=8, tight=True))))
+        last = [0.0]
+
+        def progress(frac: float) -> None:
+            if frac - last[0] >= 0.01 or frac >= 1.0:
+                last[0], bar.value, label.value = frac, frac, f"{frac * 100:.0f}% · {frac * info.size / 1_048_576:.0f} из {info.size / 1_048_576:.0f} МБ"
+                bar.update()
+                label.update()
+
+        exe = updater.exe_path()
+        try:
+            new = await updater.download(client, info, exe.with_name(updater.EXE_NAME + ".new"), progress)
+            label.value = "Установка и перезапуск…"
+            label.update()
+            updater.launch_swap(updater.write_swap_script(new, exe, exe.parent))
+        except updater.UpdateError as exc:
+            self.page.pop_dialog()
+            self.notify(str(exc), error=True)
+            return
+        from tradeai_client.main import _shutdown  # локально: main импортирует этот модуль
+        await asyncio.sleep(0.5)
+        _shutdown()
+
+    # ------------------------------------------------------------------------------------------ избранное
+
+    async def toggle_favorite(self, trade: dict) -> bool | None:
+        """Звёздочка сделки (общая для профилей; состояние - на сервере, PostgreSQL). Ставится вместе с картинкой графика для golden_set.
+        -> новое состояние или None при ошибке (уже показана пользователю)."""
+        client = self.client
+        if client is None:
+            self.notify("Нет подключения к серверу", error=True)
+            return None
+        tid, note = trade["id"], ""
+        try:
+            if trade.get("is_favorite"):
+                await client.favorite_remove(tid)
+                now = False
+            else:
+                png, note = await self._golden_png(trade)
+                await client.favorite_add(tid, self.settings.profile, png)
+                now = True
+        except ApiError as exc:
+            self.notify(str(exc), error=True)
+            return None
+        trade["is_favorite"] = now
+        self.set_favorite_everywhere(tid, now)
+        self.notify(("Добавлено в избранное." + (f" {note}" if note else "")) if now else "Убрано из избранного.", error=bool(note) and now)
+        return now
+
+    def set_favorite_everywhere(self, trade_id: str, value: bool) -> None:
+        for view in (self.history, self.favorites):
+            view.set_favorite(trade_id, value)
+
+    async def _golden_png(self, trade: dict) -> tuple[bytes | None, str]:
+        """Картинка графика для золотой базы: тот же график, что открывается по двойному клику, но рисуется Pillow без окна. Не вышло - звёздочка ставится без картинки (JSON сервер соберёт сам)."""
+        if not trade.get("has_snapshot"):
+            return None, "У сделки нет снапшота: сохранены только данные без картинки."
+        try:
+            spec = await self._chart_spec(trade)
+            return await asyncio.to_thread(render_png, spec), ""
+        except (ChartDataError, ValueError, OSError) as exc:
+            log.warning("Картинка для избранного %s не построена: %s", trade["id"], exc)
+            return None, f"Картинку построить не удалось ({exc}): сохранены только данные."
 
     # ------------------------------------------------------------------------------------------ график сделки
 
@@ -271,13 +500,7 @@ class Shell:
             return
         self.notify(f"Строю график {fmt.coin_short(trade['coin'])}…")
         try:
-            snap = await client.snapshot(trade["id"])
-            iv = interval_to_ms((snap.get("meta") or {}).get("interval", ""))
-            now_ms = int(time.time() * 1000)
-            post, note = None, None
-            if self.settings.post_signal_candles:
-                post, note = await self._post_candles(snap, iv, now_ms)
-            spec = build_chart_spec(snap, post, now_ms=now_ms, post_note=note)
+            spec = await self._chart_spec(trade)
         except ApiError as exc:
             self.notify(str(exc), error=True)
             return
@@ -285,6 +508,22 @@ class Shell:
             self.notify(f"Снапшот нельзя нарисовать: {exc}", error=True)
             return
         open_chart(spec)
+
+    async def _chart_spec(self, trade: dict) -> dict:
+        """Снапшот сделки + свечи после сигнала -> spec графика. Ошибки: ApiError, ChartDataError."""
+        client = self.client
+        if client is None:
+            raise ApiError("network", "Нет подключения к серверу")
+        snap = await client.snapshot(trade["id"])
+        iv = interval_to_ms((snap.get("meta") or {}).get("interval", ""))
+        now_ms = int(time.time() * 1000)
+        post, note = None, None
+        if self.settings.post_signal_candles:
+            post, note = await self._post_candles(snap, iv, now_ms)
+        spec = build_chart_spec(snap, post, now_ms=now_ms, post_note=note)
+        spec["favorite"] = {"url": self.settings.normalized_url, "key": self.settings.api_key, "trade_id": trade["id"], "profile": self.settings.profile,
+                            "is_favorite": bool(snap["trade"].get("is_favorite"))}  # окно графика (отдельный процесс) ставит звёздочку само
+        return spec
 
     async def _post_candles(self, snap: dict, iv: int, now_ms: int) -> tuple[list[dict] | None, str | None]:
         """Свечи после сигнала из публичного REST Binance (без ключа API мониторинга!). Недоступно - график строится по снапшоту, причина в панели."""

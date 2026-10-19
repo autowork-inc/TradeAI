@@ -148,7 +148,7 @@ case "$cmd" in
         check_docker
         [ -f docker-compose.yml ] && [ -f Dockerfile ] || { echo "ОШИБКА: запускайте из каталога проекта (нет docker-compose.yml / Dockerfile)." >&2; exit 1; }
         ensure_env
-        mkdir -p data/shadow logs/shadow data/live logs/live backups
+        mkdir -p data/shadow logs/shadow data/live logs/live data/updates data/golden_set backups; chmod 777 data/golden_set  # golden_set: пишет API (uid 10001)
         # shadow-run и shadow-live не должны работать вместе (общая БД): режим Shadow сначала гасит боевой контур
         # (открытые позиции остаются на бирже под защитой стоп-ордеров, но без сопровождения - безубыток/трейлинг не двигаются)
         if $DC --profile live ps --status running --services 2>/dev/null | grep -qx shadow-live; then
@@ -188,7 +188,7 @@ case "$cmd" in
                 [ "$answer" = "REAL" ] || { echo "Отменено." >&2; exit 1; }
             fi
         fi
-        mkdir -p data/shadow logs/shadow data/live logs/live backups
+        mkdir -p data/shadow logs/shadow data/live logs/live data/updates data/golden_set backups; chmod 777 data/golden_set  # golden_set: пишет API (uid 10001)
         echo "== Останавливаю shadow-run (shadow-live заменяет его: общая БД, двух процессов быть не должно)"
         $DC stop shadow-run 2>/dev/null || true
         echo "== Сборка и запуск: postgres api shadow-live"

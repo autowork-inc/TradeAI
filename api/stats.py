@@ -49,11 +49,12 @@ def _drawdown(rs_in_time_order: list[float]) -> float:
     return worst
 
 
-def _equity_curve(points: list[tuple[datetime, float]]) -> list[dict[str, Any]]:
-    cum, out = 0.0, []
-    for ts, r in points:
+def _equity_curve(points: list[tuple[datetime, float, float]]) -> list[dict[str, Any]]:
+    cum, cum_pnl, out = 0.0, 0.0, []
+    for ts, r, pnl in points:
         cum += r
-        out.append({"ts": iso(ts), "cum_r": cum})
+        cum_pnl += pnl
+        out.append({"ts": iso(ts), "cum_r": cum, "cum_pnl": cum_pnl})
     if len(out) > EQUITY_POINTS_MAX:  # прореживаем равномерно, последняя точка остаётся
         step = math.ceil(len(out) / EQUITY_POINTS_MAX)
         out = out[::step] + ([out[-1]] if (len(out) - 1) % step else [])
@@ -67,7 +68,7 @@ def compute_stats(rows: Iterable[dict[str, Any]], coins: Iterable[str], status_c
         r = row["r_multiple"]
         if r is None or row["exit_time"] is None:
             raise DataIntegrityError(f"Закрытая сделка {row.get('id', '?')} без r_multiple/exit_time")
-        trades.append({**row, "r_multiple": float(r)})
+        trades.append({**row, "r_multiple": float(r), "pnl": float(row.get("pnl") or 0.0)})  # pnl нужен профилю CHR (баланс от нуля в USDT); нет значения - 0
     trades.sort(key=lambda t: t["exit_time"])
     all_r = [t["r_multiple"] for t in trades]
 
@@ -91,13 +92,13 @@ def compute_stats(rows: Iterable[dict[str, Any]], coins: Iterable[str], status_c
     for t in trades:
         by_coin_strategy.setdefault((t["coin"], t["strategy_id"]), []).append(t["r_multiple"])
     return {
-        "overall": {**_summary(all_r), "max_drawdown_r": _drawdown(all_r)},
+        "overall": {**_summary(all_r), "max_drawdown_r": _drawdown(all_r), "net_pnl": sum(t["pnl"] for t in trades)},
         "by_coin": by_coin,
         "by_strategy": group("strategy_id"),
         "by_side": group("side"),
         "by_coin_strategy": [{"coin": c, "strategy": s, **_summary(rs)} for (c, s), rs in sorted(by_coin_strategy.items())],
         "by_exit_reason": by_reason,
-        "equity_curve": _equity_curve([(t["exit_time"], t["r_multiple"]) for t in trades]),
+        "equity_curve": _equity_curve([(t["exit_time"], t["r_multiple"], t["pnl"]) for t in trades]),
         "best_coin": traded[0]["coin"] if traded else None,
         "worst_coin": traded[-1]["coin"] if len(traded) > 1 else None,
         "counts": status_counts or {},

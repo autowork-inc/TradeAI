@@ -93,6 +93,9 @@ def apply_spec(chart: Any, spec: dict[str, Any]) -> None:
                             for m in sorted(spec["trade_markers"], key=lambda m: m["t"])])
 
     chart.set_visible_range(ts(spec["visible"][0]), ts(spec["visible"][1]))
+    if spec.get("favorite"):  # звёздочка «Избранное» (эталонный сетап) прямо на графике
+        from tradeai_client.chart_favorite import attach_favorite_button
+        attach_favorite_button(chart, spec)
     _panels(chart, spec)
 
 

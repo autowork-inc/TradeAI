@@ -18,7 +18,8 @@ def split_coins(coins: list[dict]) -> tuple[list[dict], list[dict]]:
 
 
 class DashboardView:
-    def __init__(self) -> None:
+    def __init__(self, host=None) -> None:
+        self.host = host  # Shell: профиль (profile_strategies / profile_coins); без него - без ограничений
         self._cards = ft.Column(spacing=10)
         self._events = ft.Column(spacing=2, tight=True)
         self._head = ft.Row(spacing=12)
@@ -52,9 +53,15 @@ class DashboardView:
         pulse_color = w.MUTED if alive is None else (w.GREEN if alive else w.RED)
         self._head.controls = [w.dot(pulse_color), ft.Text(pulse, color=pulse_color, size=13, weight=ft.FontWeight.W_600),
                                ft.Text(f"обновлено {fmt.fmt_local(s['server_time'])}", color=w.MUTED, size=12)]
-        crypto, mt5 = split_coins(s["coins"])
+        strategies = getattr(self.host, "profile_strategies", lambda: None)()
+        pool = getattr(self.host, "profile_coins", lambda: None)()
+        shown = [c for c in s["coins"] if pool is None or c["coin"] in pool]
+        if strategies is not None:  # профиль со своим набором стратегий: автомат SMC (S0..S4) и чужие позиции не показываются
+            shown = [{**c, "setups": [], "positions": [p for p in c["positions"] if p["strategy_name"] in strategies]} for c in shown]
+        crypto, mt5 = split_coins(shown)
         self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (MT5)", mt5, MT5_COL)]
-        self._events.controls = [self._event_row(e) for e in s["events"]] or [w.label("Событий пока нет")]
+        events = [e for e in s["events"] if (pool is None or e["coin"] in pool) and (strategies is None or e.get("strategy_id") in strategies or e.get("strategy") in strategies)]
+        self._events.controls = [self._event_row(e) for e in events] or [w.label("Событий пока нет")]
 
     # ------------------------------------------------------------------------------------------ карточки
 

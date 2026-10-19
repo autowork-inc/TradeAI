@@ -57,3 +57,6 @@ claude.md
 check_metaapi.py
 *.docx
 CLAUDE.md
+
+# исходная выгрузка графиков для разметки (не для репозитория)
+charts.xlsx

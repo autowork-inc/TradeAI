@@ -100,7 +100,7 @@ def test_unreachable_database_fails_after_bounded_attempts_without_leaking_the_p
 
 
 def test_schema_sql_is_consistent():
-    assert schema.SCHEMA_VERSION == 2 and [v for v, _ in schema.MIGRATIONS] == [1, 2]
+    assert schema.SCHEMA_VERSION == 3 and [v for v, _ in schema.MIGRATIONS] == [1, 2, 3]
     assert schema.UPSERT_TRADE.count("$") == len(schema.TRADE_COLUMNS) and "updated_at = now()" in schema.UPSERT_TRADE
     assert "::jsonb" in schema.INSERT_SNAPSHOT and "ON CONFLICT (trade_id, seq) DO NOTHING" in schema.INSERT_CLOSE
 
@@ -124,8 +124,8 @@ def test_migrations_create_the_schema_and_are_idempotent():
             await db.close()
 
     v1, v2, tables, cols, versions = run(body())
-    assert v1 == v2 == 2 and versions == [1, 2]
-    assert {"trades", "trade_closes", "trade_snapshots", "state_events", "schema_migrations"} <= tables
+    assert v1 == v2 == 3 and versions == [1, 2, 3]
+    assert {"trades", "trade_closes", "trade_snapshots", "state_events", "favorites", "schema_migrations"} <= tables
     assert set(cols) >= set(schema.TRADE_COLUMNS)
     assert cols["strategy_id"] == "text"
     assert cols["entry_price"] == "numeric" and cols["signal_time"] == "timestamp with time zone" and cols["plan"] == "jsonb"
@@ -391,7 +391,7 @@ def test_migration_v2_keeps_old_data_and_backfills_strategy_id():
         return version, trades, snaps, events, nullable
 
     version, trades, snaps, events, nullable = run(body())
-    assert version == 2
+    assert version == 3
     assert trades["smc:BTCUSDT:1"]["strategy_id"] == "smc" and trades["breakout:ETHUSDT:1"]["strategy_id"] == "breakout"  # старые имена сохранены
     assert trades["smc:BTCUSDT:1"]["status"] == "closed"  # закрытые сделки не тронуты
     assert trades["smc:DOGEUSDT:1"]["status"] == "aborted" and trades["smc:DOGEUSDT:1"]["exit_reason"] == "process_restart"

@@ -60,6 +60,19 @@ def account_text(account: dict | None, visible: bool = False) -> str:
     return f"Баланс: ${account['balance']:,.2f} USDT" if visible else f"Баланс: {HIDDEN_BALANCE} USDT"
 
 
+def fmt_usd(v: float | None) -> str:
+    """Деньги со знаком: +$12.34 / −$5.00; нет данных - тире."""
+    return DASH if v is None else (f"+${v:,.2f}" if v > 0 else f"−${-v:,.2f}" if v < 0 else "$0.00")
+
+
+def chr_balance_text(net_pnl: float | None, visible: bool = False) -> str:
+    """Баланс профиля CHR: всегда от нуля - накопленный результат его сделок в USDT («$0.00» до первой закрытой сделки)."""
+    if not visible:
+        return f"Баланс CHR: {HIDDEN_BALANCE}"
+    v = 0.0 if net_pnl is None else net_pnl
+    return f"Баланс CHR: ${v:,.2f}" if v >= 0 else f"Баланс CHR: −${-v:,.2f}"
+
+
 def default_mode(account: dict | None) -> str:
     """Активный контур по умолчанию: боевой счёт жив - live, иначе shadow."""
     return "live" if account and account.get("available") else "shadow"

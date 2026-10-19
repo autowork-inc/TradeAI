@@ -9,7 +9,7 @@
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -33,6 +33,8 @@ class ClientSettings:
     post_signal_candles: bool = True  # на графике достраивать свечи ПОСЛЕ сигнала из публичного REST Binance (в снапшоте их нет)
     binance_rest: str = "https://fapi.binance.com"
     balance_visible: bool = False  # сумма баланса в шапке по умолчанию скрыта (***)
+    profile: str = "SANTA"  # активный профиль (SANTA | CHR): запоминается и загружается при следующем запуске
+    chr_extra_coins: list[str] = field(default_factory=list)  # монеты, добавленные пользователем в пул профиля CHR (сверх умолчаний tradeai_client.profiles)
     mode_filter: str = ""  # последний выбранный пользователем режим Statistics/History (all|live|shadow); пусто - следовать активному контуру
 
     def validate(self) -> "ClientSettings":
@@ -42,6 +44,13 @@ class ClientSettings:
         if parts.query or parts.fragment or parts.username or parts.password:
             raise SettingsError("В адресе сервера не должно быть параметров и логина/пароля: ключ вводится отдельным полем")
         return self
+
+    def __post_init__(self) -> None:
+        """Файл настроек правит человек: неверный профиль -> SANTA, неверный список монет -> пустой (а не падение при старте)."""
+        from tradeai_client.profiles import normalize_profile
+        self.profile = normalize_profile(self.profile)
+        if not isinstance(self.chr_extra_coins, list) or not all(isinstance(c, str) for c in self.chr_extra_coins):
+            self.chr_extra_coins = []
 
     @property
     def normalized_url(self) -> str:

@@ -5,7 +5,8 @@ advisory-блокировкой (два процесса не мигрируют
   trades          - одна строка на сделку (обновляется по ходу жизни: заявка -> позиция -> частичные закрытия -> закрыта);
   trade_closes    - КАЖДОЕ закрытие (частичное или итоговое): +1R 50%, +3R 40%, стоп, безубыток, трейлинг, таймаут;
   trade_snapshots - снапшот входа: свечи (JSONB, последние ~100) и геометрия сетапа в едином формате {type,t1,t2,p1,p2,label};
-  state_events    - журнал переходов состояний: стейт-машина сетапа SMC (S0..S4 по шорту/лонгу) и жизненный цикл сделок.
+  state_events    - журнал переходов состояний: стейт-машина сетапа SMC (S0..S4 по шорту/лонгу) и жизненный цикл сделок;
+  favorites       - сделки, отмеченные звёздочкой («эталонные сетапы», общие для профилей клиента; пишет API, не бот).
 Цены и объёмы - NUMERIC, время - TIMESTAMPTZ (UTC). Первичный ключ сделки - signal_id (id = trade_id Оркестратора), поэтому
 повторная запись той же сделки - upsert, а не дубль. `mode` отделяет shadow от live в одной БД.
 Боевая сделка пишется под id `<signal_id>:live` (иначе upsert затёр бы теневую строку с тем же signal_id); её снапшот - копия теневого (COPY_SNAPSHOT).
@@ -143,8 +144,22 @@ _V2 = [
     "WHERE status IN ('pending_limit', 'pending_market', 'open')",
 ]
 
+# Версия 3 (2026-10-19, «База эталонных сетапов»): избранные сделки. Отдельная таблица, а не колонка trades: бот трогает trades на каждом тике записи,
+# а звёздочку ставит пользователь через API - так строка сделки остаётся единственной ответственностью бота. Флаг общий для всех профилей клиента
+# (SANTA и CHR видят избранное друг друга); created_by - подпись профиля, поставившего звёздочку. Удаление сделки (reset_db) каскадно чистит и избранное.
+_V3 = [
+    """
+    CREATE TABLE favorites (
+        trade_id   TEXT PRIMARY KEY REFERENCES trades (id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_by TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX favorites_created_at_idx ON favorites (created_at DESC)",
+]
+
 # (версия, [DDL...]); версии идут подряд с 1
-MIGRATIONS: list[tuple[int, list[str]]] = [(1, _V1), (2, _V2)]
+MIGRATIONS: list[tuple[int, list[str]]] = [(1, _V1), (2, _V2), (3, _V3)]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 MIGRATION_LOCK_KEY = 7_340_211  # произвольная константа: ключ pg_advisory_xact_lock
 

@@ -31,7 +31,7 @@ def texts(c) -> list[str]:
 
 class Host:
     def __init__(self, client=None):
-        self.client, self.opened, self.ran = client, [], []
+        self.client, self.opened, self.ran, self.favorited = client, [], [], []
         self.default_mode, self.saved_mode, self.remembered = "shadow", "", []
 
     def remember_mode(self, mode):
@@ -43,6 +43,11 @@ class Host:
 
     async def open_trade_chart(self, trade):
         self.opened.append(trade["id"])
+
+    async def toggle_favorite(self, trade):
+        self.favorited.append(trade["id"])
+        trade["is_favorite"] = not trade.get("is_favorite")
+        return trade["is_favorite"]
 
 
 def test_dashboard_shows_every_coin_with_state_positions_and_events(fx):
@@ -98,7 +103,7 @@ def test_history_double_tap_and_button_open_the_chart_for_that_trade(fx):
     assert len(rows) == len(v._items)
     rows[3].on_double_tap(None)
     assert host.opened == [v._items[3]["id"]]
-    button = next(x for x in walk(rows[1]) if isinstance(x, ft.IconButton))
+    button = next(x for x in walk(rows[1]) if isinstance(x, ft.IconButton) and x.icon == ft.Icons.CANDLESTICK_CHART)
     button.on_click(None)
     assert host.opened[-1] == v._items[1]["id"]
 
@@ -118,7 +123,7 @@ def test_history_single_tap_selects_without_rebuilding_rows(fx):
 def test_history_row_without_snapshot_has_disabled_button(fx):
     v, _ = history_with(fx)
     item = dict(v._items[0], has_snapshot=False)
-    button = next(x for x in walk(v._row(item)) if isinstance(x, ft.IconButton))
+    button = next(x for x in walk(v._row(item)) if isinstance(x, ft.IconButton) and x.icon == ft.Icons.CANDLESTICK_CHART)
     assert button.disabled is True
 
 
@@ -211,7 +216,8 @@ def test_history_row_marks_restart_with_readable_status_and_tooltip():
 
 def test_coin_filters_pick_up_coins_added_by_the_server_and_keep_selection():
     for view in (StatsView(Host()), HistoryView(Host())):
-        view._coin.value = "BTCUSDT"
+        view._coin.set_selected(["BTCUSDT"])
         view.set_coins(["BTCUSDT", "SOLUSDT", "NEWUSDT"])
-        keys = [o.key for o in view._coin.options]
-        assert keys[0] == "all" and "SOLUSDT" in keys and "NEWUSDT" in keys and keys.count("BTCUSDT") == 1 and view._coin.value == "BTCUSDT"
+        keys = [k for k, _ in view._coin._options]
+        assert "SOLUSDT" in keys and "NEWUSDT" in keys and keys.count("BTCUSDT") == 1 and view._coin.selected == ["BTCUSDT"]  # выбор не потерян
+        assert view._coin.filter() == ["BTCUSDT"]

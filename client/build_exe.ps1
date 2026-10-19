@@ -5,9 +5,29 @@
 #   -ApiKey     ключ API (или переменная окружения TRADEAI_BUILD_API_KEY; ключ берётся на сервере: ./deploy/shadow.sh apikey).
 #               Без ключа .exe при первом запуске откроет окно настроек и сохранит ввод в settings.json рядом с .exe.
 #               ВНИМАНИЕ: ключ внутри .exe читается любым, у кого есть файл - не передавайте такой .exe посторонним.
-param([switch]$OneDir, [switch]$SkipTests, [string]$ServerUrl = "", [string]$ApiKey = $env:TRADEAI_BUILD_API_KEY)
+# Автообновление (2026-10-19): с ключом -Publish после успешной сборки готовый .exe и version.json отправляются на VPS в ./data/updates (по SSH-ключу):
+#   -Publish            выложить сборку для автообновления клиентов (клиенты при старте сравнивают версию и предлагают обновиться)
+#   -Version 0.3.0      сменить версию клиента (tradeai_client\__init__.py); без параметра берётся текущая. Клиенты обновляются, только если версия на сервере НОВЕЕ.
+#   -Notes "..."        текст «что нового» в окне обновления
+#   -PublishHost/-PublishUser/-PublishKey/-PublishDir  куда класть (по умолчанию хост из адреса сервера, root, ~/.ssh/id_ed25519, trading/data/updates)
+# Публикуется только сборка в один файл (без -OneDir). Ключ API, зашитый в .exe (-ApiKey), попадёт на сервер вместе с файлом; отдаётся он только по ключу API.
+param([switch]$OneDir, [switch]$SkipTests, [string]$ServerUrl = "", [string]$ApiKey = $env:TRADEAI_BUILD_API_KEY,
+      [switch]$Publish, [string]$Version = "", [string]$Notes = "", [string]$PublishHost = "", [string]$PublishUser = "root",
+      [string]$PublishKey = (Join-Path $env:USERPROFILE ".ssh\id_ed25519"), [string]$PublishDir = "trading/data/updates")
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+
+if ($Publish -and $OneDir) { throw "-Publish работает только с однофайловой сборкой (без -OneDir): клиент обновляет один .exe" }
+$initFile = Join-Path $PSScriptRoot "tradeai_client\__init__.py"
+if ($Version) {
+    if ($Version -notmatch '^\d{1,4}(\.\d{1,4}){1,3}$') { throw "Версия вида 0.3.0, получено '$Version'" }
+    $initText = [System.IO.File]::ReadAllText($initFile)
+    $initText = [regex]::Replace($initText, '(?m)^__version__ = "[^"]*"', ('__version__ = "' + $Version + '"'))
+    [System.IO.File]::WriteAllText($initFile, $initText, (New-Object System.Text.UTF8Encoding($false)))
+}
+$appVersion = [regex]::Match([System.IO.File]::ReadAllText($initFile), '(?m)^__version__ = "([^"]+)"').Groups[1].Value
+if (-not $appVersion) { throw "Не найден __version__ в $initFile" }
+Write-Host "== Версия клиента: $appVersion"
 
 if (-not (Test-Path .venv\Scripts\python.exe)) {
     Write-Host "== Создаю окружение .venv"
@@ -36,7 +56,7 @@ if ($ServerUrl -or $ApiKey) {
 }
 Write-Host "== flet pack"
 $packArgs = @("pack", "app.py", "--name", "TradeAI-Monitor", "--product-name", "TradeAI Monitor", "--file-description", "TradeAI Monitor",
-          "--product-version", "0.1.0", "--distpath", "dist", "-y",
+          "--product-version", $appVersion, "--distpath", "dist", "-y",
           # статические файлы lightweight-charts (js/css/html окна графика) PyInstaller сам не находит
           "--pyinstaller-build-args=--collect-all=lightweight_charts")
 if ($OneDir) { $packArgs += "-D" }
@@ -51,3 +71,28 @@ try {
 $exe = if ($OneDir) { "dist\TradeAI-Monitor\TradeAI-Monitor.exe" } else { "dist\TradeAI-Monitor.exe" }
 if (-not (Test-Path $exe)) { throw "Сборка завершилась, но $exe не найден" }
 Write-Host ("== Готово: {0} ({1:N1} МБ)" -f (Resolve-Path $exe), ((Get-Item $exe).Length / 1MB))
+
+if ($Publish) {
+    Write-Host "== Публикация обновления на сервер"
+    $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+    $size = (Get-Item $exe).Length
+    if (-not $PublishHost) { $PublishHost = ([uri]($(if ($ServerUrl) { $ServerUrl } else { [regex]::Match([System.IO.File]::ReadAllText($defaultsFile), '(?m)^SERVER_URL = "([^"]*)"').Groups[1].Value }))).Host }
+    if (-not $PublishHost) { throw "Не удалось определить хост сервера: задайте -PublishHost" }
+    if (-not (Test-Path $PublishKey)) { throw "Нет SSH-ключа $PublishKey (параметр -PublishKey)" }
+    $versionJson = Join-Path $env:TEMP "tradeai_version.json"
+    $payload = [ordered]@{ version = $appVersion; sha256 = $hash; size = $size; notes = $Notes; built_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
+    [System.IO.File]::WriteAllText($versionJson, ($payload | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+    $target = "$PublishUser@$PublishHost"
+    $sshOpts = @("-i", $PublishKey, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new")
+    & ssh @sshOpts $target "mkdir -p $PublishDir"
+    if ($LASTEXITCODE -ne 0) { throw "ssh: не удалось создать $PublishDir на $PublishHost" }
+    # сначала .exe, потом version.json (и через временные имена): клиент не должен увидеть новую версию раньше файла и не должен скачать недописанный файл
+    & scp @sshOpts $exe "${target}:$PublishDir/TradeAI-Monitor.exe.part"
+    if ($LASTEXITCODE -ne 0) { throw "scp .exe не удался" }
+    & scp @sshOpts $versionJson "${target}:$PublishDir/version.json.part"
+    if ($LASTEXITCODE -ne 0) { throw "scp version.json не удался" }
+    & ssh @sshOpts $target "cd $PublishDir && chmod 644 TradeAI-Monitor.exe.part version.json.part && mv -f TradeAI-Monitor.exe.part TradeAI-Monitor.exe && mv -f version.json.part version.json"
+    if ($LASTEXITCODE -ne 0) { throw "ssh: не удалось подменить файлы обновления" }
+    Remove-Item $versionJson -ErrorAction SilentlyContinue
+    Write-Host ("== Опубликовано: версия {0}, {1:N1} МБ, sha256 {2}..." -f $appVersion, ($size / 1MB), $hash.Substring(0, 12))
+}

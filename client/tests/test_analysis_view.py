@@ -253,5 +253,5 @@ def test_shell_wires_the_analysis_tab_as_the_fourth_tab(monkeypatch):
     sh = shell_mod.Shell(page)
     tabs = page.add.call_args.args[2]
     bar, view = tabs.content.controls
-    assert tabs.length == len(bar.tabs) == len(view.controls) == 4 and bar.tabs[shell_mod.TAB_ANALYSIS].label == "Analysis"
-    assert view.controls[shell_mod.TAB_ANALYSIS] is sh.analysis.control
+    assert tabs.length == len(bar.tabs) == len(view.controls) == 5 and bar.tabs[shell_mod.TAB_ANALYSIS].label == "Analysis" and bar.tabs[shell_mod.TAB_FAVORITES].label == "Favorites"
+    assert view.controls[shell_mod.TAB_ANALYSIS] is sh.analysis.control and view.controls[shell_mod.TAB_FAVORITES] is sh.favorites.control

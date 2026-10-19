@@ -21,7 +21,8 @@ def _dropdown(label: str, options: list[tuple[str, str]], width: float, on_selec
 class StatsView:
     def __init__(self, host) -> None:
         self.host = host
-        self._coin = _dropdown("Монета", [("all", "Все")] + [(c, fmt.coin_short(c)) for c in COINS], 130, self._changed)
+        self._server_coins: list[str] = []
+        self._coin = w.MultiSelect("Монеты", [(c, fmt.coin_short(c)) for c in COINS], self._changed, host, width=190)
         self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 230, self._changed)
         self._mode = _dropdown("Режим", fmt.MODE_OPTIONS, 180, self._mode_changed)
         saved = getattr(self.host, "saved_mode", "")
@@ -32,16 +33,35 @@ class StatsView:
         self._goal = w.GoalBar(fmt.TRADES_GOAL)
         self._body = ft.Column(spacing=14)
         self.control = ft.Column(
-            [ft.Container(height=2), ft.Row([self._mode, self._coin, self._strategy, self._side, self._period,
-                     ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp,
-                     ft.Container(expand=True), self._goal.control], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            [ft.Container(height=2), ft.Row([self._mode, self._coin.control, self._strategy, self._side, self._period,
+                     ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp],
+                     spacing=10, run_spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+             ft.Row([self._goal.control]),
              self._body], expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
+        self.apply_profile()
+
+    # ------------------------------------------------------------------------------------------ профиль и фильтры
+
+    def _scope(self) -> tuple[list[str] | None, list[str] | None]:
+        return getattr(self.host, "profile_strategies", lambda: None)(), getattr(self.host, "profile_coins", lambda: None)()
+
+    def apply_profile(self) -> None:
+        """Профиль сменился (или только что открыт): варианты стратегий и монет, видимость режима."""
+        strategies, pool = self._scope()
+        options = fmt.STRATEGY_OPTIONS if strategies is None else [("all", "Все")] + [(k, fmt.strategy_label(k)) for k in strategies]
+        self._strategy.options = [ft.DropdownOption(key=k, text=t) for k, t in options]
+        self._strategy.value = "all"
+        self._coin.set_options([(c, fmt.coin_short(c)) for c in (pool if pool is not None else self._all_coins())], select_all=True)
+        self._mode.visible = strategies is None  # CHR: только Shadow-стратегии, переключатель режима не нужен
+
+    def _all_coins(self) -> list[str]:
+        return list(dict.fromkeys([*COINS, *self._server_coins]))
 
     def set_coins(self, coins: list[str]) -> None:
-        """Монеты с сервера (автоселектор подключает новые на лету): фильтр «Монета» получает их вместе с прежними; выбранное значение сохраняется. Перерисовка - при ближайшем обновлении вкладки."""
-        merged = list(dict.fromkeys([*COINS, *coins]))
-        if [o.key for o in self._coin.options][1:] != merged:
-            self._coin.options = [ft.DropdownOption(key="all", text="Все")] + [ft.DropdownOption(key=c, text=fmt.coin_short(c)) for c in merged]
+        """Монеты с сервера (автоселектор подключает новые на лету): фильтр «Монеты» получает их вместе с прежними; выбор сохраняется. Профиль CHR держит свой пул."""
+        self._server_coins = list(coins)
+        if self._scope()[1] is None:
+            self._coin.set_options([(c, fmt.coin_short(c)) for c in self._all_coins()])
 
     async def _changed(self, _=None) -> None:
         await self.refresh()
@@ -60,13 +80,21 @@ class StatsView:
 
     def _filters(self) -> dict:
         pick = lambda d: None if d.value in (None, "all") else [d.value]
+        strategies, pool = self._scope()
         days = PERIODS[self._period.value or "all"][1]
         since = None if days is None else (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return {"coins": pick(self._coin), "strategies": pick(self._strategy), "sides": pick(self._side), "since": since, "mode": self._mode.value or "shadow"}
+        picked = self._coin.filter()
+        return {"coins": picked if picked is not None else pool, "strategies": pick(self._strategy) or strategies, "sides": pick(self._side), "since": since,
+                "mode": "shadow" if strategies is not None else (self._mode.value or "shadow")}
 
     async def refresh(self) -> None:
         client = self.host.client
         if client is None:
+            return
+        if self._coin.is_empty:  # «Снять всё»: ничего не выбрано - показываем пустую статистику, а не всё подряд
+            self._goal.set(0)
+            self._body.controls = [w.label("Не выбрано ни одной монеты", size=14)]
+            self.control.update()
             return
         try:
             data = await client.stats(**self._filters())
@@ -88,7 +116,10 @@ class StatsView:
         se = f"± {o['avg_r_stderr']:.2f}" if o["avg_r_stderr"] is not None else None
         pf_color = w.MUTED if pf == fmt.DASH else (w.GREEN if pf == "∞" or float(pf) >= 1 else w.RED)
         wr = o["win_rate"]
+        chr_profile = self._scope()[0] is not None
+        pnl_kpi = [w.kpi("PnL (USDT)", fmt.fmt_usd(o.get("net_pnl")), color=fmt.r_color(o.get("net_pnl")), sub="от нуля, только сделки профиля", tooltip="Сумма результатов сделок в USDT, старт с 0")] if chr_profile else []
         out.append(ft.Row([
+            *pnl_kpi,
             w.kpi("Сделок", str(o["trades"]), sub=f"{o['wins']} приб. · {o['losses']} убыт." + (f" · {o['flat']} нулевых" if o["flat"] else "")),
             w.kpi("Win Rate", fmt.fmt_pct(wr), color=w.TEXT if wr is None else (w.GREEN if wr >= 0.5 else w.AMBER), tooltip="Доля сделок с итогом > 0 R"),
             w.kpi("Profit Factor", pf, color=pf_color, sub=f"+{o['gross_profit_r']:.2f} R / −{o['gross_loss_r']:.2f} R",
@@ -99,7 +130,10 @@ class StatsView:
                   sub="от пика накопленного R"),
         ], wrap=True, spacing=12, run_spacing=12))
         out.append(self._coins_card(d))
-        out.append(w.card(ft.Column([w.title("Накопленный R по времени закрытия", 15), w.equity_bars(d["equity_curve"])], spacing=10)))
+        if chr_profile:
+            out.append(w.card(ft.Column([w.title("Накопленный PnL (USDT) от нуля, по времени закрытия", 15), w.equity_bars(d["equity_curve"], key="cum_pnl", unit="USDT")], spacing=10)))
+        else:
+            out.append(w.card(ft.Column([w.title("Накопленный R по времени закрытия", 15), w.equity_bars(d["equity_curve"])], spacing=10)))
         out.append(ft.Row([self._breakdown("По стратегиям", [(fmt.STRATEGY_RU.get(x["strategy"], x["strategy"]), x) for x in d["by_strategy"]]),
                            self._breakdown("По сторонам", [(fmt.SIDE_RU.get(x["side"], x["side"]), x) for x in d["by_side"]]),
                            self._reasons(d["by_exit_reason"]), self._counts(d["counts"])], wrap=True, spacing=12, run_spacing=12,

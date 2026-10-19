@@ -221,11 +221,15 @@ services:
       LIVE_DATA_DIR: /app/data/live  # «пульс» боевого shadow-live; API берёт самый свежий из двух каталогов
       ANALYZER_URL: http://analyzer:8000  # прокси /api/analysis/* -> Strategy Quant Analyzer (профиль analytics); контейнера нет - прокси отвечает 503 analyzer_unavailable
       ANALYZER_TOKEN: ${API_KEY:-}  # общий секрет API и анализатора (заголовок X-Analyzer-Token); анализатор наружу не публикуется
+      GOLDEN_SET_DIR: /app/data/golden_set  # эталонные сетапы по звёздочке клиента (json + png)
+      UPDATE_DIR: /app/data/updates  # version.json и TradeAI-Monitor.exe (кладёт client/build_exe.ps1 -Publish)
     ports:
       - "${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000"
     volumes:
       - ./data/shadow:/app/data/shadow:ro
       - ./data/live:/app/data/live:ro
+      - ./data/updates:/app/data/updates:ro
+      - ./data/golden_set:/app/data/golden_set  # единственное место, куда API пишет файлы (shadow.sh создаёт каталог с правом записи)
     read_only: true
     tmpfs:
       - /tmp

@@ -67,6 +67,15 @@ class AnalysisView:
     def _placeholder(self, text: str) -> None:
         self._body.controls = [w.card(w.label(text, size=14))]
 
+    def reset(self) -> None:
+        """Профиль сменился: прежний отчёт относился к другому набору стратегий и монет - убираем его."""
+        if self._running:
+            return
+        self._report, self._job_id = None, None
+        self._placeholder("Нажмите «Run Deep Analysis»: анализатор посчитает метрики по закрытым сделкам выбранного режима.")
+        if w.attached(self.control):
+            self.control.update()
+
     def _show_error(self, exc: ApiError) -> None:
         color = w.AMBER if exc.kind == "analyzer" else w.RED
         self._body.controls = [w.banner(str(exc), color, ft.Icons.WARNING_AMBER if exc.kind == "analyzer" else ft.Icons.ERROR)]
@@ -111,7 +120,11 @@ class AnalysisView:
                 return max(0.0, min(240.0, float((f.value or "5").replace(",", "."))))
             except ValueError:
                 return 5.0
-        return {"mode": self._mode.value or "shadow", "news": {"enabled": True, "before_min": minutes(self._before), "after_min": minutes(self._after), "mode": "touch", "impacts": ["high"]}}
+        scope = {}
+        strategies, pool = getattr(self.host, "profile_strategies", lambda: None)(), getattr(self.host, "profile_coins", lambda: None)()
+        if strategies is not None:  # профиль со своими стратегиями (CHR): анализ только по ним и по их пулу монет
+            scope = {"strategies": strategies, "coins": pool, "mode": "shadow"}
+        return {**{"mode": self._mode.value or "shadow"}, **scope, "news": {"enabled": True, "before_min": minutes(self._before), "after_min": minutes(self._after), "mode": "touch", "impacts": ["high"]}}
 
     async def _run_clicked(self, _=None) -> None:
         client = self.host.client

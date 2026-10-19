@@ -398,3 +398,54 @@ def test_client_fixtures_match_the_api_contract(client):
     same_shape(load("snapshot_smc_short.json")["closes"], snap["closes"], "closes")
     with client.websocket_connect("/ws/live_state", headers=H) as ws:
         same_shape(load("live_state.json"), ws.receive_json(), "live_state")
+
+
+# ================================================================================== избранное (Golden Set)
+
+
+def test_favorite_star_roundtrip_filter_golden_files_and_shared_flag(seeded, tmp_path):
+    import base64
+    import json as _json
+
+    from api.favorites import PNG_MAGIC
+
+    golden = tmp_path / "golden"
+    (tmp_path / ".shadow_heartbeat").write_text("1")
+    full_id = seeded["full_id"]
+    png = base64.b64encode(PNG_MAGIC + b"\x00" * 64).decode()
+    with TestClient(create_app(make_settings(tmp_path, golden_set_dir=golden))) as c:
+        items = {t["id"]: t for t in c.get("/api/trades?mode=all&limit=100", headers=H).json()["items"]}
+        assert not any(t["is_favorite"] for t in items.values())
+        assert c.get("/api/trades?mode=all&favorite=true", headers=H).json()["total"] == 0
+
+        r = c.put(f"/api/favorites/{full_id}", headers=H, json={"profile": "CHR", "image_png_b64": png})
+        assert r.status_code == 200 and r.json()["is_favorite"] is True and len(r.json()["files"]) == 2
+        again = c.put(f"/api/favorites/{full_id}", headers=H, json={"profile": "SANTA"})  # повтор от другого профиля: не дубль, не ошибка
+        assert again.status_code == 200
+
+        fav = c.get("/api/trades?mode=all&favorite=true", headers=H).json()
+        assert fav["total"] == 1 and fav["items"][0]["id"] == full_id and fav["items"][0]["is_favorite"] is True
+        assert c.get(f"/api/trades/{full_id}/snapshot", headers=H).json()["trade"]["is_favorite"] is True
+        stem = full_id.replace(":", "_")
+        data = _json.loads((golden / f"{stem}.json").read_text(encoding="utf-8"))
+        assert data["trade"]["id"] == full_id and data["candles"] and data["geometry"] and data["reason"]["title"] and data["favorited_by"] in ("CHR", "SANTA")
+        assert data["image"] == f"{stem}.png" and (golden / f"{stem}.png").exists()  # второй PUT без картинки не потерял первую
+
+        assert c.put("/api/favorites/NOPE:1", headers=H, json={}).status_code == 404
+        assert c.put(f"/api/favorites/{full_id}", headers=H, json={"image_png_b64": "AAAA"}).status_code == 422
+        assert c.put(f"/api/favorites/{full_id}", json={}).status_code == 401  # без ключа
+
+        d = c.delete(f"/api/favorites/{full_id}", headers=H)
+        assert d.status_code == 200 and d.json()["is_favorite"] is False
+        assert c.get("/api/trades?mode=all&favorite=true", headers=H).json()["total"] == 0
+        assert not (golden / f"{stem}.json").exists() and not (golden / f"{stem}.png").exists()
+        assert c.delete(f"/api/favorites/{full_id}", headers=H).status_code == 200  # снятие уже снятой - не ошибка
+
+    async def table_rows():
+        db = await Database.connect(TEST_URL, attempts=3, delay_s=0.2)
+        try:
+            return await db.fetch("SELECT * FROM favorites")
+        finally:
+            await db.close()
+
+    assert run(table_rows()) == []

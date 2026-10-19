@@ -76,3 +76,79 @@ def test_panel_script_cannot_be_glued_to_the_previous_statement(fx):
     assert _PANEL_JS.lstrip().startswith(";(function")
     _, spec = make_spec(fx)
     assert "tradeai-panel" in static_html(spec)
+
+
+def test_favorite_star_button_is_on_the_chart_and_sends_the_request(fx):
+    """Звёздочка в верхней панели графика: кнопка в HTML, нажатие -> PUT с картинкой / DELETE, подпись меняется; ошибка сервера показывается на кнопке."""
+    from tradeai_client import chart_favorite
+
+    _, spec = make_spec(fx)
+    spec["favorite"] = {"url": "http://127.0.0.1:1", "key": "k" * 40, "trade_id": "BTCUSDT:1", "profile": "CHR", "is_favorite": False}
+    html = static_html(spec)
+    assert 'makeButton("☆ В избранное"' in html
+    assert "k" * 40 not in html  # ключ API в HTML окна не попадает
+
+    class Widget:
+        def __init__(self):
+            self.text = None
+
+        def set(self, text):
+            self.text = text
+
+    class Chart:
+        def __init__(self):
+            self.widget, self.handler = Widget(), None
+            self.topbar = self
+
+        def button(self, name, text, separator=False, func=None):
+            self.handler = func
+
+        def __getitem__(self, name):
+            return self.widget
+
+    sent = []
+    chart = Chart()
+    chart_favorite.attach_favorite_button(chart, spec, send=lambda fav, add, png: sent.append((fav["trade_id"], fav["profile"], add, png)), render=lambda sp: b"\x89PNG-x")
+    chart.handler(chart)
+    chart.handler(chart)
+    assert sent == [("BTCUSDT:1", "CHR", True, b"\x89PNG-x"), ("BTCUSDT:1", "CHR", False, None)] and chart.widget.text == chart_favorite.LABEL_OFF
+
+    def broken(fav, add, png):
+        raise chart_favorite.FavoriteSendError("сервер недоступен")
+
+    chart2 = Chart()
+    chart_favorite.attach_favorite_button(chart2, spec, send=broken, render=lambda sp: b"x")
+    chart2.handler(chart2)
+    assert chart2.widget.text == "⚠ сервер недоступен"
+
+
+def test_send_favorite_builds_the_right_request():
+    import io
+    import urllib.error
+
+    from tradeai_client import chart_favorite
+
+    seen = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(req, timeout):
+        seen.update(url=req.full_url, method=req.get_method(), key=req.get_header("X-api-key"), body=req.data)
+        return Resp()
+
+    fav = {"url": "http://h:8001/", "key": "K" * 40, "trade_id": "A:B:live", "profile": "CHR"}
+    chart_favorite.send_favorite(fav, True, b"\x89PNG", opener)
+    assert seen["url"] == "http://h:8001/api/favorites/A:B:live" and seen["method"] == "PUT" and seen["key"] == "K" * 40 and json.loads(seen["body"])["profile"] == "CHR"
+    chart_favorite.send_favorite(fav, False, None, opener)
+    assert seen["method"] == "DELETE" and seen["body"] is None
+
+    def refuse(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 401, "no", {}, io.BytesIO(b""))
+
+    with pytest.raises(chart_favorite.FavoriteSendError, match="401"):
+        chart_favorite.send_favorite(fav, True, None, refuse)
