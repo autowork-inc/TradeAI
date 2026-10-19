@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, WebSo
 from fastapi.responses import JSONResponse
 from pydantic import StringConstraints
 
-from api import analysis_proxy, favorites, updates
+from api import analysis_proxy, candles, favorites, updates
 from api.livestate import SETUP_STRATEGIES, LiveStateHub, current_coins, freshest_heartbeat_age_s, read_account
 from api.reason import build_reason
 from api.security import FailureThrottle, check_key
@@ -204,6 +204,16 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
                 total = await conn.fetchval(f"SELECT count(*) FROM trades t LEFT JOIN favorites f ON f.trade_id = t.id WHERE {where}", *args)
         items = [{**trade_out(r), "has_snapshot": r["has_snapshot"], "is_favorite": r["is_favorite"]} for r in rows]
         return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    @app.get("/api/candles", dependencies=[Depends(auth)])
+    async def candles_endpoint(coin: Token, interval: Literal["5m", "15m", "1h", "4h"] = "15m", limit: Annotated[int, Query(ge=1, le=candles.MAX_LIMIT)] = 1000,
+                               end: Annotated[int | None, Query(ge=0)] = None) -> dict[str, Any]:
+        """Свечи Forex/металлов (кэш бота из MetaApi) для графика клиента; крипту клиент берёт у Binance сам. end - open_time последней нужной свечи, мс (прокрутка истории)."""
+        dirs = [settings.shadow_data_dir] + ([settings.live_data_dir] if settings.live_data_dir else [])
+        try:
+            return await asyncio.to_thread(candles.build, dirs, coin, interval, limit, end)
+        except candles.NoCandles:
+            raise HTTPException(status_code=404, detail="no_candles") from None
 
     @app.get("/api/trades/{trade_id}/snapshot", dependencies=[Depends(auth)])
     async def trade_snapshot(trade_id: TradeId) -> dict[str, Any]:

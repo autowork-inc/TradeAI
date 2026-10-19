@@ -1,133 +1,158 @@
-"""apply_spec на статическом графике lightweight-charts (тот же AbstractChart, что и у окна): без GUI и без процессов."""
+"""Окно графика: сборка страницы (конфиг без секретов, JS-файлы внутри), мост ChartApi (свечи, рисунки, избранное), хранилище рисунков, JS без синтаксических ошибок.
+Сам WebView без окна не проверить: живой прогон - `python app.py --selftest-chart снимок.png` (проверен на WebView2)."""
 
+import io
 import json
-import re
+import shutil
+import subprocess
+import threading
+import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
-import pandas as pd
 import pytest
 
-from tradeai_client import fmt
+from tradeai_client import chart_favorite, chart_window, drawings_store, fmt
 from tradeai_client.chart_spec import build_chart_spec
-from tradeai_client.chart_window import INNER_WIDTH, _frame, _ts, apply_spec
+from tradeai_client.chart_window import ChartApi, build_config, build_html
 
-lwc_widgets = pytest.importorskip("lightweight_charts.widgets")
 IV = 900_000
+SECRET = "S" * 40
 
 
-def static_html(spec) -> str:
-    chart = lwc_widgets.StaticLWC(width=1200, height=700, inner_width=INNER_WIDTH)
-    apply_spec(chart, spec)
-    chart.load()
-    return chart._html
-
-
-def make_spec(fx, name="snapshot_smc_short.json", post=True):
+def make_spec(fx, name="snapshot_smc_short.json", source=None):
     snap = fx(name)
-    last = snap["candles"][-1]
-    klines = [{"t": last["open_time"] + i * IV, "o": last["close"], "h": last["close"] * 1.001, "l": last["close"] * 0.999, "c": last["close"], "v": 5.0}
-              for i in range(1, 60)] if post else None
-    return snap, build_chart_spec(snap, klines, now_ms=fmt.to_ms(snap["trade"]["signal_time"]) + 400 * IV)
+    spec = build_chart_spec(snap, None, now_ms=fmt.to_ms(snap["trade"]["signal_time"]) + 40 * IV)
+    spec["source"] = source or {"kind": "binance", "symbol": "BTCUSDT", "rest": "http://127.0.0.1:1"}
+    spec["favorite"] = {"url": "http://127.0.0.1:1", "key": SECRET, "trade_id": snap["trade"]["id"], "profile": "CHR", "is_favorite": False}
+    return spec
 
 
-def test_pandas_time_resolution_cannot_break_the_time_axis():
-    """pandas 3 хранит время в микросекундах, а lightweight-charts делит int64 на 10**9: ось времени превращается в мусор (1970 год)."""
-    df = _frame([{"t": 1_791_600_000_000, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}], {"open": "o"})
-    assert str(df["time"].dtype) == "datetime64[ns]" and df["time"].astype("int64").iloc[0] // 10**9 == 1_791_600_000
-    assert _ts(1_791_600_000_000).timestamp() == 1_791_600_000.0  # наивное время трактуется как UTC
+def test_config_and_html_contain_everything_but_no_secrets(fx):
+    spec = make_spec(fx, source={"kind": "server", "symbol": "EURUSD", "url": "http://srv:8001", "key": SECRET})
+    cfg = build_config(spec, [])
+    html = build_html(cfg)
+    assert SECRET not in html and "srv:8001" not in html and "<script>window.__CFG__" in html  # ключ и адрес сервера остаются в мосте Python
+    assert cfg["interval"] == "15m" and cfg["timeframes"] == ["5m", "15m", "1h", "4h"] and cfg["source"] == {"kind": "server", "symbol": "EURUSD"}
+    assert cfg["favorite"] == {"is_favorite": False} and cfg["bot"] is None and cfg["chr"] is False and cfg["focus_ms"]
+    for marker in ("/*__CSS__*/", "/*__LIB__*/", "/*__CFG__*/", "/*__APP__*/"):
+        assert marker not in html
+    assert "LightweightCharts" in html and "createChart" in html and "Что увидел бот" in html and html.count("</script>") == 3  # ни один из файлов не закрывает тег раньше времени
+    assert "https://" not in html.split("window.__CFG__")[0].split("<style>")[0]  # страница не тянет внешние файлы
 
 
-def test_all_drawings_reach_the_chart_script(fx):
-    snap, spec = make_spec(fx)
-    html = static_html(spec)
-    for needle in ("Причина входа", "Результат", "FVG", "createPriceLine",  "Сигнал", "свип", "CHoCH", "Хронология", "Вход ", "Трейлинг"):
-        assert needle in html or json.dumps(needle)[1:-1] in html, needle  # тексты маркеров библиотека кладёт в JSON с \uXXXX-экранированием
-    # данные свечей ушли с корректными секундами эпохи (не 1970 год), сдвинутыми на пояс ПК (ось графика - в локальном времени)
-    first = (spec["bars"][0]["t"] + spec["tz_offset_ms"]) // 1000
-    assert f'"time":{first}' in html.replace(" ", "")
-    times = [int(x) for x in re.findall(r'"time":(\d+)', html.replace(" ", ""))]
-    assert times and min(times) > 1_700_000_000 and max(times) < 2_000_000_000
+def test_timeframes_include_the_trade_interval_when_it_is_not_standard(fx):
+    spec = make_spec(fx)
+    spec["interval"], spec["interval_ms"] = "1d", 86_400_000
+    assert build_config(spec, [])["timeframes"][-1] == "1d"
 
 
-def test_chart_renders_without_post_candles_and_for_long_breakout(fx):
-    for name, post in (("snapshot_smc_short.json", False), ("snapshot_breakout_long.json", True), ("snapshot_pending.json", False), ("snapshot_open.json", True)):
-        _, spec = make_spec(fx, name, post)
-        assert "Причина входа" in static_html(spec), name
+def test_html_survives_hostile_text_in_the_spec(fx):
+    spec = make_spec(fx)
+    spec["title"] = "</script><script>alert(1)</script>"
+    html = build_html(build_config(spec, []))
+    assert "</script><script>alert(1)" not in html and html.count("</script>") == 3
 
 
-def test_marker_times_are_on_the_helper_grid(fx):
-    _, spec = make_spec(fx)
-    grid = {t for t, _ in spec["helper"]}
-    assert all(m["t"] in grid for m in spec["trade_markers"]) and all(m["t"] in {b["t"] for b in spec["bars"]} for m in spec["setup_markers"])
-    assert isinstance(pd.Timestamp(spec["bars"][0]["t"], unit="ms"), pd.Timestamp)
+class _Candles(BaseHTTPRequestHandler):
+    seen: list = []
+
+    def do_GET(self):
+        _Candles.seen.append((self.path, self.headers.get("X-API-Key")))
+        if "fail" in self.path:
+            self.send_response(503)
+            self.end_headers()
+            return
+        rows = [[1_790_000_000_000 + i * IV, "1.5", "2", "1", "1.7", "10"] for i in range(3)]
+        body = json.dumps({"items": rows} if "/api/candles" in self.path else rows).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
 
 
-def test_side_panel_is_plain_html_without_python_callbacks(fx):
-    """Клик по тексту панели не должен вызывать событий в Python: таблицы lightweight-charts (Lib.Table) убраны, подписи идут через textContent."""
-    _, spec = make_spec(fx)
-    html = static_html(spec)
-    assert "Lib.Table" not in html and "tradeai-panel" in html and "Разбор сделки" in html and "textContent" in html
-    assert "+214.00 USDT" in html
+@pytest.fixture()
+def server():
+    httpd = HTTPServer(("127.0.0.1", 0), _Candles)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _Candles.seen.clear()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
 
 
-def test_panel_script_cannot_be_glued_to_the_previous_statement(fx):
-    """Скрипты окна склеиваются через перевод строки без `;`: панель, начатая с `(`, превращалась в ВЫЗОВ предыдущего выражения - справа была пустота."""
-    from tradeai_client.chart_window import _PANEL_JS
+def test_bridge_loads_binance_klines_without_a_key(fx, server):
+    spec = make_spec(fx, source={"kind": "binance", "symbol": "BTCUSDT", "rest": server})
+    rows = ChartApi(spec).klines("5m", 1_790_000_999_999, 500)
+    assert rows[0] == [1_790_000_000_000, 1.5, 2.0, 1.0, 1.7, 10.0] and len(rows) == 3
+    path, key = _Candles.seen[0]
+    assert path.startswith("/fapi/v1/klines?") and "symbol=BTCUSDT" in path and "interval=5m" in path and "endTime=1790000999999" in path and key is None
 
-    assert _PANEL_JS.lstrip().startswith(";(function")
-    _, spec = make_spec(fx)
-    assert "tradeai-panel" in static_html(spec)
+
+def test_bridge_loads_server_candles_with_the_key_and_reports_errors(fx, server):
+    api = ChartApi(make_spec(fx, source={"kind": "server", "symbol": "EURUSD", "url": server, "key": SECRET}))
+    assert len(api.klines("1h", None, 100)) == 3
+    path, key = _Candles.seen[0]
+    assert path.startswith("/api/candles?") and "coin=EURUSD" in path and "interval=1h" in path and "end=" not in path and key == SECRET
+    with pytest.raises(ValueError):
+        api.klines("2h")
+    with pytest.raises(RuntimeError, match="нет источника"):
+        ChartApi(make_spec(fx, source={"kind": "none"})).klines("5m")
+    bad = ChartApi(make_spec(fx, source={"kind": "binance", "symbol": "fail", "rest": server}))
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        bad.klines("5m")
+    with pytest.raises(RuntimeError, match="недоступен"):
+        ChartApi(make_spec(fx, source={"kind": "binance", "symbol": "X", "rest": "http://127.0.0.1:1"})).klines("5m")
 
 
-def test_favorite_star_button_is_on_the_chart_and_sends_the_request(fx):
-    """Звёздочка в верхней панели графика: кнопка в HTML, нажатие -> PUT с картинкой / DELETE, подпись меняется; ошибка сервера показывается на кнопке."""
-    from tradeai_client import chart_favorite
-
-    _, spec = make_spec(fx)
-    spec["favorite"] = {"url": "http://127.0.0.1:1", "key": "k" * 40, "trade_id": "BTCUSDT:1", "profile": "CHR", "is_favorite": False}
-    html = static_html(spec)
-    assert 'makeButton("☆ В избранное"' in html
-    assert "k" * 40 not in html  # ключ API в HTML окна не попадает
-
-    class Widget:
-        def __init__(self):
-            self.text = None
-
-        def set(self, text):
-            self.text = text
-
-    class Chart:
-        def __init__(self):
-            self.widget, self.handler = Widget(), None
-            self.topbar = self
-
-        def button(self, name, text, separator=False, func=None):
-            self.handler = func
-
-        def __getitem__(self, name):
-            return self.widget
+def test_bridge_saves_drawings_per_symbol_and_toggles_favorite(fx, tmp_path, monkeypatch):
+    monkeypatch.setattr(chart_window, "drawings_path", lambda: tmp_path / "drawings.json")
+    spec = make_spec(fx)
+    api = ChartApi(spec)
+    good = {"id": "a1", "type": "trend", "color": "#ffb300", "width": 2, "opacity": 0.9, "p1": {"t": 1_790_000_000, "p": 100.0}, "p2": {"t": 1_790_001_000, "p": 101.0}}
+    assert api.save_drawings(json.dumps([good, {"id": "bad", "type": "evil"}])) == 1
+    assert drawings_store.load(tmp_path / "drawings.json", spec["coin"]) == [good]
+    _, html = chart_window._window_args(spec)  # при следующем открытии монеты рисунки подставляются в конфиг страницы
+    assert '"id":"a1"' in html
 
     sent = []
-    chart = Chart()
-    chart_favorite.attach_favorite_button(chart, spec, send=lambda fav, add, png: sent.append((fav["trade_id"], fav["profile"], add, png)), render=lambda sp: b"\x89PNG-x")
-    chart.handler(chart)
-    chart.handler(chart)
-    assert sent == [("BTCUSDT:1", "CHR", True, b"\x89PNG-x"), ("BTCUSDT:1", "CHR", False, None)] and chart.widget.text == chart_favorite.LABEL_OFF
+    monkeypatch.setattr(chart_favorite, "send_favorite", lambda fav, add, png: sent.append((fav["trade_id"], add, bool(png))))
+    monkeypatch.setattr("tradeai_client.golden_image.render_png", lambda sp: b"\x89PNG")
+    assert api.toggle_favorite(True) == {"ok": True, "is_favorite": True} and api.toggle_favorite(False)["is_favorite"] is False
+    assert sent == [(spec["favorite"]["trade_id"], True, True), (spec["favorite"]["trade_id"], False, False)]
 
-    def broken(fav, add, png):
+    def refuse(fav, add, png):
         raise chart_favorite.FavoriteSendError("сервер недоступен")
 
-    chart2 = Chart()
-    chart_favorite.attach_favorite_button(chart2, spec, send=broken, render=lambda sp: b"x")
-    chart2.handler(chart2)
-    assert chart2.widget.text == "⚠ сервер недоступен"
+    monkeypatch.setattr(chart_favorite, "send_favorite", refuse)
+    assert api.toggle_favorite(True) == {"ok": False, "error": "сервер недоступен"}
+    assert ChartApi({**spec, "favorite": None}).toggle_favorite(True)["ok"] is False
+
+
+def test_drawings_store_cleans_foreign_and_broken_entries(tmp_path):
+    path = tmp_path / "drawings.json"
+    ok = {"id": "r1", "type": "rect", "color": "#00ff00", "width": 3, "opacity": 0.3, "p1": {"t": 1_790_000_000, "p": 1.0}, "p2": {"t": 1_790_000_900, "p": 2.0}}
+    hline = {"id": "h1", "type": "hline", "color": "#FFFFFF", "width": 1, "opacity": 1, "p1": {"t": 1_790_000_000, "p": 5.0}, "extra": "x"}
+    junk = [{"id": "x", "type": "rect", "color": "red", "width": 1, "opacity": 1, "p1": {"t": 1, "p": 1}, "p2": {"t": 2, "p": 2}},
+            {"id": "y", "type": "trend", "color": "#000000", "width": 99, "opacity": 1, "p1": {"t": 1, "p": 1}, "p2": {"t": 2, "p": 2}},
+            {"id": "z z", "type": "trend", "color": "#000000", "width": 1, "opacity": 1, "p1": {"t": 1, "p": 1}, "p2": {"t": 2, "p": 2}},
+            {"id": "n", "type": "trend", "color": "#000000", "width": 1, "opacity": 1, "p1": {"t": float("nan"), "p": 1}, "p2": {"t": 2, "p": 2}},
+            {"id": "no2", "type": "ray", "color": "#000000", "width": 1, "opacity": 1, "p1": {"t": 1, "p": 1}}, "строка", None]
+    assert drawings_store.save(path, "BTCUSDT", [ok, hline, *junk]) == 2
+    assert drawings_store.save(path, "ETHUSDT", [ok]) == 1
+    loaded = drawings_store.load(path, "BTCUSDT")
+    assert [d["id"] for d in loaded] == ["r1", "h1"] and "extra" not in loaded[1] and drawings_store.load(path, "XRPUSDT") == []
+    assert drawings_store.save(path, "BTCUSDT", []) == 0 and "BTCUSDT" not in json.loads(path.read_text(encoding="utf-8"))  # пустой список убирает запись монеты
+    path.write_text("{ не json", encoding="utf-8")
+    with pytest.raises(drawings_store.DrawingsError):
+        drawings_store.load(path, "BTCUSDT")
+    with pytest.raises(drawings_store.DrawingsError):
+        drawings_store.save(path, "BTCUSDT", [ok])  # битый файл не затирается молча
 
 
 def test_send_favorite_builds_the_right_request():
-    import io
-    import urllib.error
-
-    from tradeai_client import chart_favorite
-
     seen = {}
 
     class Resp:
@@ -152,3 +177,17 @@ def test_send_favorite_builds_the_right_request():
 
     with pytest.raises(chart_favorite.FavoriteSendError, match="401"):
         chart_favorite.send_favorite(fav, True, None, refuse)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="нужен node для проверки синтаксиса JS")
+def test_chart_js_has_valid_syntax():
+    out = subprocess.run(["node", "--check", str(chart_window.WEB_DIR / "chart.js")], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+
+
+def test_chart_js_guards_the_known_pitfalls():
+    """Страховки, найденные при проверке в браузере: холст выше слоёв графика, диапазон - после первой раскладки, подгрузка истории не срабатывает на сбросе диапазона."""
+    js, css = (chart_window.WEB_DIR / "chart.js").read_text(encoding="utf-8"), (chart_window.WEB_DIR / "chart.css").read_text(encoding="utf-8")
+    assert "#ov{position:absolute;inset:0;pointer-events:none;z-index:5}" in css
+    assert "chart.timeScale().width() <= 0" in js and "!S.quiet && !S.view" in js and "tickMarkFormatter" in js and "setMarkers" in js and "createPriceLine" in js
+    assert "subscribeVisibleLogicalRangeChange" in js and "wss://fstream.binance.com/market/stream" in js and "'4h'" in js

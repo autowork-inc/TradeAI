@@ -522,6 +522,9 @@ class Shell:
         if self.settings.post_signal_candles:
             post, note = await self._post_candles(snap, iv, now_ms)
         spec = build_chart_spec(snap, post, now_ms=now_ms, post_note=note)
+        coin = trade["coin"]  # источник живых свечей: Binance Futures для крипты, сервер мониторинга (кэш бота из MetaApi) для Forex/металлов
+        spec["source"] = ({"kind": "binance", "symbol": coin, "rest": self.settings.binance_rest} if coin.endswith("USDT")
+                          else {"kind": "server", "symbol": coin, "url": self.settings.normalized_url, "key": self.settings.api_key})
         spec["favorite"] = {"url": self.settings.normalized_url, "key": self.settings.api_key, "trade_id": trade["id"], "profile": self.settings.profile,
                             "is_favorite": bool(snap["trade"].get("is_favorite"))}  # окно графика (отдельный процесс) ставит звёздочку само
         return spec

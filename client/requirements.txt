@@ -1,7 +1,5 @@
 # Запуск клиента (Python 3.12, Windows 10/11). Версии зафиксированы: API Flet 1.x меняется между минорными версиями.
 flet==1.0.4
-lightweight-charts==2.1
-# lightweight-charts 2.1 не работает с pandas 3 (время в микросекундах -> ось времени превращается в мусор, свечи не рисуются)
-pandas>=2.2,<3
+pywebview==6.2.1  # окно графика (WebView2); сам график - TradingView Lightweight Charts 4.1.3, лежит в tradeai_client/chart_web
 aiohttp>=3.9,<4
 pillow>=10.1,<13  # картинка графика для «Избранного» (golden_image.py) без окна

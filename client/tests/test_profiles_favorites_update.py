@@ -492,3 +492,16 @@ def test_golden_png_is_rendered_from_the_chart_spec(fx):
     png = render_png(build_chart_spec(snap, None, now_ms=int(time.time() * 1000)))
     assert png.startswith(b"\x89PNG\r\n\x1a\n") and 5_000 < len(png) < 4_000_000  # лимит сервера - 4 МБ
     assert parse_color("#2bb673") == (43, 182, 115, 255) and parse_color("rgba(10,20,30,0.5)")[3] == 127 and parse_color("мусор")[3] == 255
+
+
+def test_significance_card_sits_in_the_same_row_as_the_filters_at_the_right_edge():
+    """Раскладка (требование пользователя): карточка «Значимость выводов» - в одном Row с фильтрами, последним элементом (у правого края), и в Statistics, и в Analysis."""
+    from tradeai_client.ui.analysis_view import AnalysisView
+
+    stats, analysis = StatsView(Host()), AnalysisView(Host())
+    for view, first_filter in ((stats, stats._mode), (analysis, analysis._mode)):
+        rows = [c for c in view.control.controls if isinstance(c, ft.Row) and view._goal.control in c.controls]
+        assert len(rows) == 1, "карточка должна быть в строке фильтров, а не на отдельной"
+        row = rows[0]
+        filters = row.controls[0]
+        assert row.controls[-1] is view._goal.control and isinstance(filters, ft.Row) and filters.expand and filters.wrap and first_filter in filters.controls

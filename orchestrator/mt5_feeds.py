@@ -127,6 +127,7 @@ class _Group:
         self.task: asyncio.Task | None = None
         self.failures = 0
         self.link = link  # Mt5Link: сбои связи -> пауза и переподключение вместо падения процесса
+        self.on_store: Callable[[str, Mapping[int, Row]], None] | None = None  # слушатель обновлений M5-хранилища (кэш свечей для графика клиента: orchestrator/chart_cache.py)
 
     def closed_limit(self) -> int:
         """open_time самой поздней свечи, которая уже закрыта (с запасом settle)."""
@@ -197,6 +198,8 @@ class _Group:
         for t in sorted(store)[: max(0, len(store) - keep)]:
             del store[t]
             stale.pop(t, None)
+        if self.on_store is not None:
+            self.on_store(symbol, store)
 
     def freeze(self) -> tuple[dict[str, dict[int, Row]], dict[str, dict[int, bool]]]:
         self.frozen = ({s: dict(r) for s, r in self.store.items()}, {s: dict(r) for s, r in self.stale_until.items()})
@@ -288,6 +291,10 @@ class Mt5KlineFeed(_FeedBase):
         self._engine, self._clock, self.interval, self.interval_ms, self.emit = engine, clock_ms, interval, interval_ms, emit
         self._bars = {"15m": m15_history_bars, "1h": h1_history_bars, "4h": htf_history_bars, "1d": d1_history_bars}
         self._last: dict[str, int | None] = {s: None for s in symbols}
+
+    def set_store_listener(self, listener: Callable[[str, Mapping[int, Row]], None] | None) -> None:
+        """Слушатель обновлений M5-хранилища (после каждого `merge`). Только чтение данных: исключения слушателя - его забота (кэш графика ловит OSError сам)."""
+        self._g.on_store = listener
 
     def m15_view(self, engine: FeatureEngine | None = None) -> "Mt5M15View":
         return Mt5M15View(self._g, engine or self._engine, self._bars["15m"])

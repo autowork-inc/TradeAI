@@ -189,7 +189,9 @@ async def shadow_main(opts: Options) -> None:
                 api = BinanceRest(session, config.REST_BASE_URL)
                 mt5_link = None
                 if mt5_wanted:  # импорт здесь: пакет exchange (боевой код) при чисто крипто-запуске не загружается
+                    from orchestrator.chart_cache import DIR_NAME as CHART_CACHE_DIR, ChartCache
                     from orchestrator.mt5_feeds import Mt5KlineFeed, Mt5TickFeed, connect_mt5_data
+                    from orchestrator.ws import wall_clock_ms
 
                     # Менеджер подключения MetaApi (orchestrator/mt5_link.py): подключается в фоне, сбой связи - пауза 5 минут и переподключение;
                     # Forex/металлы изолированы от крипты - простой MetaApi не останавливает Binance-часть процесса.
@@ -302,7 +304,16 @@ async def shadow_main(opts: Options) -> None:
                         htf_feed = MultiFeed([htf_feed, *views])
                     # Порядок: производный 15m раньше первичного M5 - M5 последним забирает снимок хранилища цикла (см. mt5_feeds.py)
                     feed = MultiFeed([feed, mt5_feed.m15_view(FeatureEngine(SmcParams())), mt5_feed])
-                    mt5_ticks = Mt5TickFeed(mt5_client, on_tick, lambda ts: [tracker.mark_gap(s, ts) for s in mt5_wanted], broker_name=mt5_link.broker_name,
+                    # справочный кэш свечей MT5 для графика клиента (orchestrator/chart_cache.py): стратегии и исполнение его не читают, ошибка записи только в лог
+                    chart_cache = ChartCache(config.DATA_DIR / CHART_CACHE_DIR)
+                    mt5_feed.set_store_listener(lambda symbol, store: chart_cache.store_closed(symbol, store, wall_clock_ms()))
+
+                    def mt5_on_tick(tick) -> None:
+                        if tick.kind == "trade":
+                            chart_cache.on_tick(tick.symbol, tick.ts_ms, tick.price)
+                        on_tick(tick)
+
+                    mt5_ticks = Mt5TickFeed(mt5_client, mt5_on_tick, lambda ts: [tracker.mark_gap(s, ts) for s in mt5_wanted], broker_name=mt5_link.broker_name,
                                             symbols=mt5_wanted, link=mt5_link)
                     ticks.add(mt5_ticks)
 

@@ -7,7 +7,6 @@ import pytest
 
 from tradeai_client import fmt
 from tradeai_client.chart_spec import build_chart_spec
-from tradeai_client.chart_window import _ts
 
 MS = 1_790_000_000_000
 
@@ -32,9 +31,12 @@ def test_legacy_utc_stamps_in_server_texts_are_localized_without_a_label():
     assert stamp not in out and local(MS).strftime("%d.%m.%Y %H:%M") in out and "UTC" not in out
 
 
-def test_chart_axis_is_shifted_by_the_local_offset():
-    assert _ts(MS, 3 * 3_600_000).timestamp() == MS / 1000 + 3 * 3600
-    assert _ts(MS).timestamp() == MS / 1000
+def test_chart_axis_uses_the_pc_time_zone_in_the_page():
+    """Ось и перекрестие графика форматируются в самой странице через Date (пояс ОС, с переходами на летнее время): данные остаются в UTC."""
+    from tradeai_client.chart_window import WEB_DIR
+
+    js = (WEB_DIR / "chart.js").read_text(encoding="utf-8")
+    assert "getHours()" in js and "getDate()" in js and "tickMarkFormatter" in js and "timeFormatter" in js and "getUTCHours" not in js
 
 
 def test_chart_spec_carries_one_offset_and_local_panel_times(fx):

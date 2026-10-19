@@ -12,7 +12,7 @@ import re
 import textwrap
 from typing import Any
 
-from tradeai_client import fmt, retro
+from tradeai_client import chr_overlay, fmt, retro
 
 UP, DOWN, AMBER, BLUE, VIOLET, GREY = "#26a69a", "#ef5350", "#ffb300", "#4aa3ff", "#b388ff", "#9aa3b2"
 LINE_SL, LINE_TP, LINE_ENTRY = "#ff3d3d", "#00d26a", "#2f8cff"  # цвета линий уровней: ярче свечей (UP/DOWN), чтобы линия не сливалась со свечой
@@ -270,6 +270,8 @@ def build_chart_spec(snap: dict[str, Any], post_klines: list[dict[str, float]] |
     }
 
     return {
+        "signal_ms": signal_ms, "interval": meta.get("interval", ""), "coin": trade["coin"], "strategy_id": trade.get("strategy_id") or trade.get("strategy_name"),
+        "bot": chr_overlay.build_overlay(snap),  # разметка логики бота (только стратегии CHR; иначе None)
         "title": clean_text(f"{trade['coin']} {meta.get('interval', '')} · {fmt.SIDE_RU.get(trade['side'], trade['side'])} · {fmt.STATUS_RU.get(trade['status'], trade['status'])}"),
         "trade_id": trade["id"], "interval_ms": iv, "snapshot_last_t": snapshot_last,
         # ось времени - в поясе ПК: окно графика прибавляет это смещение ко всем меткам (одно на график: у оси не бывает «повторного часа» перехода на зимнее время)

@@ -57,8 +57,9 @@ if ($ServerUrl -or $ApiKey) {
 Write-Host "== flet pack"
 $packArgs = @("pack", "app.py", "--name", "TradeAI-Monitor", "--product-name", "TradeAI Monitor", "--file-description", "TradeAI Monitor",
           "--product-version", $appVersion, "--distpath", "dist", "-y",
-          # статические файлы lightweight-charts (js/css/html окна графика) PyInstaller сам не находит
-          "--pyinstaller-build-args=--collect-all=lightweight_charts")
+          # страница графика (chart_web: html/js/css + библиотека lightweight-charts) и ресурсы pywebview PyInstaller сам не находит
+          "--add-data", "tradeai_client/chart_web:tradeai_client/chart_web",
+          "--pyinstaller-build-args=--collect-all=webview")
 if ($OneDir) { $packArgs += "-D" }
 try {
     .\.venv\Scripts\flet.exe @packArgs

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradeAI chart</title>
+<style>/*__CSS__*/</style>
+</head>
+<body>
+<div id="app">
+  <div id="top">
+    <span id="title"></span>
+    <span id="tfs"></span>
+    <span class="sep"></span>
+    <button class="btn" id="b-trade" title="Показать сделку на графике">К сделке</button>
+    <button class="btn on" id="b-bot" title="Показать/скрыть разметку логики бота" style="display:none">Логика бота</button>
+    <button class="btn" id="b-live" title="К последней свече">▶ К реальному времени</button>
+    <button class="btn on" id="b-panel" title="Показать/скрыть боковую панель">Панель</button>
+    <button class="btn star" id="b-fav" title="Эталонный сетап: сохранить сделку в «Избранное»" style="display:none">☆ В избранное</button>
+    <span id="status"><span id="dot"></span><span id="stext">загрузка…</span></span>
+  </div>
+  <div id="main">
+    <div id="tools">
+      <button class="btn on" data-tool="cursor" title="Курсор: выбор, перемещение и правка рисунков (Esc)">↖</button>
+      <button class="btn" data-tool="trend" title="Линия (от точки до точки)">╱</button>
+      <button class="btn" data-tool="hline" title="Горизонтальная линия (клик по уровню)">━</button>
+      <button class="btn" data-tool="ray" title="Луч (от точки через вторую точку вправо)">➚</button>
+      <button class="btn" data-tool="rect" title="Область: прямоугольник с заливкой">▭</button>
+      <span class="sep" style="width:100%;height:1px"></span>
+      <button class="btn" id="b-del" title="Удалить выбранный рисунок (Delete)">🗑</button>
+      <button class="btn" id="b-clear" title="Удалить все рисунки этой монеты">✕</button>
+      <div class="hint">рисунки<br>сохраняются</div>
+    </div>
+    <div id="chartbox">
+      <div id="chart"></div>
+      <canvas id="ov"></canvas>
+      <div id="style">
+        <label>Цвет</label><span id="swatches"></span><input type="color" id="color">
+        <label>Толщина</label><span id="widths"></span>
+        <label>Прозрачность</label><input type="range" id="opacity" min="10" max="100" step="5">
+      </div>
+      <div id="toast"></div>
+    </div>
+    <div id="panel"></div>
+  </div>
+</div>
+<script>/*__LIB__*/</script>
+<script>window.__CFG__ = /*__CFG__*/;</script>
+<script>/*__APP__*/</script>
+</body>
+</html>
