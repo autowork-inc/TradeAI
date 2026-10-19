@@ -68,10 +68,12 @@ def test_end_to_end_real_strategies_ticks_and_journal(tmp_path):
         (trade,) = tracker.active()
         assert trade.signal.strategy == "SMC_Pro_Trend" and trade.signal.entry == 105.0 and trade.status == "pending_limit"
         tracker.on_tick(tick(105.5, 1))  # цена прошла лимитку 105 -> исполнена
-        tracker.on_tick(tick(97.7, 2, "mark"))  # R = 7.2, +1R = 97.8 -> безубыток по mark price
-        assert trade.fill_price == 105.0 and trade.be_armed
-        tracker.on_tick(tick(105.3, 3))  # возврат к входу -> выход по BE
-        assert trade.exit_reason == "be" and tracker.active() == []
+        tracker.on_tick(tick(97.7, 2, "mark"))  # R = 7.2, +1R = 97.8: безубытка нет, стоп не двигается
+        assert trade.fill_price == 105.0 and not trade.be_armed
+        tracker.on_tick(tick(105.3, 3))  # возврат к входу: позиция жива
+        assert tracker.active() == [trade]
+        tracker.on_tick(tick(113.0, 4))  # выход только по исходному SL
+        assert trade.exit_reason == "sl" and tracker.active() == []
         await run.tick()  # свеча 19: монета свободна, нового сигнала нет
         return trade
 
@@ -83,11 +85,11 @@ def test_end_to_end_real_strategies_ticks_and_journal(tmp_path):
     assert states and all(x["detail"]["side"] in ("short", "long") and x["detail"]["from"] != x["detail"]["to"] for x in states)
     assert any(x["detail"]["side"] == "short" and x["detail"]["to"] == 4 for x in states)  # автомат дошёл до S4 «заявка»
     lines = [x for x in lines if x["kind"] != "setup_state"]
-    assert [x["kind"] for x in lines] == ["trade_registered", "signal_accepted", "limit_filled", "be_armed", "trade_closed"]
+    assert [x["kind"] for x in lines] == ["trade_registered", "signal_accepted", "limit_filled", "trade_closed"]
     reg = lines[0]["detail"]
     assert len(reg["geometry"]) == 7 and reg["geometry"][0]["label"] == "FVG"  # геометрия в журнале для будущего клиента
-    assert lines[-1]["detail"]["record"]["exit_reason"] == "be" and trade.net_r == pytest.approx(lines[-1]["detail"]["record"]["net_r"])
-    assert tracker.summary()["SMC_Pro_Trend/short"]["be"] == 1
+    assert lines[-1]["detail"]["record"]["exit_reason"] == "sl" and trade.net_r == pytest.approx(lines[-1]["detail"]["record"]["net_r"])
+    assert tracker.summary()["SMC_Pro_Trend/short"]["sl"] == 1
 
 
 def test_tick_feed_failure_stops_the_loop_r1(tmp_path):

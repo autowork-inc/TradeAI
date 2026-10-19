@@ -104,7 +104,7 @@ def test_sl_is_behind_the_1h_sweep_extreme_not_only_behind_the_5m_highs():
     out = detect_smc(with_mtf(df, "short", 15, extreme=118.0), MTF)  # свипающая 1h-свеча сделала хай выше любого 5m-хая сетапа
     r = out.row(18, named=True)
     assert r["short_sweep_extreme"] == 118.0 and r["short_sl"] == pytest.approx(118.2) and r["short_signal"]
-    assert r["short_tp"] == pytest.approx(105.0 - 3 * (118.2 - 105.0))
+    assert r["short_tp"] == pytest.approx(105.0 - 4 * (118.2 - 105.0))
 
 
 def test_setup_ttl_is_counted_in_5m_bars_from_the_event_row():
@@ -120,7 +120,7 @@ def test_setup_ttl_is_counted_in_5m_bars_from_the_event_row():
 
 def test_1d_bias_gates_only_the_event_row_like_the_h4_filter():
     df = short_scenario()
-    for bias, allowed in ((1, False), (0, True), (-1, True), (None, False)):
+    for bias, allowed in ((1, False), (0, False), (-1, True), (None, False)):
         out = detect_smc(with_mtf(df, "short", 15, bias=bias), MTF_F)
         assert (out["short_signal"].sum() == 1) is allowed, bias
         if not allowed:
@@ -163,7 +163,7 @@ def mtf_pipeline(df5: pl.DataFrame, bias: int = 0) -> pl.DataFrame:
 
 
 def test_long_equals_short_on_mirrored_random_data_through_the_whole_5m_1h_pipeline():
-    big = SmcSetupParams(mtf=True, htf_filter=True, max_exposure=1e9)
+    big = SmcSetupParams(mtf=True, max_exposure=1e9)  # без фильтра: постоянный bias жёстко разрешает лишь одну сторону, а тест проверяет симметрию автомата
     df = walk5(6000, 31, 0.012)
     c = 2 * float(df["close"].max())
     mirrored = df.with_columns((c - pl.col("open")).alias("open"), (c - pl.col("low")).alias("high"), (c - pl.col("high")).alias("low"), (c - pl.col("close")).alias("close"))
@@ -175,7 +175,7 @@ def test_long_equals_short_on_mirrored_random_data_through_the_whole_5m_1h_pipel
 
 
 def test_sweeps_only_happen_on_the_first_5m_row_after_a_1h_close_and_truncation_is_invariant_r4():
-    p = SmcSetupParams(mtf=True, htf_filter=True, max_exposure=1e9, setup_ttl_bars=90)
+    p = SmcSetupParams(mtf=True, max_exposure=1e9, setup_ttl_bars=90)  # фильтр тренда проверен отдельно (test_1d_bias_*)
     full_in = mtf_pipeline(walk5(4200, 17, 0.012))
     full = detect_smc(full_in, p)
     for side in ("short", "long"):

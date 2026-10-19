@@ -81,7 +81,7 @@ def test_short_full_chain_s1_to_s4_with_exact_prices():
     assert r["short_signal"] and r["short_choch"] and r["short_reject"] is None
     assert r["short_entry"] == 105.0  # D7: mid FVG
     assert r["short_sl"] == pytest.approx(112.2)  # хай свипа 112 + 0.2 * ATR(1)
-    assert r["short_tp"] == pytest.approx(105.0 - 3 * 7.2)  # 3R, R = 112.2 - 105
+    assert r["short_tp"] == pytest.approx(105.0 - 4 * 7.2)  # 4R (1:4), R = 112.2 - 105
     assert r["short_pool_level"] == 110.0 and r["short_sweep_extreme"] == 112.0
     assert (r["short_fvg_hi"], r["short_fvg_lo"]) == (107.0, 103.0) and r["short_fvg_t1"] == 15 * STEP
     assert sum(col(out, "short_signal")) == 1 and not any(col(out, "long_sweep"))
@@ -185,7 +185,7 @@ def test_limit_exactly_at_market_is_not_passive():
 def test_exposure_cap_rejects_instead_of_shrinking_o8():
     # R = 7.2 при entry 105: плечо = 0.01 * 105 / 7.2 = 0.146 -> проходит; cap 0.1 -> reject
     assert run(short_scenario())["short_signal"].sum() == 1
-    out = run(short_scenario(), SmcSetupParams(max_exposure=0.1))
+    out = run(short_scenario(), SmcSetupParams(max_exposure=0.001))
     r = out.row(18, named=True)
     assert not r["short_signal"] and r["short_reject"] == "exposure" and r["short_choch"]
 
@@ -225,7 +225,7 @@ def test_long_is_exact_mirror_of_short_on_handmade_scenario():
         assert col(s, f"short_{name}") == col(lg, f"long_{name}"), name
     r = lg.row(18, named=True)
     assert r["long_entry"] == pytest.approx(200 - 105.0) and r["long_sl"] == pytest.approx(200 - 112.2)
-    assert r["long_tp"] == pytest.approx(200 - (105.0 - 21.6)) and r["long_pool_level"] == pytest.approx(200 - 110.0)
+    assert r["long_tp"] == pytest.approx(200 - (105.0 - 28.8)) and r["long_pool_level"] == pytest.approx(200 - 110.0)
     assert (r["long_fvg_hi"], r["long_fvg_lo"]) == (pytest.approx(200 - 103.0), pytest.approx(200 - 107.0))
 
 

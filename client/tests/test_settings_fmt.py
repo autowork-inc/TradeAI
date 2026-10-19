@@ -128,10 +128,12 @@ def test_strategy_filters_cover_the_five_shadow_strategies_and_legacy_names():
 def test_strategy_filter_groups_live_shadow_archive_in_that_order():
     opts = fmt.STRATEGY_OPTIONS
     assert [k for k, _ in opts] == ["all", "SMC_Pro_Trend", "VWAP_Reversion", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "Horizontal_Breakout",
-                                     "Trendline_Breakout", "smc", "breakout"]
+                                     "Trendline_Breakout", "Horizontal_Breakout_CHR", "Trendline_Breakout_CHR", "smc", "breakout"]
     labels = dict(opts)
     assert labels["SMC_Pro_Trend"] == "🟢 [LIVE] SMC Pro Trend" and labels["VWAP_Reversion"].startswith("🟢 [LIVE]")
-    assert all(labels[k].startswith("🟡 [SHADOW]") for k in ("OBI_Breakout", "SMC_Counter_Trend", "ICT_Killzones", "Horizontal_Breakout", "Trendline_Breakout"))
+    assert all(labels[k].startswith("🟡 [SHADOW]") for k in ("OBI_Breakout", "SMC_Counter_Trend", "ICT_Killzones", "Horizontal_Breakout", "Trendline_Breakout",
+                                                                 "Horizontal_Breakout_CHR", "Trendline_Breakout_CHR"))
+    assert labels["Trendline_Breakout_CHR"] == "🟡 [SHADOW] Trendline Breakout (CHR)"
     assert labels["smc"] == "⚪ [АРХИВ] SMC Swing (до 11.10)" and labels["breakout"].startswith("⚪ [АРХИВ]")
     assert fmt.strategy_label("UNKNOWN") == "⚪ [АРХИВ] UNKNOWN"
     assert [k for k, _ in fmt.MODE_OPTIONS] == ["all", "live", "shadow"] and fmt.MODE_OPTIONS[1][1] == "🟢 Только LIVE"

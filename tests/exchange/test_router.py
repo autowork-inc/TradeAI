@@ -16,6 +16,7 @@ from tests.exchange.fake_mt5 import FULL, FakeMt5Rpc, make_client, make_mapper, 
 from orchestrator.registry import SCALP_1R_PLAN
 from tests.orchestrator.live_helpers import STRATEGY, T0, signal
 from utils.errors import ConfigError
+from exchange.mt5_risk import Mt5RiskParams
 
 NOW = T0
 
@@ -28,7 +29,7 @@ def make_router(rpc=None, *, with_binance=False, **kw):
     client, rpc = make_client(rpc)
     mapper = run(make_mapper(client))
     binance = BinanceLiveClient(object()) if with_binance else None  # для маршрута сеть не нужна
-    return ExecutionRouter(binance=binance, mt5=client, mapper=mapper, now_ms=lambda: NOW, **kw), client, rpc
+    return ExecutionRouter(binance=binance, mt5=client, mapper=mapper, now_ms=lambda: NOW, **{"risk_params": Mt5RiskParams(risk_usdt=1000.0), **kw}), client, rpc
 
 
 def eur_long(**kw):
@@ -89,7 +90,7 @@ def test_market_long_converts_symbol_sizes_lots_and_sends_stop_in_the_same_reque
     assert not isinstance(t, RouteRejected)
     # SL 20 пипсов = 0.0020, потеря на лот 200 USD, риск 1% от 100 000 = 1000 -> 5.00 лота
     (name, symbol, volume, sl, tp, options) = rpc.trades[-1]
-    assert (name, symbol, volume, sl, tp) == ("market_buy", "EURUSD", 5.0, 1.0981, None)  # план с runner'ом: брокерского TP нет
+    assert (name, symbol, volume, sl, tp) == ("market_buy", "EURUSD", 5.0, 1.0981, 1.1081)  # брокерский TP - единственный тейк, 4R от входа
     assert options["clientId"] == t.client_id and options["fillingModes"] == ["ORDER_FILLING_FOK"]
     assert t.plan.risk_amount == pytest.approx(1000.0) and t.status == "open" and t.position_id and router.tracked_mt5["EURUSD"] is t
 
@@ -121,16 +122,13 @@ def test_prepare_does_not_send_anything_and_send_is_a_separate_step():
     assert len(rpc.trades) == 1
 
 
-def test_tiny_account_trades_the_minimum_lot_but_below_it_is_rejected():
-    rpc = FakeMt5Rpc(equity=200.0, free_margin=200.0)  # риск 2 USD, на лот 200 USD -> ровно 0.01 лота
-    router, client, _ = make_router(rpc, plans={STRATEGY: SCALP_1R_PLAN})  # 100% на +1R: 0.01 лота делится
+def test_fixed_five_usd_risk_trades_small_lots_and_below_the_minimum_lot_is_rejected():
+    rpc = FakeMt5Rpc(equity=200.0, free_margin=200.0)  # риск 5 USD, на лот 200 USD -> 0.025 -> вниз до 0.02 лота (риск 4 USD)
+    router, client, _ = make_router(rpc, risk_params=Mt5RiskParams(risk_usdt=5.0))
     t = run(router.open_mt5(eur_long(), NOW))
-    assert not isinstance(t, RouteRejected) and t.plan.lots == 0.01 and t.plan.risk_amount <= t.plan.risk_target + 1e-9
-    router_def, *_ = make_router(FakeMt5Rpc(equity=200.0, free_margin=200.0))  # план 50/40/10 на 0.01 лота не делится: другой математикой не торгуем
-    rej_def = run(router_def.open_mt5(eur_long(), NOW))
-    assert isinstance(rej_def, RouteRejected) and rej_def.reason == "plan_not_representable"
+    assert not isinstance(t, RouteRejected) and t.plan.lots == 0.02 and t.plan.risk_amount <= 5.0 + 1e-9
     rpc2 = FakeMt5Rpc(equity=100.0, free_margin=100.0)  # риск 1 USD -> 0.005 лота: меньше минимума, вверх не округляем
-    router2, *_ = make_router(rpc2)
+    router2, *_ = make_router(rpc2, risk_params=Mt5RiskParams(risk_usdt=1.0))
     rej = run(router2.open_mt5(eur_long(), NOW))
     assert rej.reason == "below_min_size" and rpc2.trades == []
 
@@ -182,7 +180,7 @@ def test_disabled_symbol_loads_with_allow_disabled_so_startup_outside_session_do
     rpc.specs["EURUSD"]["tradeMode"] = "SYMBOL_TRADE_MODE_DISABLED"
     client, _ = make_client(rpc)
     mapper = run(make_mapper(client))  # allow_disabled=True: не ConfigError
-    router = ExecutionRouter(mt5=client, mapper=mapper)
+    router = ExecutionRouter(mt5=client, mapper=mapper, risk_params=Mt5RiskParams(risk_usdt=1000.0))
     assert run(router.open_mt5(eur_long(), NOW)).reason == "market_closed"
 
 

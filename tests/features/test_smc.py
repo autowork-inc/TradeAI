@@ -286,6 +286,6 @@ def test_defaults_match_approved_parameters():
 
     p = SmcParams()
     assert (p.k, p.atr_period, p.swing_atr_mult, p.eq_tolerance, p.volume_sma) == (5, 14, 1.5, 0.001, 20)
-    assert (d.RISK_PER_TRADE, d.SL_BUFFER_ATR, d.TP_R, d.BE_TRIGGER_R) == (0.01, 0.2, 3.0, 1.0)
+    assert (d.RISK_USDT, d.SL_BUFFER_ATR, d.TP_R, d.BE_TRIGGER_R) == (5.0, 0.2, 4.0, 1.0)  # риск 5 USDT, тейк 1:4
     assert (d.SETUP_TTL_BARS, d.LIMIT_TTL_BARS, d.FVG_ENTRY_FRACTION) == (30, 10, 0.5)  # TTL 15 -> 30 по О12
     assert (d.IMPULSE_ATR_MULT, d.MAX_EXPOSURE) == (1.0, 5.0) and p.impulse_atr_mult == 1.0  # О12

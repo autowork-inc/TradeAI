@@ -4,23 +4,20 @@
 Исполнение симулируется по тикам WebSocket, а не по свечам (в отличие от бэктеста strategies/simulate.py):
   * `trade` (aggTrade) - цена последней сделки: заполнение LIMIT, срабатывание стопа, частичные закрытия по уровням;
   * `mark` (markPrice@1s) - mark price: ТОЛЬКО триггер переноса SL в безубыток при +1R (D11, О2).
-  * закрытие свечи (`on_bar_closed`) - срок заявки, отмена по закрытию за хаем свипа, тайм-аут позиции, подтягивание трейлинга.
+  * закрытие свечи (`on_bar_closed`) - срок заявки, отмена по закрытию за хаем свипа, тайм-аут позиции.
 
 Управление позицией - `ScaleOutPlan` (решение 2026-10-10, вместо «100% на 3R» из D9). По умолчанию:
-  * +1R: закрыть 50% ИСХОДНОГО объёма и перенести SL в безубыток (вход);
-  * +3R: закрыть ещё 40%;
-  * остаток 10% (runner): трейлинг-стоп - по ATR (стоп = лучшая цена -+ 3*ATR последней закрытой свечи) либо по теням последних
-    свечей; стоп только подтягивается в сторону прибыли и никогда не лежит дальше безубытка. Тейка у runner'а нет.
-`LEGACY_PLAN` - прежняя схема (100% на 3R, BE только по mark price): для старых тестов и сравнения.
+  * +1R: закрыть 50% ИСХОДНОГО объёма;
+  * +3R: закрыть оставшиеся 50%. Стоп статичен всю сделку: ни безубытка, ни трейлинга, ни остатка-runner (2026-10-19);
+`LEGACY_PLAN` - прежняя схема (100% на 3R): для старых тестов и сравнения.
 
 Правила (всё в «шортовом мире»: цена * sgn, sgn = +1 шорт / -1 лонг):
   * LIMIT исполняется, когда цена сделки ПРОШЛА уровень (q > entry), касание не считается; цена исполнения - сам
     уровень (пассивная заявка, комиссия maker). Если до исполнения цена дошла до TP сигнала - заявка отменяется.
   * MARKET исполняется по первому тику сделки после сигнала по цене тика (taker); R и плечо считаются по факту.
     Не исполнился до закрытия следующей свечи - значит, поток тиков встал: TrackerError (R1).
-  * Стоп (SL / безубыток / трейлинг) - стоп-маркет: срабатывает по цене сделки и закрывает остаток по цене тика (со скольжением).
+  * Стоп (SL) - стоп-маркет: срабатывает по цене сделки и закрывает остаток по цене тика (со скольжением).
     Частичные закрытия по уровням - тоже по цене тика. На одном тике сначала проверяется стоп (худший сценарий), потом уровни.
-  * Безубыток: (а) mark price достигла entry -+ 1R (D11) - со следующего тика; (б) после первого частичного закрытия плана.
   * Комиссии: вход LIMIT - maker 0.02%, остальное - taker 0.05% (config.LIVE_*_FEE_RATE); у каждого закрытия - своя доля комиссии входа.
 Изоляция позиций (2026-10-11, мульти-стратегийный Shadow). Позиция идентифицируется СОСТАВНЫМ КЛЮЧОМ (символ, strategy_id), строкой
 `<символ>_<strategy_id>` (SOLUSDT_SMC_Pro_Trend): по одной монете параллельно живут независимые позиции разных стратегий, в том числе
@@ -30,12 +27,11 @@
 Размер позиции - из виртуального эквити (без реинвестирования: каждая сделка рискует 1% от одной и той же суммы),
 чтобы R-статистика и PnL в USDT не зависели от порядка сделок. net R сделки = сумма net R её закрытий (доля * (вход - выход) / R).
 
-Любое нарушение протокола (дубль сигнала, свеча раньше сигнальной, MARKET без тиков, runner без данных свечи) - TrackerError,
+Любое нарушение протокола (дубль сигнала, свеча раньше сигнальной, MARKET без тиков) - TrackerError,
 процесс падает и перезапускается (R1). Подавления исключений здесь нет.
 """
 
-import math
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
@@ -73,13 +69,9 @@ class SignalSink(Protocol):
 
 @dataclass(frozen=True)
 class ScaleOutPlan:
-    """levels: ((уровень в R, доля ИСХОДНОГО объёма), ...) по возрастанию; остаток - runner (нужен trail_mode)."""
+    """levels: ((уровень в R, доля ИСХОДНОГО объёма), ...) по возрастанию; сумма долей = 1 (остатка-runner и трейлинга нет)."""
 
     levels: tuple[tuple[float, float], ...]
-    be_after_first: bool = False
-    trail_mode: str | None = None  # "atr" | "wick" | None (если остатка нет)
-    trail_atr_mult: float = D.TRAIL_ATR_MULT
-    trail_wick_bars: int = D.TRAIL_WICK_BARS
     # От чего считаются цены уровней: "fill" - от фактической цены входа и R = |вход - SL| (как раньше); "signal" (2026-10-18, SMC_Pro_Trend) - от цен
     # СИГНАЛА: входа (50% FVG) и SL за экстремумом свипа, то есть от структуры графика, а не от цены, сдвинутой проскальзыванием. Уровень, оказавшийся
     # не в прибыли относительно фактического входа, считается от входа (иначе тейк «за ценой»). R-статистика сделки всегда - от фактического входа.
@@ -95,27 +87,25 @@ class ScaleOutPlan:
             if not (r > prev and 0 < frac <= 1):
                 raise ConfigError(f"ScaleOutPlan: уровни R строго возрастают и > 0, доли в (0, 1]: {self.levels}")
             prev = r
-        if sum(f for _, f in self.levels) > 1 + _EPS:
-            raise ConfigError(f"ScaleOutPlan: сумма долей {sum(f for _, f in self.levels)} больше 1")
-        if self.runner_frac > _EPS and self.trail_mode not in ("atr", "wick"):
-            raise ConfigError("ScaleOutPlan: у остатка (runner) должен быть trail_mode 'atr' или 'wick'")
-        if self.runner_frac <= _EPS and self.trail_mode is not None:
-            raise ConfigError("ScaleOutPlan: остатка нет, trail_mode должен быть None")
-        if not (self.trail_atr_mult > 0 and self.trail_wick_bars >= 1):
-            raise ConfigError("ScaleOutPlan: trail_atr_mult > 0, trail_wick_bars >= 1")
-
-    @property
-    def runner_frac(self) -> float:
-        rest = 1.0 - sum(f for _, f in self.levels)
-        return 0.0 if rest <= _EPS else rest
+        if abs(sum(f for _, f in self.levels) - 1) > _EPS:
+            raise ConfigError(f"ScaleOutPlan: сумма долей {sum(f for _, f in self.levels)} должна быть 1 (остатка-runner нет)")
 
     @property
     def last_r(self) -> float:
         return self.levels[-1][0]
 
     def describe(self) -> dict[str, Any]:
-        return {"levels": [list(x) for x in self.levels], "be_after_first": self.be_after_first, "runner_frac": self.runner_frac,
-                "trail_mode": self.trail_mode, "trail_atr_mult": self.trail_atr_mult, "trail_wick_bars": self.trail_wick_bars, "tp_anchor": self.tp_anchor}
+        return {"levels": [list(x) for x in self.levels], "tp_anchor": self.tp_anchor}
+
+    @classmethod
+    def from_record(cls, levels: Any, tp_anchor: str = "fill") -> "ScaleOutPlan":
+        """План из записи состояния (файл движка, MT5-сопровождение). Записи до 2026-10-19 содержат Scale Out с остатком-runner (доли < 1):
+        доли нормируются к 1, чтобы старая открытая сделка читалась; ЕЁ ордера и объёмы по уровням живут в самой записи сделки и не меняются."""
+        parsed = tuple((float(r), float(f)) for r, f in levels)
+        total = sum(f for _, f in parsed)
+        if total <= 0:
+            raise ConfigError(f"ScaleOutPlan: не читается запись уровней {levels!r}")
+        return cls(tuple((r, f / total) for r, f in parsed), tp_anchor)
 
     def level_price(self, r: float, *, side_sgn: float, fill: float, sl: float, signal_entry: float | None) -> float:
         """Цена уровня `r` (реальная, не q-мир). side_sgn - Direction.sgn (+1 шорт, -1 лонг). Якорь "signal": от входа и SL сигнала; уровень не в прибыли
@@ -139,8 +129,8 @@ def impulse_hits_limit(bar: BarInfo | None, *, entry: float, sl: float, mult: fl
     return bar.high >= entry - risk if sl > entry else bar.low <= entry + risk
 
 
-DEFAULT_PLAN = ScaleOutPlan(D.SCALE_OUT_LEVELS, D.SCALE_OUT_BE_AFTER_FIRST, D.RUNNER_TRAIL_MODE, D.TRAIL_ATR_MULT, D.TRAIL_WICK_BARS)
-LEGACY_PLAN = ScaleOutPlan(((D.TP_R, 1.0),), False, None)
+DEFAULT_PLAN = ScaleOutPlan(D.SCALE_OUT_LEVELS)
+LEGACY_PLAN = ScaleOutPlan(((D.TP_R, 1.0),))
 
 
 @dataclass(frozen=True)
@@ -149,7 +139,7 @@ class Leg:
 
     seq: int
     ts: int
-    reason: str  # scale_1r | scale_3r | tp (последний уровень без runner'а) | sl | be | trail | timeout
+    reason: str  # scale_1r | scale_3r | tp (последний уровень) | sl | timeout
     frac: float
     price: float
     gross_r: float
@@ -173,7 +163,7 @@ class VirtualTrade:
     tp_m: float | None = None  # TP сигнала (3R): для отмены LIMIT «цена дошла до TP до исполнения»
     inval_m: float | None = None
     stop_m: float = 0.0  # действующий стоп (q >= stop_m -> выход остатка): SL -> безубыток -> трейлинг; только вниз (в q-мире)
-    stop_kind: str = "sl"  # sl | be | trail - причина выхода, если стоп сработает
+    stop_kind: str = "sl"  # sl - причина выхода, если стоп сработает
     bars_closed: int = 0  # свечей закрылось после сигнальной
     fill_bar_no: int | None = None
     fill_price: float | None = None
@@ -181,13 +171,11 @@ class VirtualTrade:
     sizing: Sizing | None = None
     risk: float | None = None  # |sl - вход| в единицах цены
     be_armed: bool = False
-    be_armed_ts: int | None = None
     mfe_r: float = 0.0  # максимальное благоприятное / неблагоприятное движение в R (по тикам сделок)
     mae_r: float = 0.0
     remaining: float = 1.0  # доля исходного объёма, ещё открытая
     levels_done: int = 0
     legs: list[Leg] = field(default_factory=list)
-    recent_bars: deque = field(default_factory=deque)  # последние закрытые свечи (режим трейлинга "wick")
     exit_price: float | None = None  # средневзвешенная цена всех закрытий
     exit_ts: int | None = None
     exit_reason: str | None = None  # причина ПОСЛЕДНЕГО закрытия (итоговая)
@@ -208,12 +196,8 @@ class VirtualTrade:
     def realized_net_r(self) -> float:
         return sum(leg.net_r for leg in self.legs)
 
-    @property
-    def runner_active(self) -> bool:
-        return self.status == OPEN and self.plan.runner_frac > _EPS and self.levels_done == len(self.plan.levels)
-
     def plan_tp_price(self) -> float | None:
-        """Цена последнего уровня плана (у runner'а это условная цель, не ордер)."""
+        """Цена последнего уровня плана."""
         if self.entry_m is None or self.risk is None:
             return None
         return self.level_q(self.plan.last_r) * self.sgn
@@ -240,15 +224,15 @@ class VirtualTrade:
 class VirtualTracker:
     def __init__(
         self, log: EventLog, *, equity: float = 10_000.0, sizer: RiskSizer | None = None, limit_ttl_bars: int = D.LIMIT_TTL_BARS,
-        max_hold_bars: int = 192, be_trigger_r: float = D.BE_TRIGGER_R, plan: ScaleOutPlan = DEFAULT_PLAN,
+        max_hold_bars: int = 192, plan: ScaleOutPlan = DEFAULT_PLAN,
         maker_fee: float = 0.0002, taker_fee: float = 0.0005, recorder: TradeRecorder | None = None, mode: str = "shadow",
         plans: Mapping[str, ScaleOutPlan] | None = None,
     ):
-        if not (equity > 0 and limit_ttl_bars >= 1 and max_hold_bars >= 1 and be_trigger_r > 0):
-            raise ConfigError("VirtualTracker: equity > 0, сроки >= 1, be_trigger_r > 0")
+        if not (equity > 0 and limit_ttl_bars >= 1 and max_hold_bars >= 1):
+            raise ConfigError("VirtualTracker: equity > 0, сроки >= 1")
         self._log, self._equity = log, equity
         self._sizer = sizer or RiskSizer()
-        self._limit_ttl, self._max_hold, self._be_r, self._plan = limit_ttl_bars, max_hold_bars, be_trigger_r, plan
+        self._limit_ttl, self._max_hold, self._plan = limit_ttl_bars, max_hold_bars, plan
         self._plans = dict(plans or {})  # strategy_id -> план управления позицией (нет в словаре - общий `plan`)
         self._maker, self._taker = maker_fee, taker_fee
         self._rec: TradeRecorder = recorder or NullRecorder()
@@ -280,8 +264,7 @@ class VirtualTracker:
                                "не должен был пройти блокировку монеты")
         sgn = signal.direction.sgn
         plan = self.plan_for(signal.strategy)
-        trade = VirtualTrade(signal, sgn, self._equity, PENDING_MARKET if signal.kind is Kind.MARKET else PENDING_LIMIT, now_ms, plan,
-                             recent_bars=deque(maxlen=plan.trail_wick_bars))
+        trade = VirtualTrade(signal, sgn, self._equity, PENDING_MARKET if signal.kind is Kind.MARKET else PENDING_LIMIT, now_ms, plan)
         trade.sl_m = trade.stop_m = sgn * signal.sl
         if signal.kind is Kind.LIMIT:
             sizing = self._sizer.size(self._equity, signal.entry, signal.sl)
@@ -313,10 +296,8 @@ class VirtualTracker:
                 self._on_trade(t, tick)
 
     def _on_mark(self, t: VirtualTrade, tick: Tick) -> None:
-        if t.status != OPEN or t.be_armed:
-            return
-        if t.sgn * tick.price <= t.entry_m - self._be_r * t.risk:  # mark дошла до +1R: стоп на вход, с этого тика (D11)
-            self._arm_be(t, tick.ts_ms, {"mark": tick.price})
+        """Mark price стоп не двигает: безубытка нет, стоп статичен."""
+        return
 
     def _on_trade(self, t: VirtualTrade, tick: Tick) -> None:
         q = t.sgn * tick.price
@@ -357,19 +338,8 @@ class VirtualTracker:
                 return
             t.levels_done += 1
             frac = min(frac, t.remaining)
-            finishing = t.levels_done == len(plan.levels) and plan.runner_frac <= _EPS
+            finishing = t.levels_done == len(plan.levels)
             self._close_leg(t, "tp" if finishing else f"scale_{r:g}r", frac, tick.price, tick.ts_ms)
-            if t.status == OPEN and t.levels_done == 1 and plan.be_after_first:
-                self._arm_be(t, tick.ts_ms, {"source": "scale_out"})
-
-    def _arm_be(self, t: VirtualTrade, ts: int, detail: dict[str, Any]) -> None:
-        if t.be_armed:
-            return
-        t.be_armed, t.be_armed_ts = True, ts
-        if t.entry_m < t.stop_m:  # стоп переносится только в сторону прибыли
-            t.stop_m, t.stop_kind = t.entry_m, "be"
-        self._persist(t)
-        self._emit(ts, "be_armed", t, detail)
 
     # ------------------------------------------------------------------------------------------ свечи
 
@@ -394,8 +364,6 @@ class VirtualTracker:
                     self._cancel(t, "ttl", now_ms)
             elif t.bars_closed - t.fill_bar_no >= self._max_hold * scale:
                 self._close_leg(t, "timeout", t.remaining, close, now_ms)
-            else:
-                self._trail(t, bar, now_ms)
 
     @staticmethod
     def _bars_scale(t: VirtualTrade) -> int:
@@ -404,28 +372,6 @@ class VirtualTracker:
         if ms is None:
             raise ConfigError(f"{t.trade_id}: неизвестный таймфрейм сигнала {t.signal.interval!r}")
         return D.bars_scale(ms)
-
-    def _trail(self, t: VirtualTrade, bar: BarInfo | None, now_ms: int) -> None:
-        """Подтягивание стопа runner'а по закрытой свече СВОЕГО таймфрейма (вступает в силу со следующего тика: без заглядывания вперёд)."""
-        if bar is not None and bar.high is not None and bar.low is not None:
-            t.recent_bars.append(bar)
-        if not t.runner_active:
-            return
-        if bar is None:
-            raise TrackerError(f"{t.trade_id}: runner без данных закрытой свечи - трейлинг невозможен")
-        if t.plan.trail_mode == "atr":
-            if bar.atr is None or not math.isfinite(bar.atr) or bar.atr <= 0:
-                raise TrackerError(f"{t.trade_id}: нет ATR для трейлинга ({bar.atr!r})")
-            best_m = t.entry_m - t.mfe_r * t.risk  # лучшая (наименьшая) цена в q-мире с момента входа
-            candidate = best_m + t.plan.trail_atr_mult * bar.atr
-        else:
-            if len(t.recent_bars) == 0:
-                return
-            candidate = max(max(t.sgn * b.high, t.sgn * b.low) for b in t.recent_bars)  # худший экстремум за N свечей
-        if candidate < t.stop_m - 1e-12:
-            t.stop_m, t.stop_kind = candidate, "trail"
-            self._persist(t)
-            self._emit(now_ms, "trail_moved", t, {"stop": t.stop_m * t.sgn, "mode": t.plan.trail_mode})
 
     def mark_gap(self, symbol: str, now_ms: int) -> None:
         """Обрыв потока тиков: тики за обрыв потеряны, результат активных сделок по этой монете ненадёжен."""

@@ -28,10 +28,10 @@ def test_smc_short_signal_comes_only_from_the_last_row_with_exact_values():
     (sig,) = s.detect(context(frame, 19))  # последняя строка = бар 18
     assert sig.direction is Direction.SHORT and sig.kind is Kind.LIMIT and sig.strategy == "SMC_Pro_Trend"
     assert sig.signal_id == f"SMC_Pro_Trend:{SYMBOL}:15m:{18 * IV}:short" and sig.bar_open_time == 18 * IV and sig.bar_close_ms == 19 * IV
-    assert (sig.entry, sig.sl, sig.inval) == (105.0, pytest.approx(112.2), 112.0) and sig.tp == pytest.approx(83.4)
+    assert (sig.entry, sig.sl, sig.inval) == (105.0, pytest.approx(112.2), 112.0) and sig.tp == pytest.approx(105.0 - 4 * 7.2)  # TP строго 1:4
     assert sig.meta["pool_level"] == 110.0 and sig.meta["bars_since_sweep"] == 3
     labels = [g["label"] for g in sig.geometry]
-    assert labels == ["FVG", "пул ликвидности", "свип", "CHoCH", "вход (50% FVG)", "SL", "TP 3R"]
+    assert labels == ["FVG", "пул ликвидности", "свип", "CHoCH", "вход (50% FVG)", "SL", "TP 1:4"]
     zone = sig.geometry[0]
     assert (zone["type"], zone["t1"], zone["p1"], zone["p2"]) == ("zone", 15 * IV, 107.0, 103.0)
 
@@ -39,11 +39,11 @@ def test_smc_short_signal_comes_only_from_the_last_row_with_exact_values():
 def test_smc_long_signal_is_the_mirror():
     (sig,) = StrategySMC().detect(context(mirror(short_scenario()), 19))
     assert sig.direction is Direction.LONG and sig.entry == pytest.approx(95.0) and sig.sl == pytest.approx(200 - 112.2)
-    assert sig.tp == pytest.approx(200 - 83.4) and sig.inval == pytest.approx(200 - 112.0)
+    assert sig.tp == pytest.approx(200 - (105.0 - 4 * 7.2)) and sig.inval == pytest.approx(200 - 112.0)
 
 
 def test_smc_params_flow_through_and_exposure_rejection_gives_no_signal():
-    assert StrategySMC(SmcSetupParams(max_exposure=0.1)).detect(context(short_scenario(), 19)) == ()
+    assert StrategySMC(SmcSetupParams(max_exposure=0.001)).detect(context(short_scenario(), 19)) == ()
 
 
 def test_breakout_signal_market_long_with_geometry():

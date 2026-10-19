@@ -1,6 +1,6 @@
 """Блок 3 (2026-10-18): SMC_Pro_Trend и проскальзывания.
 
-1. Уровни Scale Out SMC_Pro_Trend - от цен сигнала (вход 50% FVG и SL за экстремумом свипа), а не от фактической цены входа: проскальзывание
+1. (Отменено 2026-10-19: тейк строго от факта.) Уровни SMC_Pro_Trend были от цен сигнала (вход 50% FVG и SL за экстремумом свипа), а не от фактической цены входа: проскальзывание
    не сдвигает тейки (VirtualTracker и боевой движок - одной функцией `ScaleOutPlan.level_price`).
 2. Импульсная свеча (диапазон > 2.5 * ATR(14)[i-1]), дошедшая до зоны ждущей лимитки, снимает её (`impulse_bar`).
 3. MARKET-вход во время импульса против сделки - только после поглощения на последней закрытой 1m-свече (`MarketEntryGuard`).
@@ -24,13 +24,16 @@ from tests.orchestrator.test_live_engine import NOW, Env, run
 # ------------------------------------------------------------------------------------------ 1. якорь TP
 
 
-def test_smc_pro_trend_plan_is_anchored_to_the_signal_and_others_to_the_fill():
-    assert plans_for([SMC_PRO_TREND])[SMC_PRO_TREND] is SMC_PRO_PLAN and SMC_PRO_PLAN.tp_anchor == "signal"
-    assert SMC_PRO_PLAN.levels == DEFAULT_PLAN.levels and DEFAULT_PLAN.tp_anchor == "fill"
-    assert SMC_PRO_PLAN.describe()["tp_anchor"] == "signal"
+def test_every_plan_including_smc_pro_trend_is_anchored_to_the_actual_fill_for_a_strict_1_to_4():
+    assert plans_for([SMC_PRO_TREND])[SMC_PRO_TREND] is SMC_PRO_PLAN and SMC_PRO_PLAN.tp_anchor == "fill"  # 2026-10-19: якорь `signal` отменён
+    assert SMC_PRO_PLAN.levels == DEFAULT_PLAN.levels == ((4.0, 1.0),) and SMC_PRO_PLAN.describe()["tp_anchor"] == "fill"
 
 
 def test_level_price_uses_signal_prices_and_falls_back_to_the_fill_when_slipped_past_the_level():
+    """Якорь `signal` в боевых планах не используется (2026-10-19), но функция остаётся поддерживаемой: проверяем её на локальном плане."""
+    from orchestrator.tracker import ScaleOutPlan
+
+    SMC_PRO_PLAN = ScaleOutPlan(((1.0, 0.5), (3.0, 0.5)), tp_anchor="signal")  # noqa: N806
     long_ = Direction.LONG.sgn
     assert SMC_PRO_PLAN.level_price(1.0, side_sgn=long_, fill=100.5, sl=98.0, signal_entry=100.0) == pytest.approx(102.0)  # не 103 от факта
     assert DEFAULT_PLAN.level_price(1.0, side_sgn=long_, fill=100.5, sl=98.0, signal_entry=100.0) == pytest.approx(103.0)
@@ -40,7 +43,7 @@ def test_level_price_uses_signal_prices_and_falls_back_to_the_fill_when_slipped_
     assert SMC_PRO_PLAN.level_price(3.0, side_sgn=short, fill=99.6, sl=105.0, signal_entry=100.0) == pytest.approx(85.0)
 
 
-def test_tracker_market_fill_with_slippage_keeps_take_profits_on_signal_prices():
+def test_tracker_market_fill_with_slippage_puts_the_take_profit_exactly_4r_from_the_fill():
     log = MemoryEventLog()
     tr = VirtualTracker(log, equity=10_000.0, plans=plans_for([SMC_PRO_TREND]))
     sig = mk(strategy=SMC_PRO_TREND, kind=Kind.MARKET, direction=Direction.LONG, entry=100.0, sl=95.0)
@@ -48,16 +51,15 @@ def test_tracker_market_fill_with_slippage_keeps_take_profits_on_signal_prices()
     t = tr.trades[-1]
     tr.on_tick(tick(101.0, 5))  # исполнение по рынку на 1 выше сигнала
     assert t.status == OPEN and t.fill_price == 101.0 and t.risk == pytest.approx(6.0)
-    assert t.plan_tp_price() == pytest.approx(115.0)  # 3R от сигнала (100 + 3 * 5), а не 101 + 3 * 6 = 119
-    tr.on_tick(tick(105.0, 6))  # +1R сигнала (105): половина закрыта, хотя от факта это только +0.67R
-    assert t.levels_done == 1 and t.legs[0].reason == "scale_1r" and t.legs[0].gross_r == pytest.approx(0.5 * 4.0 / 6.0)
+    assert t.plan_tp_price() == pytest.approx(125.0)  # строго 1:4 от ФАКТА: 101 + 4 * 6
+    assert t.sizing.qty == pytest.approx(5.0 / 6.0)  # потеря на стопе (101 -> 95) = 5 USDT
 
 
-def test_live_engine_places_smc_levels_from_signal_prices(tmp_path):
+def test_live_engine_places_the_single_take_profit_exactly_4r_from_the_fill(tmp_path):
     env = Env(tmp_path, price=100.5, risk_kw={"plans": plans_for([SMC_PRO_TREND])})
     run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))
-    assert [a["triggerPrice"] for a in env.algos()] == ["98", "102", "106"]  # от сигнала 100/98, а не от факта 100.5 (было 103 / 108)
-    assert env.trade().risk == pytest.approx(2.5)  # R сделки (статистика) - по-прежнему от факта
+    assert [a["triggerPrice"] for a in env.algos()] == ["98", "110.5"]  # 100.5 + 4 * 2.5 от факта
+    assert env.trade().risk == pytest.approx(2.5)
 
 
 # ------------------------------------------------------------------------------- 2. импульсная свеча

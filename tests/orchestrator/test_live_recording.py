@@ -69,20 +69,18 @@ def test_short_stop_loss_subtracts_in_the_short_direction(tmp_path):
     assert row["status"] == "closed" and row["pnl"] == pytest.approx(-2.0 - fees) and row["r_multiple"] < 0  # шорт: рост цены - убыток
 
 
-def test_scale_out_levels_write_each_close_and_final_row_sums_them(tmp_path):
+def test_single_take_profit_writes_one_close_and_the_final_row_matches_it(tmp_path):
     sig = signal(entry=100.0, sl=98.0)
     env, rec = make_env(tmp_path, sig)
     run(env.engine.execute(sig, NOW))
-    env.rest.set_price(102.0)
+    env.rest.set_price(104.0)  # +2R: частичных закрытий нет
     run(env.engine.poll())
     mid = rec.trades[live_trade_id(sig.signal_id)]
-    assert mid["status"] == "open" and mid["be_armed"] is True and mid["remaining_frac"] == pytest.approx(0.5)
-    env.rest.set_price(106.0)
-    run(env.engine.poll())
-    env.rest.set_price(100.0)  # runner выбит безубытком
+    assert mid["status"] == "open" and mid["be_armed"] is False and mid["remaining_frac"] == pytest.approx(1.0) and rec.closes == []
+    env.rest.set_price(108.0)  # +4R
     run(env.engine.poll())
     row = rec.trades[live_trade_id(sig.signal_id)]
-    assert [c["reason"] for c in rec.closes] == ["scale_1r", "scale_3r", "be"] and [c["seq"] for c in rec.closes] == [1, 2, 3]
+    assert [c["reason"] for c in rec.closes] == ["tp"] and [c["seq"] for c in rec.closes] == [1]
     assert sum(c["frac"] for c in rec.closes) == pytest.approx(1.0)
     assert row["status"] == "closed" and row["pnl"] == pytest.approx(sum(c["pnl"] for c in rec.closes))
     assert row["pnl"] > 0 and row["r_multiple"] > 0

@@ -28,10 +28,15 @@ def test_short_is_blocked_against_bullish_h4_and_allowed_otherwise():
     blocked = detect_smc(with_bias(short_scenario(), 1), ON)  # H4 бычий: шорты не ищем
     assert sweeps(blocked, "short") == [] and blocked["short_signal"].sum() == 0
     assert set(blocked["short_state"].to_list()) == {0}  # автомат не покинул S0: в S1 перехода нет
-    for bias in (-1, 0):  # по тренду и в нейтральной структуре сигнал тот же, что без фильтра, до цены
+    for bias in (-1,):  # по тренду (Bearish) сигнал тот же, что без фильтра; Neutral - запрет (жёсткий фильтр, 2026-10-19)
         out = detect_smc(with_bias(short_scenario(), bias), ON)
         assert out["short_signal"].to_list() == base["short_signal"].to_list()
         assert out["short_entry"].to_list() == base["short_entry"].to_list() and out["short_state"].to_list() == base["short_state"].to_list()
+
+
+def test_neutral_bias_blocks_both_sides():
+    assert detect_smc(with_bias(short_scenario(), 0), ON)["short_signal"].sum() == 0
+    assert detect_smc(with_bias(mirror(short_scenario()), 0), ON)["long_signal"].sum() == 0
 
 
 def test_unknown_bias_fails_closed():
@@ -44,8 +49,7 @@ def test_long_is_the_mirror_blocked_against_bearish_h4():
     assert detect_smc(df, OFF)["long_signal"].sum() == 1
     assert detect_smc(with_bias(df, -1), ON)["long_signal"].sum() == 0
     assert set(detect_smc(with_bias(df, -1), ON)["long_state"].to_list()) == {0}
-    for bias in (1, 0):
-        assert detect_smc(with_bias(df, bias), ON)["long_signal"].sum() == 1
+    assert detect_smc(with_bias(df, 1), ON)["long_signal"].sum() == 1  # по тренду (Bullish); Neutral - запрет
     # шорт на зеркальных данных не возникает ни при каком bias - и фильтр этого не меняет
     assert detect_smc(with_bias(df, 1), ON)["short_signal"].sum() == 0
 
@@ -89,7 +93,7 @@ def test_sweeps_with_filter_are_exactly_the_unfiltered_sweeps_at_allowed_bars():
     df = df.with_columns(random_bias(df.height, 3))
     on, off = detect_smc(df, SmcSetupParams(htf_filter=True, max_exposure=1e9)), detect_smc(df.drop("htf_bias"), SmcSetupParams(max_exposure=1e9))
     bias = df["htf_bias"]
-    for side, allowed in (("short", bias <= 0), ("long", bias >= 0)):
+    for side, allowed in (("short", bias == -1), ("long", bias == 1)):
         want = (off[f"{side}_sweep"] & allowed).to_list()
         assert on[f"{side}_sweep"].to_list() == want
         assert sum(off[f"{side}_sweep"]) > 5 and sum(on[f"{side}_sweep"]) < sum(off[f"{side}_sweep"])  # тест не пустой и фильтр что-то режет

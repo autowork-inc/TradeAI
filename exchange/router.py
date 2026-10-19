@@ -23,7 +23,7 @@
     неизвестен (таймаут, обрыв, неизвестный код): ордер мог дойти до брокера, поэтому ошибка пробрасывается (R1), повторять вслепую нельзя.
   * Сопровождение MT5-позиций (`poll_mt5`): отслеживает отложенные ордера и позиции по `clientId`; позиция исчезла (сработал SL/TP брокера) -
     событие `closed`, движок освобождает монету. Открытая позиция сопровождается ПЛАНОМ ВЫХОДА стратегии (`ScaleOutPlan`, та же математика,
-    что у Shadow): Scale Out через `close_position(volume)`, безубыток и трейлинг runner'а через `modify_position`, тайм-аут 192 свечи
+    что у Shadow): Scale Out через `close_position(volume)`, тайм-аут 192 свечи
     (`exchange/mt5_exit.py`). Закрытый рынок (10018) при сопровождении - отложенная команда без Safe Mode. Состояние сопровождения
     пишется в файл (`state_path`), источник правды по объёму - брокер; после рестарта `recover_mt5` возвращает управление позициями из файла,
     чужую позицию подхватывает без управления (SL/TP брокера), позицию без стопа считает аварией (`Mt5UnprotectedPosition`).
@@ -124,8 +124,7 @@ class Mt5Tracked:
         try:
             data = {k: v for k, v in rec.items() if k not in ("plan", "exit_plan", "exit", "kind")}
             ep = rec["exit_plan"]
-            exit_plan = None if ep is None else ScaleOutPlan(tuple((float(r), float(f)) for r, f in ep["levels"]), bool(ep["be_after_first"]),
-                                                             ep["trail_mode"], float(ep["trail_atr_mult"]), int(ep["trail_wick_bars"]))
+            exit_plan = None if ep is None else ScaleOutPlan.from_record(ep["levels"], ep.get("tp_anchor", "fill"))
             return cls(kind=Kind(rec["kind"]), plan=None if rec["plan"] is None else Mt5OrderPlan(**rec["plan"]), exit_plan=exit_plan,
                        exit=None if rec["exit"] is None else Mt5Exit.from_record(rec["exit"]), **data)
         except (KeyError, TypeError, ValueError) as exc:
@@ -134,7 +133,7 @@ class Mt5Tracked:
 
 @dataclass(frozen=True)
 class Mt5Event:
-    kind: str  # opened | closed | cancelled | partial_close | be_armed | trail_moved | deferred | replayed
+    kind: str  # opened | closed | cancelled | partial_close | deferred | replayed
     trade: Mt5Tracked
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -158,7 +157,6 @@ class ExecutionRouter:
         now_ms: Callable[[], int] | None = None,
         plans: Mapping[str, ScaleOutPlan] | None = None,
         max_hold_bars: int = config.LIVE_MAX_HOLD_BARS,
-        be_trigger_r: float = D.BE_TRIGGER_R,
         state_path: Path | None = None,
     ):
         # SymbolSet (config.LIVE_BINANCE_SYMBOLS) хранится по ссылке: автоселектор монет меняет его состав на месте, маршрутизатор видит новый состав сразу
@@ -180,9 +178,9 @@ class ExecutionRouter:
         self._prefix = (binance or mt5).id_prefix  # type: ignore[union-attr]  # одинаков у обоих клиентов (config.CLIENT_ORDER_ID_PREFIX)
         self._tracked: dict[str, Mt5Tracked] = {}  # внутренний символ -> сделка (одна на символ: LiveRiskManager.busy)
         self._plans = dict(plans or {})  # strategy_id -> план выхода (нет в словаре - DEFAULT_PLAN, как у VirtualTracker)
-        if max_hold_bars < 1 or be_trigger_r <= 0:
-            raise ConfigError("ExecutionRouter: max_hold_bars >= 1, be_trigger_r > 0")
-        self._max_hold, self._be_r = max_hold_bars, be_trigger_r
+        if max_hold_bars < 1:
+            raise ConfigError("ExecutionRouter: max_hold_bars >= 1")
+        self._max_hold = max_hold_bars
         self._state_path, self._last_saved = state_path, ""
         self.offline_closed: list[Mt5Tracked] = []  # записи из файла состояния, позиций которых у брокера больше нет (закрыты, пока бота не было)
 
@@ -257,7 +255,7 @@ class ExecutionRouter:
                 return RouteRejected("price_deviation", {"broker_price": entry, "signal_entry": signal.entry, "deviation": dev, "max": self._max_dev})
         sl = _snap(signal.sl, spec)
         exit_plan = self._plans.get(signal.strategy, DEFAULT_PLAN)
-        tp = mt5_exit.broker_tp(exit_plan, entry, sl, signal.direction.sgn, spec)  # у плана с runner'ом брокерского TP нет
+        tp = mt5_exit.broker_tp(exit_plan, entry, sl, signal.direction.sgn, spec)
         margin_1lot = await self.mt5.calculate_margin(broker, side, 1.0, entry)
         sized = size_position(spec, side=side, entry=entry, sl=sl, tp=tp, equity=info.equity, free_margin=info.free_margin,
                               tick_value=quote.loss_tick_value, margin_per_lot=margin_1lot, params=self._params)
@@ -265,7 +263,7 @@ class ExecutionRouter:
             return RouteRejected(sized.reason, sized.detail)
         if split_levels(exit_plan, sized.lots, mt5_exit.lot_filters(spec)) is None:  # Scale Out не делится на сетке лота: другой математикой не торгуем
             return RouteRejected("plan_not_representable", {"lots": sized.lots, "volume_step": spec.volume_step, "min_volume": spec.min_volume,
-                                                            "levels": [list(x) for x in exit_plan.levels], "runner_frac": exit_plan.runner_frac})
+                                                            "levels": [list(x) for x in exit_plan.levels]})
         return Mt5Prepared(signal, sized, signal.kind, client_id(self._prefix, "E", signal.signal_id), entry, expires, exit_plan)
 
     async def send_mt5(self, prepared: Mt5Prepared) -> Mt5Tracked | RouteRejected:
@@ -307,12 +305,12 @@ class ExecutionRouter:
         if t is None or t.status != "open":
             return
         if t.exit is not None:
-            mt5_exit.on_tick(t.exit, tick, self._be_r)
+            mt5_exit.on_tick(t.exit, tick)
         elif not t.adopted and len(t.early_ticks) < 20_000:
             t.early_ticks.append((tick.price, tick.kind))  # позиция ещё не замечена опросом: лучшая цена и mark не теряются
 
     def on_bar_closed(self, symbol: str, bar: BarInfo | None, interval: str | None = None) -> None:
-        """Закрытие свечи: тайм-аут и трейлинг runner'а (исполняется следующим `poll_mt5`). Бары чужого таймфрейма сделки пропускаются; тайм-аут в барах
+        """Закрытие свечи: тайм-аут (исполняется следующим `poll_mt5`). Бары чужого таймфрейма сделки пропускаются; тайм-аут в барах
         (`max_hold_bars` задан для M15) умножается по таймфрейму сделки: календарное время то же."""
         t = self._tracked.get(symbol)
         if t is None or t.status != "open" or t.exit is None or self.mapper is None:
@@ -371,10 +369,10 @@ class ExecutionRouter:
             t.exit = mt5_exit.build_exit(t.exit_plan, pos, t.plan.sl, spec)
             ex = t.exit
             for price, kind in t.early_ticks:  # тики с момента отправки ордера (до первого опроса) - как если бы состояние было с самого начала
-                mt5_exit.on_tick(ex, Tick(t.symbol, price, 0, kind), self._be_r)
+                mt5_exit.on_tick(ex, Tick(t.symbol, price, 0, kind))
             t.early_ticks.clear()
             out.append(Mt5Event("protected", t, {"fill_price": ex.entry, "risk": ex.risk, "lots": ex.initial_lots, "sl": ex.sl0,
-                                                 "levels": [list(v) for v in ex.levels], "runner_lots": ex.runner_lots, "broker_tp": ex.tp_price,
+                                                 "levels": [list(v) for v in ex.levels], "broker_tp": ex.tp_price,
                                                  "exit_plan": t.exit_plan.describe(), "forced": ex.forced_reason}))
         ex = t.exit
         if ex.tp_price is not None and (pos.take_profit is None or abs(pos.take_profit - ex.tp_price) > spec.tick_size / 2):

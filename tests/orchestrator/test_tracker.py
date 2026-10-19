@@ -37,33 +37,30 @@ def test_limit_fills_only_when_price_passes_the_level_not_on_touch():
     assert t.status == PENDING_LIMIT
     tr.on_tick(tick(100.5, 77))
     assert t.status == OPEN and t.fill_price == 100.0 and t.fill_ts == 77
-    assert t.sizing.qty == pytest.approx(20.0)  # риск 100 USDT / R 5
+    assert t.sizing.qty == pytest.approx(1.0)  # риск 5 USDT / R 5  
     assert [e.kind for e in log.events] == ["trade_registered", "limit_filled"]
 
 
-def test_be_is_armed_by_mark_price_and_exits_at_entry_with_slippage_d11():
+def test_stop_stays_static_after_mark_price_reaches_1r_no_breakeven():
     tr, log = make()
     t = opened(tr)
     fill_short(tr, t)
-    tr.on_tick(tick(95.0, 20, "mark"))  # mark достиг +1R
-    assert t.be_armed and t.be_armed_ts == 20
-    tr.on_tick(tick(99.0, 21))  # внутри: ничего
+    tr.on_tick(tick(95.0, 20, "mark"))  # mark достиг +1R: стоп не двигается
+    assert not t.be_armed and t.stop_m == t.sl_m
+    tr.on_tick(tick(100.2, 30))  # возврат к входу: позиция жива (безубытка нет)
     assert t.status == OPEN
-    tr.on_tick(tick(100.2, 30))  # цена вернулась к входу -> стоп-маркет на входе, исполнение по цене тика
-    assert t.status == CLOSED and t.exit_reason == "be" and t.exit_price == 100.2
-    assert t.gross_r == pytest.approx(-0.04)
-    fee = (MAKER * 100.0 + TAKER * 100.2) / 5.0
-    assert t.net_r == pytest.approx(-0.04 - fee) and t.pnl_usdt == pytest.approx(t.net_r * 100.0)
-    assert [e.kind for e in log.events][-3:] == ["limit_filled", "be_armed", "trade_closed"]
+    tr.on_tick(tick(105.2, 40))  # выход только по исходному SL
+    assert t.status == CLOSED and t.exit_reason == "sl" and t.exit_price == 105.2 and t.gross_r == pytest.approx(-1.04)
+    assert "be_armed" not in [e.kind for e in log.events]
 
 
-def test_trade_ticks_alone_do_not_arm_be_only_mark_does_d11():
+def test_trade_ticks_alone_do_not_move_the_stop():
     tr, _ = make()
     t = opened(tr)
     fill_short(tr, t)
-    tr.on_tick(tick(94.0, 20))  # цена сделки на +1.2R, но mark не пришёл
+    tr.on_tick(tick(94.0, 20))  # цена сделки на +1.2R
     assert not t.be_armed
-    tr.on_tick(tick(105.2, 30))  # откат -> обычный SL, не BE
+    tr.on_tick(tick(105.2, 30))  # откат -> обычный SL
     assert t.exit_reason == "sl" and t.gross_r == pytest.approx(-1.04)
     assert t.mfe_r == pytest.approx(1.2) and t.mae_r == pytest.approx(1.04)
 
@@ -83,18 +80,18 @@ def test_stop_loss_exit_price_is_the_tick_not_the_stop_level():
     assert t.exit_reason == "sl" and t.exit_price == 107.0 and t.gross_r == pytest.approx(-1.4)
 
 
-def test_take_profit_three_r():
+def test_take_profit_four_r():
     tr, _ = make()
     t = opened(tr)
     fill_short(tr, t)
-    tr.on_tick(tick(84.5, 50))
-    assert t.exit_reason == "tp" and t.gross_r == pytest.approx(3.1) and t.status == CLOSED
+    tr.on_tick(tick(79.5, 50))
+    assert t.exit_reason == "tp" and t.gross_r == pytest.approx(4.1) and t.status == CLOSED
 
 
 def test_tp_reached_before_fill_cancels_the_order():
     tr, log = make()
     t = opened(tr)
-    tr.on_tick(tick(84.0, 5))
+    tr.on_tick(tick(79.0, 5))
     assert t.status == CANCELLED and t.exit_reason == "tp_before_fill" and log.events[-1].kind == "trade_cancelled"
 
 
@@ -126,7 +123,7 @@ def test_open_position_times_out_after_max_hold_at_bar_close_price():
     assert t.exit_reason == "timeout" and t.exit_price == 101.0 and t.gross_r == pytest.approx(-0.2)
 
 
-def test_long_limit_mirror_with_be():
+def test_long_limit_mirror_without_be():
     tr, _ = make()
     t = opened(tr, mk(direction=Direction.LONG))  # вход 100, SL 95, TP 115
     tr.on_tick(tick(100.0))
@@ -134,9 +131,11 @@ def test_long_limit_mirror_with_be():
     tr.on_tick(tick(99.5, 10))
     assert t.status == OPEN and t.fill_price == 100.0
     tr.on_tick(tick(105.0, 11, "mark"))
-    assert t.be_armed
+    assert not t.be_armed
     tr.on_tick(tick(99.8, 12))
-    assert t.exit_reason == "be" and t.gross_r == pytest.approx(-0.04)
+    assert t.status == OPEN  # возврат к входу безубытка не даёт
+    tr.on_tick(tick(94.9, 13))
+    assert t.exit_reason == "sl" and t.gross_r == pytest.approx(-1.02)
 
 
 def test_market_long_fills_at_first_tick_and_sets_tp_from_actual_entry():
@@ -146,20 +145,20 @@ def test_market_long_fills_at_first_tick_and_sets_tp_from_actual_entry():
     assert t.status != OPEN
     tr.on_tick(tick(100.5, 11))
     assert t.status == OPEN and t.fill_price == 100.5 and t.risk == pytest.approx(5.5)
-    assert t.tp_m * t.sgn == pytest.approx(117.0)  # 100.5 + 3 * 5.5
-    tr.on_tick(tick(106.0, 12, "mark"))  # +1R = 106
-    assert t.be_armed
-    tr.on_tick(tick(117.1, 13))
-    assert t.exit_reason == "tp" and t.gross_r == pytest.approx(16.6 / 5.5)
-    fee = (TAKER * 100.5 + TAKER * 117.1) / 5.5  # MARKET: вход тоже taker
+    assert t.tp_m * t.sgn == pytest.approx(122.5)  # 100.5 + 4 * 5.5
+    tr.on_tick(tick(106.0, 12, "mark"))  # +1R = 106: стоп не двигается
+    assert not t.be_armed
+    tr.on_tick(tick(122.6, 13))
+    assert t.exit_reason == "tp" and t.gross_r == pytest.approx(22.1 / 5.5)
+    fee = (TAKER * 100.5 + TAKER * 122.6) / 5.5  # MARKET: вход тоже taker
     assert t.net_r == pytest.approx(t.gross_r - fee)
     assert "market_filled" in [e.kind for e in log.events]
 
 
 def test_market_rejected_by_exposure_or_bad_risk_at_fill():
     tr, _ = make()
-    t = opened(tr, mk(strategy="breakout", direction=Direction.LONG, kind=Kind.MARKET, entry=100.0, sl=99.95))
-    tr.on_tick(tick(100.0, 1))  # R = 0.05 -> плечо 20 > 5
+    t = opened(tr, mk(strategy="breakout", direction=Direction.LONG, kind=Kind.MARKET, entry=100.0, sl=99.995))
+    tr.on_tick(tick(100.0, 1))  # R = 0.005 -> объём 1000, плечо 10 > 5
     assert t.status == CANCELLED and t.exit_reason == "rejected_exposure"
     t2 = opened(tr, mk(strategy="breakout", symbol="ETHUSDT", direction=Direction.LONG, kind=Kind.MARKET, entry=100.0, sl=95.0))
     tr.on_tick(tick(94.0, 2, symbol="ETHUSDT"))  # открылись ниже стопа
@@ -175,7 +174,7 @@ def test_market_not_filled_before_next_bar_close_means_tick_stream_died_r1():
 
 def test_limit_exceeding_leverage_cap_is_refused_at_submit_without_state():
     tr, log = make()
-    res = tr.submit(mk(entry=100.0, sl=100.02, tp=85.0, inval=101.0), 5)
+    res = tr.submit(mk(entry=100.0, sl=100.005, tp=80.0, inval=101.0), 5)
     assert res == Submission(False, "exposure") and tr.trades == [] and log.events[-1].kind == "skipped_risk"
 
 
@@ -194,7 +193,7 @@ def test_listeners_see_close_and_cancel_and_other_symbols_are_independent():
     tr.add_close_listener(seen.append)
     a = opened(tr)
     b = opened(tr, mk(symbol="ETHUSDT"))
-    tr.on_tick(tick(84.0, 5))  # BTC: TP до исполнения -> отмена; ETH не затронут
+    tr.on_tick(tick(79.0, 5))  # BTC: TP до исполнения -> отмена; ETH не затронут
     assert seen == [a] and b.status == PENDING_LIMIT and tr.active("ETHUSDT") == [b]
 
 
@@ -204,10 +203,10 @@ def test_gap_flags_active_trades_and_summary_excludes_them():
     fill_short(tr, a)
     tr.mark_gap("BTCUSDT", 99)
     assert a.gap_affected and log.events[-1].kind == "data_gap"
-    tr.on_tick(tick(84.0, 100))
+    tr.on_tick(tick(79.0, 100))
     ok = opened(tr, mk(bar=1))
     tr.on_tick(tick(100.5, 101))
-    tr.on_tick(tick(84.0, 102))
+    tr.on_tick(tick(79.0, 102))
     s = tr.summary()["smc/short"]
     assert s["signals"] == 2 and s["closed"] == 2 and s["tp"] == 2 and s["gap_affected"] == 1
     assert s["sum_net_r"] == pytest.approx(ok.net_r)  # сделка с обрывом в сумму R не входит
@@ -217,7 +216,7 @@ def test_record_is_json_ready_and_has_what_the_future_db_needs():
     tr, _ = make()
     t = opened(tr)
     fill_short(tr, t)
-    tr.on_tick(tick(84.0, 9))
+    tr.on_tick(tick(79.0, 9))
     r = t.record()
-    assert r["status"] == "closed" and r["exit_reason"] == "tp" and r["qty"] == pytest.approx(20.0)
+    assert r["status"] == "closed" and r["exit_reason"] == "tp" and r["qty"] == pytest.approx(1.0)  # риск 5 USDT / R 5
     assert {"trade_id", "strategy", "symbol", "direction", "kind", "fill_price", "exit_price", "net_r", "pnl_usdt", "mfe_r", "mae_r"} <= set(r)

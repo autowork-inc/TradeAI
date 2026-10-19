@@ -3,7 +3,7 @@
 Определение (на закрытой H4-свече j, по подтверждённым свингам features.smc.add_features):
   * Bullish (+1): последний подтверждённый Swing High выше предыдущего (HH) И последний Swing Low выше предыдущего (HL);
   * Bearish (-1): последний Swing High ниже предыдущего (LH) И последний Swing Low ниже предыдущего (LL);
-  * Neutral ( 0): структура смешанная или свингов ещё меньше двух с каждой стороны - торговать можно в обе стороны;
+  * Neutral ( 0): структура смешанная или свингов ещё меньше двух с каждой стороны - сетапы запрещены в обе стороны (жёсткий фильтр, 2026-10-19);
   * null: у H4-свечи ещё нет ATR (прогрев) - фильтр считает такое состояние запретом (fail-closed).
 Структура, а не EMA 50/200: рекурсивная EMA зависит от глубины истории (live ~300 баров != бэктест, нарушение R8), а свинги -
 нет (та же причина, что у ATR-SMA, О7). Цена: свинг на H4 подтверждается через k = 5 баров (20 часов), поэтому смена
@@ -60,9 +60,9 @@ def attach_htf_bias(frame: pl.DataFrame, table: pl.DataFrame, *, avail_column: s
 
 
 def side_allowed(side: str, column: str = BIAS_COLUMN) -> pl.Expr:
-    """Сторона сетапа разрешена структурой старшего таймфрейма: шорт - не при Bullish, лонг - не при Bearish; null (нет bias) - запрет."""
+    """Жёсткий фильтр тренда (2026-10-19): лонг - только при Bullish, шорт - только при Bearish. Встречные сигналы, Neutral и null (нет bias) - запрет."""
     if side == "short":
-        return (pl.col(column) <= NEUTRAL).fill_null(False)
+        return (pl.col(column) == BEARISH).fill_null(False)
     if side == "long":
-        return (pl.col(column) >= NEUTRAL).fill_null(False)
+        return (pl.col(column) == BULLISH).fill_null(False)
     raise DataError(f"HTF: неизвестная сторона {side!r}")

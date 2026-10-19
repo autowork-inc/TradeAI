@@ -18,6 +18,7 @@ from orchestrator.types import Direction, Kind
 from tests.exchange.fake_mt5 import FULL, FakeMt5Rpc, make_client, make_mapper, trade_error
 from tests.orchestrator.fake_live_rest import FakeRest
 from tests.orchestrator.live_helpers import BAR, FILTERS, T0, manager, signal
+from exchange.mt5_risk import Mt5RiskParams
 
 NOW = T0 + 60_000
 WHEN = datetime.fromtimestamp(NOW / 1000, tz=timezone.utc)  # сделки MT5 «сегодня» относительно часов движка
@@ -35,7 +36,7 @@ class Env:
         self.binance.set_filters(FILTERS)
         self.mt5, self.rpc = make_client(FakeMt5Rpc(equity=equity))
         self.mapper = run(make_mapper(self.mt5))
-        self.router = ExecutionRouter(binance=self.binance, mt5=self.mt5, mapper=self.mapper, binance_symbols=BINANCE_SYMBOLS, now_ms=lambda: NOW)
+        self.router = ExecutionRouter(binance=self.binance, mt5=self.mt5, mapper=self.mapper, binance_symbols=BINANCE_SYMBOLS, now_ms=lambda: NOW, risk_params=Mt5RiskParams(risk_usdt=1000.0))
         self.journal = MemoryEventLog()
         self.safe = SafeMode(tmp_path / ".safe_mode")
         self.risk = manager(tmp_path, venues=self.router.venues)
@@ -145,6 +146,7 @@ def test_other_mt5_broker_refusal_is_a_rejection_and_unknown_outcome_crashes(env
 
 def test_mt5_sizing_rejections_are_journaled_with_reason(tmp_path):
     tiny = Env(tmp_path, equity=100.0)
+    tiny.router._params = Mt5RiskParams(risk_usdt=1.0)  # риск 1 USD -> 0.005 лота: меньше минимума
     run(tiny.engine.execute(eur(), NOW))
     assert tiny.rejected() == ["below_min_size"] and tiny.rpc.trades == [] and tiny.risk.busy() == {}
 

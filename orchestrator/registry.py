@@ -6,16 +6,8 @@ strategy_id - то, что пишется в колонку `strategy_id` все
 (`strategy.interval`): Оркестратор считает её только на закрытии этих свечей. У каждой своя блокировка монеты (О14), свои позиции и свои сделки; общего
 изменяемого состояния между стратегиями нет.
 
-План управления позицией (`ScaleOutPlan`) задан на стратегию, потому что у стратегий разная идея выхода:
-  SMC_Pro_Trend      Scale Out по умолчанию: 50% на +1R (+безубыток), 40% на +3R, 10% runner с трейлингом (решение 2026-10-10);
-  SMC_Counter_Trend  скальп: 100% на +1R (контртрендовый отскок - быстрая цель, без трейлинга);
-  OBI_Breakout       Scale Out по умолчанию (импульсный пробой - даём прибыли расти);
-  ICT_Killzones      Scale Out по умолчанию;
-  VWAP_Reversion     возврат к среднему: 50% на +1R (+безубыток), остаток 50% на +2R, без runner'а (цель - вернуться к VWAP, а не уйти
-                     за него; точный уровень VWAP на сигнале пишется в meta, тейк-ордера из цены трекер при MARKET-входе не использует).
-  Horizontal_Breakout / Trendline_Breakout  50% на +1R (+безубыток), 50% на +2R, без runner'а (LEVEL_BREAKOUT_PLAN, 2026-10-18).
-Параметры планов - стартовые допущения, не из утверждённых: подбирать по статистике Shadow (trade_closes хранит каждую часть сделки),
-а не по знаку прибыли.
+План управления позицией (`ScaleOutPlan`, 2026-10-19) у ВСЕХ стратегий один: единственный тейк на весь объём, строго 1:4 к стопу; частичных
+фиксаций, безубытка, остатка-runner и трейлинга нет. Риск сделки - фиксированные 5 USDT (orchestrator/risk.py, live_risk.py, mt5_risk.py).
 """
 
 from collections.abc import Collection, Mapping, Sequence
@@ -25,16 +17,20 @@ import config
 from features import defaults as D
 from orchestrator.multi_strategies import (
     HORIZONTAL_BREAKOUT,
+    HORIZONTAL_BREAKOUT_CHR,
     ICT_KILLZONES,
     OBI_BREAKOUT,
     SMC_COUNTER_TREND,
     TRENDLINE_BREAKOUT,
+    TRENDLINE_BREAKOUT_CHR,
     VWAP_REVERSION,
     StrategyCounterTrend,
     StrategyHorizontalBreakout,
+    StrategyHorizontalBreakoutChr,
     StrategyKillzones,
     StrategyObiBreakout,
     StrategyTrendlineBreakout,
+    StrategyTrendlineBreakoutChr,
     StrategyVwapReversion,
 )
 from orchestrator.strategies import SMC_PRO_TREND, Strategy, StrategySMC
@@ -43,11 +39,12 @@ from strategies.smc_setups import SmcSetupParams
 from strategies.vwap_reversion import VwapParams, min_history_bars
 from utils.errors import ConfigError
 
-SHADOW_STRATEGIES = (SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT)
+SHADOW_STRATEGIES = (SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT,
+                     HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR)
 # Стратегии без доступа к live (2026-10-18): никогда не исполняются боевым движком - config.validate и LiveRiskManager отвергают их в
 # APPROVED_STRATEGIES (ConfigError), LiveMirrorSink их не пересылает. Список продублирован в config (config не импортирует оркестратор).
-SHADOW_ONLY_STRATEGIES = (HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT)
-NEEDS_HTF = (SMC_PRO_TREND, SMC_COUNTER_TREND, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT)  # читают колонку htf_bias (H4)
+SHADOW_ONLY_STRATEGIES = (HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT, HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR)
+NEEDS_HTF = (SMC_PRO_TREND, SMC_COUNTER_TREND, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT, HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR)  # читают колонку htf_bias (H4)
 NEEDS_MICRO = (OBI_BREAKOUT,)  # читают колонки ms_obi / ms_delta (стакан + лента)
 
 
@@ -59,15 +56,15 @@ def strategy_allowed(name: str, symbol: str) -> bool:
     return allowed is None or symbol in allowed
 
 
-SCALP_1R_PLAN = ScaleOutPlan(((1.0, 1.0),), be_after_first=False, trail_mode=None)
-VWAP_PLAN = ScaleOutPlan(((1.0, 0.5), (2.0, 0.5)), be_after_first=True, trail_mode=None)
-# Пробои уровня / линии (2026-10-18): разметка - медиана R:R 1.0, но у четверти сделок цель >= 2R. Половина фиксируется на +1R (стоп в безубыток),
-# половина ждёт +2R; без runner'а - трейлинг 3 ATR на 15m для пробоя консолидации слишком широк.
-LEVEL_BREAKOUT_PLAN = ScaleOutPlan(((1.0, 0.5), (2.0, 0.5)), be_after_first=True, trail_mode=None)
-# SMC_Pro_Trend (2026-10-18): тот же Scale Out 50/40/10, но цены уровней - от цен сигнала (вход 50% FVG, SL за экстремумом свипа), а не от фактического входа
-SMC_PRO_PLAN = replace(DEFAULT_PLAN, tp_anchor="signal")
+# 2026-10-19: у ВСЕХ стратегий один план - единственный тейк на весь объём, строго 1:4 (DEFAULT_PLAN); частичных фиксаций, безубытка и трейлинга нет.
+# Прежние имена планов оставлены как псевдонимы (на них ссылаются тесты и запись состояния).
+STRICT_PLAN = DEFAULT_PLAN
+SCALP_1R_PLAN = VWAP_PLAN = LEVEL_BREAKOUT_PLAN = CHR_PLAN = STRICT_PLAN
+# SMC_Pro_Trend (2026-10-19): тейк строго 1:4 от ФАКТИЧЕСКОЙ цены входа (якорь `fill`; прежний якорь `signal` от цены сигнала отменён).
+SMC_PRO_PLAN = STRICT_PLAN
 STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_PRO_TREND: SMC_PRO_PLAN, SMC_COUNTER_TREND: SCALP_1R_PLAN, VWAP_REVERSION: VWAP_PLAN,
-                                           HORIZONTAL_BREAKOUT: LEVEL_BREAKOUT_PLAN, TRENDLINE_BREAKOUT: LEVEL_BREAKOUT_PLAN}
+                                           HORIZONTAL_BREAKOUT: LEVEL_BREAKOUT_PLAN, TRENDLINE_BREAKOUT: LEVEL_BREAKOUT_PLAN,
+                                           HORIZONTAL_BREAKOUT_CHR: CHR_PLAN, TRENDLINE_BREAKOUT_CHR: CHR_PLAN}
 
 
 def plans_for(names: Sequence[str]) -> Mapping[str, ScaleOutPlan]:
@@ -123,6 +120,8 @@ def build_strategies(names: Sequence[str] = SHADOW_STRATEGIES, *, mtf: bool = Fa
         VWAP_REVERSION: (lambda: vwap_reversion_on(interval)) if interval else StrategyVwapReversion,  # свой 15m: окна 16 / 3 (откат с 5m 2026-10-15)
         HORIZONTAL_BREAKOUT: StrategyHorizontalBreakout,
         TRENDLINE_BREAKOUT: StrategyTrendlineBreakout,
+        HORIZONTAL_BREAKOUT_CHR: StrategyHorizontalBreakoutChr,
+        TRENDLINE_BREAKOUT_CHR: StrategyTrendlineBreakoutChr,
     }
     unknown = [n for n in names if n not in factories]
     if unknown:

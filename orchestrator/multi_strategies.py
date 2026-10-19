@@ -7,6 +7,8 @@
   VWAP_Reversion     strategies/vwap_reversion.py  возврат от 3-го стандартного отклонения Anchored VWAP (дневной якорь)
   Horizontal_Breakout  strategies/horizontal_breakout.py  пробой плотной горизонтальной консолидации по H4 (2026-10-18, только Shadow)
   Trendline_Breakout   strategies/trendline_breakout.py   пробой / свип трендовой линии по двум свингам (2026-10-18, только Shadow)
+  Horizontal_Breakout_CHR  strategies/chr_horizontal.py  пробой уровня после поджатия, жёсткий тренд H4, статичный стоп (2026-10-19, только Shadow)
+  Trendline_Breakout_CHR   strategies/chr_trendline.py   пробой наклонки после поджатия, жёсткий тренд H4, статичный стоп (2026-10-19, только Shadow)
 
 Все четыре входят MARKET (по первому тику после закрытия свечи; R и плечо считаются по факту входа в трекере). Планы управления позицией -
 orchestrator/registry.py. Состояний автомата сетапа (S0..S4) у них нет: решение принимается на одной закрытой свече.
@@ -18,6 +20,8 @@ import polars as pl
 
 from orchestrator.strategies import _htf_meta, _signal_id
 from orchestrator.types import Direction, FeatureContext, Kind, Signal, geometry
+from strategies.chr_horizontal import ChrHorizontalParams, detect_chr_horizontal
+from strategies.chr_trendline import ChrTrendlineParams, detect_chr_trendline
 from strategies.counter_trend import CounterTrendParams, detect_counter_trend
 from strategies.horizontal_breakout import HorizontalParams, detect_horizontal_breakout
 from strategies.killzones import DAY_MS, HOUR_MS, KillzoneParams, detect_killzones
@@ -32,6 +36,10 @@ ICT_KILLZONES = "ICT_Killzones"
 VWAP_REVERSION = "VWAP_Reversion"
 HORIZONTAL_BREAKOUT = "Horizontal_Breakout"  # 2026-10-18, только Shadow (config.SHADOW_ONLY_STRATEGIES)
 TRENDLINE_BREAKOUT = "Trendline_Breakout"  # 2026-10-18, только Shadow (config.SHADOW_ONLY_STRATEGIES)
+# CHR (2026-10-19, только Shadow). В клиенте - «Horizontal Breakout (CHR)» / «Trendline Breakout (CHR)»: strategy_id без пробелов и скобок,
+# потому что он входит в id сделки (`<strategy_id>:<символ>:...`), а id сделки в API ограничен [A-Za-z0-9:._-] (api/main.py TradeId).
+HORIZONTAL_BREAKOUT_CHR = "Horizontal_Breakout_CHR"
+TRENDLINE_BREAKOUT_CHR = "Trendline_Breakout_CHR"
 
 
 def _market_signal(name: str, ctx: FeatureContext, direction: Direction, sl: float, geo: tuple[dict[str, Any], ...], meta: dict[str, Any]) -> Signal:
@@ -233,4 +241,82 @@ class StrategyTrendlineBreakout:
                 "touches": int(last[f"tl_{side}_touches"]), "risk_atr": _f(last[f"tl_{side}_risk_atr"]),
                 "quality": _f(last[f"tl_{side}_quality"]), "vol_ratio": _f(last["vol_ratio"]),
                 "anchor1_price": g["anchor1_price"], "anchor2_price": g["anchor2_price"], "atr": last["atr"], **_htf_meta(last)}))
+        return tuple(out)
+
+
+def _chr_meta(last: dict[str, Any], pre: str) -> dict[str, Any]:
+    """Поля CHR, общие для уровня и наклонки: касания, точки поджатия, риск в ATR, полнотелость пробойной свечи."""
+    squeeze = [_f(last[f"{pre}squeeze_{n}"]) for n in (1, 2, 3)]
+    return {"touches": int(last[f"{pre}touches"]), "squeeze_points": [v for v in reversed(squeeze) if v is not None],
+            "risk_atr": _f(last[f"{pre}risk_atr"]), "body_frac": _f(last[f"{pre}body_frac"]), "stop": "static", "atr": last["atr"]}
+
+
+def _squeeze_geo(last: dict[str, Any], pre: str) -> dict[str, Any]:
+    """Линия поджатия: от самой старой точки (higher low / lower high) до самой свежей."""
+    first = next(v for v in (last[f"{pre}squeeze_3"], last[f"{pre}squeeze_2"]) if v is not None)
+    return geometry("line", last[f"{pre}squeeze_start_t"], last[f"{pre}squeeze_last_t"], first, last[f"{pre}squeeze_1"], "поджатие")
+
+
+class StrategyHorizontalBreakoutChr:
+    """Только Shadow (config.SHADOW_ONLY_STRATEGIES). Тренд H4 - жёсткий фильтр внутри детектора; стоп статичный, тейк 1:4 на весь объём (registry.CHR_PLAN)."""
+
+    name = HORIZONTAL_BREAKOUT_CHR
+    # Калибровка: правьте константы CHR_H_* в strategies/chr_horizontal.py (или передайте свои params); здесь - значения по умолчанию класса.
+    DEFAULT_PARAMS = ChrHorizontalParams()
+
+    def __init__(self, params: ChrHorizontalParams | None = None):
+        self.params = params or self.DEFAULT_PARAMS
+
+    def detect(self, ctx: FeatureContext) -> tuple[Signal, ...]:
+        det = detect_chr_horizontal(ctx.frame, self.params)
+        last = _last(det)
+        out = []
+        t = ctx.bar_open_time
+        t_start = t - self.params.window * ctx.interval_ms
+        for side in ("long", "short"):
+            pre = f"chh_{side}_"
+            if not last[pre + "signal"]:
+                continue
+            level, sl = last[pre + "level"], last[pre + "sl"]
+            geo = (
+                geometry("line", t_start, t, level, level, "уровень"),
+                _squeeze_geo(last, pre),
+                geometry("marker", t, t, ctx.last_close, ctx.last_close, "пробой"),
+                _sl_line(ctx, sl),
+            )
+            out.append(_market_signal(self.name, ctx, Direction(side), sl, geo, {
+                "level": level, "window": self.params.window, **_chr_meta(last, pre), **_htf_meta(last)}))
+        return tuple(out)
+
+
+class StrategyTrendlineBreakoutChr:
+    """Только Shadow (config.SHADOW_ONLY_STRATEGIES). Тренд H4 - жёсткий фильтр внутри детектора; стоп статичный, тейк 1:4 на весь объём (registry.CHR_PLAN)."""
+
+    name = TRENDLINE_BREAKOUT_CHR
+    # Калибровка: правьте константы CHR_T_* в strategies/chr_trendline.py (или передайте свои params); здесь - значения по умолчанию класса.
+    DEFAULT_PARAMS = ChrTrendlineParams()
+
+    def __init__(self, params: ChrTrendlineParams | None = None):
+        self.params = params or self.DEFAULT_PARAMS
+
+    def detect(self, ctx: FeatureContext) -> tuple[Signal, ...]:
+        det = detect_chr_trendline(ctx.frame, ctx.interval_ms, self.params)
+        last = _last(det)
+        out = []
+        t = ctx.bar_open_time
+        for side in ("long", "short"):
+            pre = f"cht_{side}_"
+            if not last[pre + "signal"]:
+                continue
+            g = {k: last[pre + k] for k in ("level", "sl", "anchor1_time", "anchor1_price", "anchor2_time", "anchor2_price")}
+            geo = (
+                geometry("line", g["anchor1_time"], t, g["anchor1_price"], g["level"], "наклонная линия"),
+                geometry("marker", g["anchor2_time"], g["anchor2_time"], g["anchor2_price"], g["anchor2_price"], "2-я опора"),
+                _squeeze_geo(last, pre),
+                geometry("marker", t, t, ctx.last_close, ctx.last_close, "пробой линии"),
+                _sl_line(ctx, g["sl"]),
+            )
+            out.append(_market_signal(self.name, ctx, Direction(side), g["sl"], geo, {
+                "line_level": g["level"], "slope_atr": _f(last[pre + "slope_atr"]), "anchor1_price": g["anchor1_price"],
+                "anchor2_price": g["anchor2_price"], "window": self.params.window, **_chr_meta(last, pre), **_htf_meta(last)}))
         return tuple(out)

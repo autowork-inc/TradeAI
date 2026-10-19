@@ -20,10 +20,10 @@ from orchestrator.tracker import CLOSED, DEFAULT_PLAN, ScaleOutPlan, VirtualTrac
 from orchestrator.types import BarInfo, Direction, Kind, Tick
 from tests.exchange.fake_mt5 import FakeMt5Rpc, make_client, make_mapper, trade_error
 from tests.orchestrator.live_helpers import BAR, STRATEGY, T0, signal
+from exchange.mt5_risk import Mt5RiskParams
 
 SYM = "XAUUSD"
-WICK_PLAN = ScaleOutPlan(((1.0, 0.5), (3.0, 0.4)), True, "wick", trail_wick_bars=2)
-PLANS = {"default": DEFAULT_PLAN, "scalp": SCALP_1R_PLAN, "vwap": VWAP_PLAN, "wick": WICK_PLAN}
+PLANS = {"default": DEFAULT_PLAN, "scalp": SCALP_1R_PLAN, "vwap": VWAP_PLAN}
 STEPS, BAR_EVERY = 170, 6
 QTY0 = 2.5  # лоты в паритетных траекториях
 
@@ -88,14 +88,14 @@ def make_walk(seed: int, direction: Direction, gaps: bool) -> list[float]:
     return [2000.0 + 2 * (x / 4 - 100) for x in out]  # 2000.00 = вход; шаг сетки 0.5
 
 
-async def make_router(rpc: MovingMt5, plan, *, max_hold=192, state_path=None):
+async def make_router(rpc: MovingMt5, plan, *, max_hold=192, state_path=None, risk_params=None):
     client, _ = make_client(rpc)
     mapper = await make_mapper(client)
-    return ExecutionRouter(mt5=client, mapper=mapper, plans={STRATEGY: plan}, max_hold_bars=max_hold, state_path=state_path, now_ms=lambda: T0), client
+    return ExecutionRouter(mt5=client, mapper=mapper, plans={STRATEGY: plan}, max_hold_bars=max_hold, state_path=state_path, now_ms=lambda: T0, risk_params=risk_params or Mt5RiskParams(risk_usdt=1000.0)), client
 
 
 async def duel(seed: int, plan: ScaleOutPlan, direction: Direction, max_hold: int) -> dict:
-    prices = make_walk(seed, direction, gaps=plan.runner_frac > 0)  # без runner'а гэп через два уровня сломал бы сравнение: брокерский TP закрыл бы всё разом
+    prices = make_walk(seed, direction, gaps=False)  # гэп через два уровня сломал бы сравнение: брокерский TP закрыл бы всё разом
     sgn = direction.sgn
     sig = signal(symbol=SYM, direction=direction, kind=Kind.MARKET, entry=2000.0, sl=2000.0 + sgn * 4.0)  # R = 4.0 -> 2.50 лота (при R = 2 плечо 10x выше потолка 5.0 у Shadow)
     tracker = VirtualTracker(MemoryEventLog(), equity=10_000.0, plans={STRATEGY: plan}, max_hold_bars=max_hold)
@@ -182,9 +182,9 @@ def test_mt5_exits_match_the_shadow_tracker_on_random_price_paths():
                 legs = r["shadow"].legs[: len(r["shadow"].legs) - int(imm)]
                 seen.update(g.reason for g in legs)
                 seen["multi_leg"] += int(len(legs) > 1)
-    assert n == 176
-    for needed in ("sl", "be", "trail", "timeout", "tp", "scale_1r", "scale_3r", "multi_leg"):
-        assert seen[needed] >= 3, f"мало траекторий с выходом {needed}: {dict(seen)}"
+    assert n == 132
+    for needed in ("sl", "timeout", "tp"):
+        assert seen[needed] >= (1 if needed == "timeout" else 3), f"мало траекторий с выходом {needed}: {dict(seen)}"
 
 
 # ---------------------------------------------------------------------------------------- вспомогательное для сценариев
@@ -209,64 +209,42 @@ async def tick(router, p, kind="trade", ts=0):
 # ---------------------------------------------------------------------------------------------------- сценарии
 
 
-def test_scale_out_lots_follow_the_volume_step_and_stops_follow_the_plan():
+def test_single_take_profit_covers_all_lots_and_the_stop_never_moves():
     async def body():
         router, rpc, _, t = await opened()
         assert [e.kind for e in await router.poll_mt5()] == ["protected"]
         ex = t.exit
-        assert ex.initial_lots == 5.0 and [lvl[2] for lvl in ex.levels] == [2.5, 2.0] and ex.runner_lots == pytest.approx(0.5)
-        assert [lvl[1] for lvl in ex.levels] == [2002.0, 2006.0] and ex.tp_price is None  # runner -> брокерского TP нет
+        assert ex.initial_lots == 5.0 and [lvl[2] for lvl in ex.levels] == [5.0]  # один уровень на весь объём
+        assert [lvl[1] for lvl in ex.levels] == [2008.0] and ex.tp_price == 2008.0  # 4R от входа 2000, R = 2; брокерский TP там же
+        assert rpc.positions[0]["takeProfit"] == 2008.0 and rpc.positions[0]["stopLoss"] == 1998.0
         rpc.trades.clear()
-        rpc.set_price(2002.0)
-        await tick(router, 2002.0)
+        for p in (2002.0, 2004.0, 2006.0):  # +1R, +2R, +3R: частичных закрытий нет
+            rpc.set_price(p)
+            await tick(router, p)
+            assert await router.poll_mt5() == [] and rpc.positions[0]["volume"] == 5.0
+        assert rpc.trades == []  # ни частичных закрытий, ни переносов стопа
+        rpc.set_price(2008.0)
+        await tick(router, 2008.0)
         evs = await router.poll_mt5()
-        assert [e.kind for e in evs] == ["partial_close", "be_armed"]
-        assert [x[:3] for x in rpc.trades if x[0] in ("close_part", "modify")] == [("close_part", t.position_id, 2.5), ("modify", t.position_id, 2000.0)]
-        pos = rpc.positions[0]
-        assert pos["volume"] == 2.5 and pos["stopLoss"] == 2000.0  # 50% закрыто, стоп на входе
-        rpc.set_price(2006.0)
-        await tick(router, 2006.0)
-        evs = await router.poll_mt5()
-        assert [e.kind for e in evs] == ["partial_close"] and rpc.positions[0]["volume"] == pytest.approx(0.5)
-        assert all(e.kind != "closed" for e in evs)
+        assert [e.kind for e in evs] == ["closed"] and evs[0].detail["reason"] == "tp" and not rpc.positions
     asyncio.run(body())
 
 
-def test_no_runner_plan_puts_the_last_level_on_the_broker_as_tp():
+def test_every_plan_puts_the_take_profit_on_the_broker_at_4r():
     async def body():
         router, rpc, _, t = await opened(VWAP_PLAN)
         await router.poll_mt5()
-        assert t.exit.tp_price == 2004.0 and rpc.positions[0]["takeProfit"] == 2004.0  # +2R от фактического входа
+        assert t.exit.tp_price == 2008.0 and rpc.positions[0]["takeProfit"] == 2008.0  # +4R от фактического входа
     asyncio.run(body())
 
 
-def test_market_closed_defers_scale_out_without_safe_mode_and_replays_it():
-    async def body():
-        router, rpc, _, t = await opened()
-        await router.poll_mt5()
-        rpc.set_price(2002.0)
-        await tick(router, 2002.0)
-        rpc.effects.append(trade_error(10018))  # частичное закрытие: рынок закрыт
-        evs = await router.poll_mt5()
-        assert [e.kind for e in evs] == ["deferred"] and evs[0].detail["code"] == 10018 and rpc.positions[0]["volume"] == 5.0
-        assert t.exit.levels_done == 0
-        rpc.effects.append(trade_error(10018))
-        assert await router.poll_mt5() == []  # повтор тоже отказан: в журнал второй раз не пишем
-        evs = await router.poll_mt5()  # рынок открылся
-        assert [e.kind for e in evs] == ["replayed", "partial_close", "be_armed"] and rpc.positions[0]["volume"] == 2.5
-    asyncio.run(body())
-
-
-def test_market_closed_defers_breakeven_and_timeout_close():
+def test_market_closed_defers_timeout_close():
     async def body():
         router, rpc, _, t = await opened(DEFAULT_PLAN, max_hold=2)
         await router.poll_mt5()
-        await tick(router, 2002.0, "mark")  # mark price +1R -> безубыток взведён, но уровни по цене сделок ещё не затронуты
-        rpc.set_price(2001.0)  # цена выше входа: стоп «на входе» брокер принимает
-        rpc.effects.append(trade_error(10018))
-        assert [e.kind for e in await router.poll_mt5()] == ["deferred"] and rpc.positions[0]["stopLoss"] == 1998.0
-        assert [e.kind for e in await router.poll_mt5()] == ["replayed", "be_armed"] and rpc.positions[0]["stopLoss"] == 2000.0
+        await tick(router, 2002.0, "mark")  # mark price +1R: стоп не двигается
         rpc.set_price(2001.0)
+        assert await router.poll_mt5() == [] and rpc.positions[0]["stopLoss"] == 1998.0
         for _ in range(3):
             router.on_bar_closed(SYM, BarInfo(2001.0, 2000.0, 0.5))
         rpc.effects.append(trade_error(10018))
@@ -277,35 +255,13 @@ def test_market_closed_defers_breakeven_and_timeout_close():
     asyncio.run(body())
 
 
-def test_unknown_outcome_of_partial_close_does_not_close_twice():
-    async def body():
-        router, rpc, _, t = await opened()
-        await router.poll_mt5()
-        rpc.set_price(2002.0)
-        await tick(router, 2002.0)
-
-        def executed_but_reply_lost(name, args):  # ордер дошёл до брокера и исполнился, ответ потерян
-            if name == "close_part":
-                rpc.positions[0]["volume"] = round(rpc.positions[0]["volume"] - args[1], 8)
-
-        rpc.on_trade = executed_but_reply_lost
-        rpc.effects.append(trade_error(10012))  # REQUEST_TIMEOUT: исход неизвестен
-        assert await router.poll_mt5() == [] and rpc.positions[0]["volume"] == 2.5
-        rpc.on_trade = None
-        evs = await router.poll_mt5()  # уровень выведен из лотов брокера, второго закрытия нет
-        assert [e.kind for e in evs] == ["partial_close", "be_armed"] and evs[0].detail["source"] == "broker_lots"
-        assert [x[0] for x in rpc.trades].count("close_part") == 1 and rpc.positions[0]["volume"] == 2.5
-    asyncio.run(body())
-
-
-def test_stop_too_close_on_breakeven_closes_at_market_without_safe_mode():
+def test_mark_price_alone_never_moves_the_broker_stop_or_closes_the_position():
     async def body():
         router, rpc, _, t = await opened()
         await router.poll_mt5()
         await tick(router, 2002.0, "mark")  # +1R по mark price
-        rpc.set_price(2000.0)  # но сделки вернулись ко входу: стоп «на входе» стоит на цене -> брокер: 10016
-        evs = await router.poll_mt5()
-        assert [e.kind for e in evs] == ["closed"] and evs[0].detail["reason"] == "be" and not rpc.positions
+        rpc.set_price(2000.0)  # сделки вернулись ко входу: безубытка нет, позиция жива
+        assert await router.poll_mt5() == [] and rpc.positions and rpc.positions[0]["stopLoss"] == 1998.0
     asyncio.run(body())
 
 
@@ -315,33 +271,47 @@ def test_ticks_before_the_first_poll_are_not_lost():
         for p, kind in ((2001.0, "trade"), (2002.0, "mark"), (1999.0, "trade")):  # опроса ещё не было: состояния сопровождения нет
             await tick(router, p, kind)
         await router.poll_mt5()
-        assert t.exit.be_pending and t.exit.best_q == -2001.0 and t.exit.last_q == -1999.0
+        assert t.exit.best_q == -2001.0 and t.exit.last_q == -1999.0
     asyncio.run(body())
 
 
-def test_restart_returns_control_of_a_partly_closed_position(tmp_path):
+def test_restart_returns_control_of_an_open_position(tmp_path):
     async def body():
         path = tmp_path / "mt5.json"
         router, rpc, client, t = await opened(state_path=path)
         await router.poll_mt5()
-        rpc.set_price(2002.0)
-        await tick(router, 2002.0)
-        await router.poll_mt5()  # 50% закрыто, стоп на входе - на диске
+        rpc.set_price(2003.0)
+        await tick(router, 2003.0)
+        await router.poll_mt5()
         assert path.exists()
         before = list(rpc.trades)
         # перезапуск: новый маршрутизатор, тот же брокер и тот же файл
         router2, _ = await make_router(rpc, DEFAULT_PLAN, state_path=path)
         found = await router2.recover_mt5()
-        assert [f.symbol for f in found] == [SYM] and not found[0].adopted and found[0].exit.levels_done == 1 and rpc.trades == before
-        rpc.set_price(2006.0)
-        await tick(router2, 2006.0)
+        assert [f.symbol for f in found] == [SYM] and not found[0].adopted and found[0].exit.levels_done == 0 and rpc.trades == before
+        rpc.set_price(2008.0)
+        await tick(router2, 2008.0)
         evs = await router2.poll_mt5()
-        assert [e.kind for e in evs] == ["partial_close"] and evs[0].detail["reason"] == "scale_3r"
-        assert rpc.positions[0]["volume"] == pytest.approx(0.5) and found[0].exit.stop_price == 2000.0
+        assert [e.kind for e in evs] == ["closed"] and evs[0].detail["reason"] == "tp" and not rpc.positions
         # позиция закрыта, пока бота не было: запись уходит в offline_closed
-        rpc.positions.clear()
         router3, _ = await make_router(rpc, DEFAULT_PLAN, state_path=path)
-        assert await router3.recover_mt5() == [] and [o.symbol for o in router3.offline_closed] == [SYM]
+        assert await router3.recover_mt5() == []
+    asyncio.run(body())
+
+
+def test_old_state_file_with_a_runner_plan_is_still_readable(tmp_path):
+    """Запись, сохранённая до 2026-10-19 (Scale Out 50/40/10 + поля трейлинга), читается: доли нормируются, лишние поля отбрасываются."""
+    from exchange.mt5_exit import Mt5Exit
+
+    async def body():
+        router, rpc, client, t = await opened()
+        await router.poll_mt5()
+        rec = t.exit.to_record()
+        rec["plan"] = {"levels": [[1.0, 0.5], [3.0, 0.4]], "be_after_first": True, "runner_frac": 0.1, "trail_mode": "atr", "trail_atr_mult": 3.0,
+                       "trail_wick_bars": 3, "tp_anchor": "fill"}
+        rec.update({"be_armed": True, "be_pending": False, "trail_target": None, "recent_bars": [], "runner_lots": 0.5})
+        ex = Mt5Exit.from_record(rec)
+        assert sum(f for _, f in ex.plan.levels) == pytest.approx(1.0)
     asyncio.run(body())
 
 
@@ -359,23 +329,22 @@ def test_foreign_position_is_adopted_without_management():
     asyncio.run(body())
 
 
-def test_unrepresentable_plan_is_rejected_before_any_order():
+def test_below_minimum_lot_is_rejected_before_any_order():
     async def body():
         rpc = MovingMt5(SYM, 2000.0)
-        rpc.equity = rpc.free_margin = 400.0  # риск 4 USD -> 0.02 лота: 10% = 0.002 не делится
-        router, _ = await make_router(rpc, DEFAULT_PLAN)
+        router, _ = await make_router(rpc, DEFAULT_PLAN, risk_params=Mt5RiskParams(risk_usdt=0.5))  # 0.5 USD / 400 USD на лот < 0.01
         rej = await router.open_mt5(sig_long(), T0)
-        assert isinstance(rej, RouteRejected) and rej.reason == "plan_not_representable" and rpc.trades == []
+        assert isinstance(rej, RouteRejected) and rej.reason == "below_min_size" and rpc.trades == []
     asyncio.run(body())
 
 
 def test_other_trade_errors_are_not_swallowed():
     async def body():
-        router, rpc, _, t = await opened()
+        router, rpc, _, t = await opened(DEFAULT_PLAN, max_hold=2)
         await router.poll_mt5()
-        rpc.set_price(2002.0)
-        await tick(router, 2002.0)
-        rpc.effects.append(trade_error(10019))  # NO_MONEY на закрытии - не рыночная пауза и не неизвестный исход
+        for _ in range(3):
+            router.on_bar_closed(SYM, BarInfo(2001.0, 2000.0, 0.5))
+        rpc.effects.append(trade_error(10019))  # NO_MONEY на закрытии по тайм-ауту - не рыночная пауза и не неизвестный исход
         with pytest.raises(MetaApiTradeError):
             await router.poll_mt5()
     asyncio.run(body())

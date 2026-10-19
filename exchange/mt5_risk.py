@@ -4,15 +4,15 @@
 
     loss_per_lot = d / tickSize * tickValue        (tickValue - потеря за ОДИН тик на 1 лот в ВАЛЮТЕ СЧЁТА)
     loss_per_lot = d * contractSize * rate         (если стоимость тика неизвестна; rate - курс валюты котировки к валюте счёта)
-    lots         = (equity * risk_pct) / loss_per_lot,   затем ВНИЗ до volumeStep
+    lots         = risk_usdt / loss_per_lot,   затем ВНИЗ до volumeStep
 
 Источник стоимости тика - `lossTickValue` котировки MetaApi (`MetaApiLiveClient.get_price` -> `Quote.loss_tick_value`): брокер уже
 пересчитал её в валюту счёта (для USDJPY при счёте в USD это не 100 000 * 0.001 = 100 иен, а доллары). Второй путь (`rate`) годится, когда
 валюта прибыли символа совпадает с валютой счёта (`rate = 1`) или курс известен вызывающему. Нет ни того, ни другого - `ConfigError`.
 
-Примеры (счёт USD, equity 100 000, риск 1% = 1 000 USD):
-  * EURUSD, контракт 100 000, тик 0.00001 = 1 USD/лот; SL 20 пипсов (0.0020): 200 USD на лот -> 5.00 лота.
-  * XAUUSD, контракт 100 унций, тик 0.01 = 1 USD/лот; SL 10 USD (10.00): 1 000 USD на лот -> 1.00 лот.
+Примеры (счёт USD, фиксированный риск 5 USD):
+  * EURUSD, контракт 100 000, тик 0.00001 = 1 USD/лот; SL 20 пипсов (0.0020): 200 USD на лот -> 0.02 лота.
+  * XAUUSD, контракт 100 унций, тик 0.01 = 1 USD/лот; SL 10 USD (10.00): 1 000 USD на лот -> 0.005 лота, вниз до volumeStep (при шаге 0.01 - ниже минимума, `below_min_size`).
 
 Правила (все жёсткие, отказ - значение `Mt5Rejected`, не исключение; неверные входные данные - `ConfigError`, R1):
   * лот округляется ТОЛЬКО ВНИЗ до `volumeStep` (риск не больше целевого); в большую сторону не округляем никогда;
@@ -33,7 +33,7 @@ from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
 from exchange.symbol_mapper import Mt5SymbolSpec
-from features.defaults import RISK_PER_TRADE
+from features.defaults import RISK_USDT
 from utils.errors import ConfigError
 
 log = logging.getLogger(__name__)
@@ -43,12 +43,12 @@ _EPS = Decimal("1e-9")
 
 @dataclass(frozen=True)
 class Mt5RiskParams:
-    risk_pct: float = RISK_PER_TRADE  # доля Equity на сделку (D10: 1%)
+    risk_usdt: float = RISK_USDT  # фиксированный риск на сделку в валюте счёта (2026-10-19: 5 USD), не доля Equity
     max_margin_use: float = 1.0  # какую долю свободной маржи разрешено занять новой позицией (1.0 = вся; ниже - запас)
 
     def __post_init__(self) -> None:
-        if not 0 < self.risk_pct <= 0.1:
-            raise ConfigError(f"risk_pct {self.risk_pct}: допустимо (0, 0.1]")
+        if not self.risk_usdt > 0:
+            raise ConfigError(f"risk_usdt {self.risk_usdt}: должен быть > 0")
         if not 0 < self.max_margin_use <= 1:
             raise ConfigError(f"max_margin_use {self.max_margin_use}: допустимо (0, 1]")
 
@@ -66,7 +66,7 @@ class Mt5OrderPlan:
     tp: float | None
     sl_distance: float
     loss_per_lot: float  # валюта счёта
-    risk_target: float  # equity * risk_pct
+    risk_target: float  # фиксированный риск (risk_usdt)
     risk_amount: float  # фактический риск = lots * loss_per_lot (<= risk_target)
     margin_required: float
     equity: float
@@ -119,7 +119,7 @@ def size_position(spec: Mt5SymbolSpec, *, side: str, entry: float, sl: float, tp
                   free_margin: float | None, tick_value: float | None = None, quote_to_account: float | None = None,
                   margin_per_lot: float | None = None, leverage: float | None = None, quote_to_margin: float = 1.0,
                   params: Mt5RiskParams = Mt5RiskParams()) -> Mt5OrderPlan | Mt5Rejected:
-    """Лоты под риск `params.risk_pct` от Equity для входа `entry` со стопом `sl` (см. правила в докстринге модуля).
+    """Лоты под фиксированный риск `params.risk_usdt` для входа `entry` со стопом `sl` (см. правила в докстринге модуля).
 
     Маржа: `margin_per_lot` (лучше - из `calculate_margin` на 1 лот) или `leverage` (грубая оценка); нужно что-то одно - иначе `ConfigError`."""
     if side not in ("BUY", "SELL"):
@@ -139,7 +139,7 @@ def size_position(spec: Mt5SymbolSpec, *, side: str, entry: float, sl: float, tp
         return Mt5Rejected("stop_too_close", {"distance": distance, "min_distance": spec.min_stop_distance, "stops_level_points": spec.stops_level})
 
     per_lot = loss_per_lot(spec, distance, tick_value=tick_value, quote_to_account=quote_to_account)
-    risk_target = equity * params.risk_pct
+    risk_target = params.risk_usdt
     raw_lots = risk_target / per_lot
     lots = floor_to_step(spec, raw_lots)
     if lots < spec.min_volume - 1e-12:

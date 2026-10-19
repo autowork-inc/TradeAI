@@ -16,7 +16,8 @@ from orchestrator.core import Orchestrator, Route
 from orchestrator.journal import MemoryEventLog
 from orchestrator.microstructure import DepthFeed, MicroStructure
 from orchestrator.multi_strategies import (
-    HORIZONTAL_BREAKOUT, ICT_KILLZONES, OBI_BREAKOUT, SMC_COUNTER_TREND, TRENDLINE_BREAKOUT, VWAP_REVERSION, StrategyCounterTrend,
+    HORIZONTAL_BREAKOUT, HORIZONTAL_BREAKOUT_CHR, ICT_KILLZONES, OBI_BREAKOUT, SMC_COUNTER_TREND, TRENDLINE_BREAKOUT, TRENDLINE_BREAKOUT_CHR,
+    VWAP_REVERSION, StrategyCounterTrend, StrategyHorizontalBreakoutChr, StrategyTrendlineBreakoutChr,
     StrategyHorizontalBreakout, StrategyKillzones, StrategyObiBreakout, StrategyTrendlineBreakout, StrategyVwapReversion,
 )
 from orchestrator.registry import LEVEL_BREAKOUT_PLAN, SCALP_1R_PLAN, SMC_PRO_PLAN, SHADOW_STRATEGIES, VWAP_PLAN, build_strategies, plans_for
@@ -24,6 +25,8 @@ from orchestrator.strategies import SMC_PRO_TREND, StrategySMC
 from orchestrator.tracker import CLOSED, DEFAULT_PLAN, OPEN, PENDING_LIMIT, TrackerError, VirtualTracker
 from orchestrator.types import BarInfo, Direction, FeatureContext, Kind, Mode, Tick, position_key
 from persistence.recorder import MemoryRecorder, RecordingEventLog
+from strategies.chr_horizontal import ChrHorizontalParams
+from strategies.chr_trendline import ChrTrendlineParams
 from strategies.counter_trend import CounterTrendParams
 from strategies.horizontal_breakout import HorizontalParams
 from strategies.obi_breakout import ObiParams
@@ -36,7 +39,7 @@ from tests.orchestrator.helpers import IV, SYM, Scripted, ctx, mk, tick
 from tests.orchestrator.test_feeds import settle
 from utils.errors import ConfigError, DataError
 
-A, B, C, D, E, F, G = SHADOW_STRATEGIES
+A, B, C, D, E, F, G, H, I = SHADOW_STRATEGIES  # H, I - стратегии CHR (2026-10-19)
 
 
 def make(**kw) -> tuple[VirtualTracker, MemoryRecorder]:
@@ -70,14 +73,13 @@ def test_opposite_positions_of_two_strategies_on_one_coin_do_not_collide():
 
     tr.on_tick(tick(99.5, 30))  # цена вниз: исполнилась лонг-лимитка
     assert tl.status == OPEN and tl.fill_price == 100.0 and ts.status == CLOSED and ts.exit_reason == "sl"  # закрытая сделка не «оживает»
-    tr.on_tick(tick(106.0, 40))  # +1R лонга: у VWAP_REVERSION план 50% на +1R, остаток дальше
-    assert tl.status == OPEN and tl.remaining == pytest.approx(0.5) and len(tl.legs) == 1 and len(ts.legs) == 1  # у шорта своё единственное закрытие
+    tr.on_tick(tick(106.0, 40))  # +1R лонга: частичных закрытий нет, позиция жива целиком
+    assert tl.status == OPEN and tl.remaining == 1.0 and not tl.legs and len(ts.legs) == 1  # у шорта своё единственное закрытие
 
     rows = {r["id"]: r for r in rec.trades.values()}
     assert {r["strategy_id"] for r in rows.values()} == {A, VWAP_REVERSION} and all(r["strategy_name"] == r["strategy_id"] for r in rows.values())
-    assert {c["trade_id"] for c in rec.closes} == {ts.trade_id, tl.trade_id}
+    assert {c["trade_id"] for c in rec.closes} == {ts.trade_id}  # у лонга закрытий ещё нет
     assert sorted(c["reason"] for c in rec.closes if c["trade_id"] == ts.trade_id) == ["sl"]
-    assert sorted(c["reason"] for c in rec.closes if c["trade_id"] == tl.trade_id) == ["scale_1r"]
 
 
 def test_second_position_under_the_same_key_is_a_protocol_error_but_a_free_key_is_reusable():
@@ -92,16 +94,17 @@ def test_second_position_under_the_same_key_is_a_protocol_error_but_a_free_key_i
     assert tr.submit(mk(A, direction=Direction.LONG, bar=3), 3000).accepted  # ключ освободился
 
 
-def test_each_strategy_gets_its_own_scale_out_plan_on_the_same_coin_and_move():
+def test_every_strategy_gets_the_same_single_take_profit_plan_on_the_same_coin():
     tr, _ = make()
-    tr.submit(mk(A, kind=Kind.MARKET, bar=1), 1000)  # DEFAULT_PLAN: 50% на +1R, 40% на +3R, 10% runner
-    tr.submit(mk(B, kind=Kind.MARKET, bar=1), 1000)  # SCALP_1R_PLAN: 100% на +1R
+    tr.submit(mk(A, kind=Kind.MARKET, bar=1), 1000)
+    tr.submit(mk(B, kind=Kind.MARKET, bar=1), 1000)
     tr.on_tick(tick(100.0, 10))  # MARKET исполнены по первому тику
     ta, tb = tr.trades
     assert ta.plan is SMC_PRO_PLAN and tb.plan is SCALP_1R_PLAN and tr.plan_for(E) is VWAP_PLAN and tr.plan_for("неизвестная") is DEFAULT_PLAN
-    tr.on_tick(tick(94.9, 20))  # +1R обеих (R = 5)
-    assert ta.status == OPEN and ta.remaining == pytest.approx(0.5)
-    assert tb.status == CLOSED and tb.exit_reason == "tp" and len(tb.legs) == 1 and tb.net_r == pytest.approx(tb.legs[0].net_r)
+    tr.on_tick(tick(94.9, 20))  # +1R: частичных закрытий нет ни у кого
+    assert ta.status == OPEN and tb.status == OPEN and ta.remaining == 1.0 and tb.remaining == 1.0
+    tr.on_tick(tick(79.9, 30))  # +4R (R = 5, вход 100): единственный тейк обеих
+    assert ta.status == CLOSED and tb.status == CLOSED and ta.exit_reason == tb.exit_reason == "tp" and len(tb.legs) == 1
 
 
 def test_gap_and_bar_close_touch_every_position_of_the_coin_independently():
@@ -139,10 +142,11 @@ def test_all_strategies_trade_the_same_coin_on_the_same_bar_without_blocking_eac
     sigs = {A: mk(A, direction=Direction.SHORT, bar=1), B: mk(B, direction=Direction.LONG, kind=Kind.MARKET, bar=1),
             C: mk(C, direction=Direction.LONG, kind=Kind.MARKET, bar=1), D: mk(D, direction=Direction.SHORT, kind=Kind.MARKET, bar=1),
             E: mk(E, direction=Direction.SHORT, kind=Kind.MARKET, bar=1), F: mk(F, direction=Direction.LONG, kind=Kind.MARKET, bar=1),
-            G: mk(G, direction=Direction.SHORT, kind=Kind.MARKET, bar=1)}
+            G: mk(G, direction=Direction.SHORT, kind=Kind.MARKET, bar=1), H: mk(H, direction=Direction.LONG, kind=Kind.MARKET, bar=1),
+            I: mk(I, direction=Direction.SHORT, kind=Kind.MARKET, bar=1)}
     orch, tracker, rec = build([Scripted(n, {1: [s]}) for n, s in sigs.items()])
     events = [e for i in range(2) for e in orch.on_context(ctx(SYM, i))]
-    assert [e.kind for e in events] == ["signal_accepted"] * 7  # никто не получил skipped_due_to_lock: у каждой стратегии своя блокировка (О14)
+    assert [e.kind for e in events] == ["signal_accepted"] * len(SHADOW_STRATEGIES)  # никто не получил skipped_due_to_lock: у каждой стратегии своя блокировка (О14)
     assert {t.signal.strategy for t in tracker.active(SYM)} == set(SHADOW_STRATEGIES)
     assert sorted(orch.held().values()) == sorted((SYM, f"shadow:{n}") for n in SHADOW_STRATEGIES)
     assert {s["strategy_id"] for s in rec.snapshots} == set(SHADOW_STRATEGIES)  # снапшот каждой сделки несёт strategy_id
@@ -171,16 +175,15 @@ def test_one_strategy_closing_does_not_release_the_lock_of_another():
 # ================================================================================================= реестр
 
 
-def test_registry_builds_the_seven_strategies_with_unique_ids_and_individual_plans():
+def test_registry_builds_the_nine_strategies_with_unique_ids_and_individual_plans():
     names = [s.name for s in build_strategies()]
-    expected = [SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT]
-    assert names == expected == list(SHADOW_STRATEGIES) and len(set(names)) == 7
+    expected = [SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT,
+                HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR]
+    assert names == expected == list(SHADOW_STRATEGIES) and len(set(names)) == 9
     plans = plans_for(names)
-    assert plans[SMC_COUNTER_TREND] is SCALP_1R_PLAN and plans[VWAP_REVERSION] is VWAP_PLAN
-    assert plans[HORIZONTAL_BREAKOUT] is plans[TRENDLINE_BREAKOUT] is LEVEL_BREAKOUT_PLAN
-    assert LEVEL_BREAKOUT_PLAN.levels == ((1.0, 0.5), (2.0, 0.5)) and LEVEL_BREAKOUT_PLAN.be_after_first and LEVEL_BREAKOUT_PLAN.runner_frac == 0
-    assert plans[SMC_PRO_TREND] is SMC_PRO_PLAN and all(plans[n] is DEFAULT_PLAN for n in (OBI_BREAKOUT, ICT_KILLZONES))  # SMC: те же уровни, якорь - цены сигнала
-    assert SCALP_1R_PLAN.levels == ((1.0, 1.0),) and SCALP_1R_PLAN.runner_frac == 0 and VWAP_PLAN.runner_frac == 0
+    assert all(plans[n] is DEFAULT_PLAN for n in names)  # у ВСЕХ стратегий один план: единственный тейк 1:4 на весь объём
+    assert DEFAULT_PLAN.levels == ((4.0, 1.0),) and SMC_PRO_PLAN is DEFAULT_PLAN and DEFAULT_PLAN.tp_anchor == "fill"
+    assert SCALP_1R_PLAN is VWAP_PLAN is LEVEL_BREAKOUT_PLAN is DEFAULT_PLAN  # старые имена планов - псевдонимы
     assert build_strategies()[0].params.htf_filter is True  # Pro_Trend - только по тренду H4
 
 
@@ -207,6 +210,8 @@ SOFT = {
                                                                              min_body_atr=0.1, max_risk_atr=6.0)),
     TRENDLINE_BREAKOUT: lambda: StrategyTrendlineBreakout(TrendlineParams(volume_mult=0.5, sweep_volume_mult=0.5, min_clv=0.3, min_body_atr=0.1,
                                                                           max_risk_atr=6.0)),
+    HORIZONTAL_BREAKOUT_CHR: lambda: StrategyHorizontalBreakoutChr(ChrHorizontalParams(squeeze_points=2)),
+    TRENDLINE_BREAKOUT_CHR: lambda: StrategyTrendlineBreakoutChr(ChrTrendlineParams(squeeze_points=2)),
 }
 
 
@@ -355,7 +360,8 @@ def test_depth_feed_over_a_local_websocket_reconnects_and_reports_the_gap():
 
 def test_micro_structure_is_not_needed_for_other_strategies():
     from orchestrator.registry import NEEDS_HTF, NEEDS_MICRO
-    assert NEEDS_MICRO == (OBI_BREAKOUT,) and set(NEEDS_HTF) == {SMC_PRO_TREND, SMC_COUNTER_TREND, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT}
+    assert NEEDS_MICRO == (OBI_BREAKOUT,) and set(NEEDS_HTF) == {SMC_PRO_TREND, SMC_COUNTER_TREND, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT,
+                                                                  HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR}
     assert config.DEPTH_LEVELS == 10 and config.DEPTH_UPDATE_SPEED == "500ms"  # DepthFeed подписывается ровно на depth10@500ms
 
 

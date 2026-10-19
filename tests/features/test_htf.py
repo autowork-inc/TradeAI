@@ -42,8 +42,8 @@ def test_labels_cover_all_biases():
 def test_side_allowed_truth_table():
     df = pl.DataFrame({BIAS_COLUMN: [1, 0, -1, None]}, schema={BIAS_COLUMN: pl.Int8})
     out = df.select(short=side_allowed("short"), long=side_allowed("long"))
-    assert out["short"].to_list() == [False, True, True, False]  # шорт не при Bullish; нет bias - запрет
-    assert out["long"].to_list() == [True, True, False, False]
+    assert out["short"].to_list() == [False, False, True, False]  # шорт только при Bearish; Neutral и нет bias - запрет
+    assert out["long"].to_list() == [True, False, False, False]
     with pytest.raises(DataError):
         df.select(side_allowed("flat"))
 

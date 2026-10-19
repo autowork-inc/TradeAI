@@ -176,7 +176,7 @@ LIVE_ALLOW_MAINNET = _env_bool("LIVE_ALLOW_MAINNET")  # без него live н�
 APPROVED_STRATEGIES = tuple(s.strip() for s in os.environ.get("APPROVED_STRATEGIES", "SMC_Pro_Trend").split(",") if s.strip())
 # Стратегии БЕЗ доступа к live (2026-10-18, решение пользователя): работают только в Shadow-трекере. Попадание в APPROVED_STRATEGIES -
 # ConfigError при старте (validate) и в LiveRiskManager; LiveMirrorSink их не пересылает. = orchestrator.registry.SHADOW_ONLY_STRATEGIES.
-SHADOW_ONLY_STRATEGIES = ("Horizontal_Breakout", "Trendline_Breakout")
+SHADOW_ONLY_STRATEGIES = ("Horizontal_Breakout", "Trendline_Breakout", "Horizontal_Breakout_CHR", "Trendline_Breakout_CHR")
 LIVE_MARGIN_USDT = _env_float("LIVE_MARGIN_USDT", 10.0)  # фиксированная маржа на сделку (изолированная)
 LIVE_LEVERAGE = int(_env_float("LIVE_LEVERAGE", 10.0))  # плечо: размер позиции = маржа * плечо
 LIVE_MAX_OPEN_POSITIONS = int(_env_float("LIVE_MAX_OPEN_POSITIONS", 4.0))  # одновременно открытых боевых позиций (и заявок) по всем площадкам; сверх лимита сигнал остаётся только виртуальным (Shadow)

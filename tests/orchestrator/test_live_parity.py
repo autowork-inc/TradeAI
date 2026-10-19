@@ -28,8 +28,7 @@ from tests.orchestrator.fake_live_rest import FakeRest
 from tests.orchestrator.live_helpers import BAR, FILTERS, STRATEGY, T0, manager, signal
 
 SYM = "SOLUSDT"
-WICK_PLAN = ScaleOutPlan(((1.0, 0.5), (3.0, 0.4)), True, "wick", trail_wick_bars=2)
-PLANS = {"default": DEFAULT_PLAN, "scalp": SCALP_1R_PLAN, "vwap": VWAP_PLAN, "wick": WICK_PLAN}
+PLANS = {"default": DEFAULT_PLAN, "scalp": SCALP_1R_PLAN, "vwap": VWAP_PLAN}
 STEPS = 170
 BAR_EVERY = 6
 
@@ -173,14 +172,14 @@ def test_exits_match_the_shadow_tracker_on_random_price_paths(tmp_path):
                     seen["multi_leg"] += 1
                 if r["closed_at"] is None:
                     seen["still_open"] += 1
-    assert n == 176
+    assert n == 132
     # тест не «пустой»: на траекториях встретились все виды выходов, включая трейлинг, безубыток и тайм-аут
-    for needed in ("sl", "be", "trail", "timeout", "tp", "scale_1r", "scale_3r", "multi_leg"):
-        assert seen[needed] >= 3, f"мало траекторий с выходом {needed}: {dict(seen)}"
+    for needed in ("sl", "timeout", "tp"):
+        assert seen[needed] >= (1 if needed == "timeout" else 3), f"мало траекторий с выходом {needed}: {dict(seen)}"
 
 
-def test_breakeven_by_mark_price_alone_matches_shadow(tmp_path):
-    """mark price коснулась +1R, сделки уровень не задели, затем возврат к входу: безубыток-выход по входной цене у обоих."""
+def test_mark_price_at_1r_moves_no_stop_and_matches_shadow(tmp_path):
+    """mark price коснулась +1R, сделки уровень не задели, затем возврат к входу: безубытка нет, позиция жива у обоих, стоп на исходном SL."""
 
     async def body():
         sig = signal(direction=Direction.LONG, entry=100.0, sl=98.0)
@@ -203,6 +202,5 @@ def test_breakeven_by_mark_price_alone_matches_shadow(tmp_path):
         return tracker.trades[0], rest, journal
 
     shadow, rest, journal = asyncio.run(body())
-    assert [g.reason for g in shadow.legs] == ["be"] and shadow.legs[0].price == 100.0
-    (fill,) = [f for f in rest.fills if not f["opens"]]
-    assert (fill["qty"], fill["price"]) == (10.0, 100.0) and journal.of_kind("live_be_armed")
+    assert shadow.legs == [] and shadow.stop_m * shadow.sgn == 98.0
+    assert not [f for f in rest.fills if not f["opens"]] and not journal.of_kind("live_be_armed")

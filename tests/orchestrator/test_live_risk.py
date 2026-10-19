@@ -18,18 +18,34 @@ def ready(tmp_path, **kw) -> LiveRiskManager:
     return m
 
 
-def test_fixed_notional_is_margin_times_leverage_and_qty_is_rounded_down(tmp_path):
-    m = ready(tmp_path)
-    plan = m.evaluate(signal(entry=100.0, sl=98.0), NOW)
+def test_fixed_risk_sets_the_volume_and_qty_is_rounded_down(tmp_path):
+    m = ready(tmp_path, risk_usdt=5.0)
+    plan = m.evaluate(signal(entry=100.0, sl=98.0), NOW)  # 5 / 2 = 2.5
     assert isinstance(plan, LiveOrderPlan)
-    assert (plan.qty, plan.leverage, plan.side, plan.close_side) == (1.0, 10, "BUY", "SELL")
-    assert (plan.notional_usdt, plan.margin_usdt, plan.max_loss_usdt) == (100.0, 10.0, 2.0)
+    assert (plan.qty, plan.leverage, plan.side, plan.close_side) == (2.5, 10, "BUY", "SELL")
+    assert (plan.notional_usdt, plan.margin_usdt, plan.max_loss_usdt) == (250.0, 25.0, 5.0)
     m.release("SOLUSDT", plan.signal_id)
-    odd = m.evaluate(signal(entry=33.33, sl=32.5, n=2), NOW)  # 100 / 33.33 = 3.0003 -> 3.0; 99.99 USDT, а не больше 100
-    assert odd.qty == 3.0 and odd.notional_usdt <= 100.0 and odd.margin_usdt <= 10.0
+    odd = m.evaluate(signal(entry=33.33, sl=32.5, n=2), NOW)  # 5 / 0.83 = 6.024 -> 6.0: убыток 4.98, а не больше 5
+    assert odd.qty == 6.0 and odd.max_loss_usdt <= 5.0
     m.release("SOLUSDT", odd.signal_id)
-    up = m.evaluate(signal(entry=28.0, sl=27.0, n=3), NOW)  # 100 / 28 = 3.571: вниз до 3.5 (а не к ближайшему 3.6 = 100.8 USDT)
-    assert up.qty == 3.5 and up.notional_usdt == 98.0
+    up = m.evaluate(signal(entry=28.0, sl=27.0, n=3), NOW)  # 5 / 1 = 5.0
+    assert up.qty == 5.0 and up.max_loss_usdt == 5.0
+
+
+def test_loss_at_the_stop_is_five_usdt_for_any_stop_distance(tmp_path):
+    for i, sl in enumerate((99.0, 98.0, 95.0, 93.0)):  # 1%..7% (в пределах буфера ликвидации)
+        m = ready(tmp_path / str(i), risk_usdt=5.0)
+        plan = m.evaluate(signal(entry=100.0, sl=sl), NOW)
+        assert isinstance(plan, LiveOrderPlan)
+        assert plan.max_loss_usdt <= 5.0 + 1e-9 and plan.max_loss_usdt > 5.0 - 0.1 * abs(100.0 - sl)  # потеря в пределах одного шага лота от 5 USDT
+
+
+def test_insufficient_margin_rejects_with_a_clear_reason_and_reserves_nothing(tmp_path):
+    m = ready(tmp_path, risk_usdt=5.0)  # позиция 250 USDT при плече 10 = маржа 25 USDT
+    r = m.evaluate(signal(entry=100.0, sl=98.0), NOW, available_usdt=24.9)
+    assert isinstance(r, LiveRejected) and r.reason == "insufficient_margin" and m.busy() == {}
+    assert r.detail["margin_required"] == pytest.approx(25.0) and r.detail["available"] == 24.9 and r.detail["risk_usdt"] == 5.0
+    assert isinstance(m.evaluate(signal(entry=100.0, sl=98.0), NOW, available_usdt=25.0), LiveOrderPlan)
 
 
 def test_short_side_and_limit_prices_are_put_on_the_tick_grid(tmp_path):
@@ -137,22 +153,17 @@ def test_utc_day_start():
     assert utc_day_start_ms(T0) % DAY_MS == 0 and T0 - utc_day_start_ms(T0) == 10 * 3_600_000
 
 
-def test_scale_out_plan_must_be_representable_on_the_lot_grid_instead_of_silently_changing_the_math(tmp_path):
+def test_single_level_plan_is_always_representable_on_the_lot_grid_and_the_tail_goes_to_it():
     from execution.exchange_filters import SymbolFilters
     from orchestrator.live_risk import split_levels
     from orchestrator.tracker import DEFAULT_PLAN
 
     f = SymbolFilters("X", 0.01, 0.1, 0.1, 5.0)
-    assert split_levels(DEFAULT_PLAN, 1.0, f) == (((1.0, 0.5), (3.0, 0.4)), pytest.approx(0.1))  # 50% / 40% / runner 10%
-    assert split_levels(DEFAULT_PLAN, 10.0, f) == (((1.0, 5.0), (3.0, 4.0)), pytest.approx(1.0))
-    assert split_levels(DEFAULT_PLAN, 0.5, f) is None  # 0.2 / 0.2 / 0.1 = 40% / 40% / 20%: не 50 / 40 / 10
+    assert split_levels(DEFAULT_PLAN, 1.0, f) == ((4.0, 1.0),)
+    assert split_levels(DEFAULT_PLAN, 0.3, f) == ((4.0, 0.3),)  # весь объём - на один тейк
+    assert split_levels(DEFAULT_PLAN, 0.05, f) is None  # меньше minQty - плана нет
     big = SymbolFilters("Y", 0.0001, 1.0, 1.0, 5.0)
-    levels, runner = split_levels(DEFAULT_PLAN, 8123.0, big)  # остаток округления уходит в runner
-    assert [q for _, q in levels] == [4061.0, 3249.0] and runner == 813.0 and sum(q for _, q in levels) + runner == 8123.0
-    m = ready(tmp_path, margin=5.0)  # нотионал 50 USDT -> объём 0.5: план не делится
-    r = m.evaluate(signal(), NOW)
-    assert r.reason == "plan_not_representable" and m.busy() == {}
-    assert r.detail["runner_frac"] == pytest.approx(0.1)
+    assert split_levels(DEFAULT_PLAN, 8123.0, big) == ((4.0, 8123.0),)
 
 
 def test_exit_plan_comes_from_the_strategy_registry_like_in_shadow(tmp_path):

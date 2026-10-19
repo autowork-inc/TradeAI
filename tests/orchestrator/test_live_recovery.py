@@ -1,4 +1,4 @@
-"""Сопровождение позиции в живом движке (безубыток, порядок замены стопа) и ПЕРЕЗАПУСК: файл состояния + сверка с биржей.
+"""Сопровождение позиции в живом движке (порядок замены стопа, трейлинг) и ПЕРЕЗАПУСК: файл состояния + сверка с биржей.
 
 Принцип проверок: «процесс упал» = создан новый движок (`Env.reborn()`) над ТОЙ ЖЕ биржей и ТЕМ ЖЕ файлом состояния; позиция, уровни
 и стопы должны быть подхвачены и сопровождаться дальше без повторных ордеров и без падения.
@@ -19,66 +19,64 @@ from utils.errors import DataError
 
 def open_long(tmp_path, **kw) -> Env:
     env = Env(tmp_path, **kw)
-    run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))  # 1.0 SOL: SL 98, уровни 102 (0.5) и 106 (0.4), runner 0.1
+    run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))  # 1.0 SOL: SL 98, единственный тейк 108 (1:4) на весь объём
     return env
 
 
 # ------------------------------------------------------------------------------------ сопровождение
 
 
-def test_first_level_halves_the_position_and_moves_the_stop_to_breakeven_new_stop_first(tmp_path):
+def test_take_profit_at_4r_closes_the_whole_position_and_cleans_up_the_stop(tmp_path):
+    env = open_long(tmp_path)
+    for price in (102.0, 104.0, 106.0):  # +1R..+3R: ничего не происходит, стоп и тейк на месте
+        env.rest.set_price(price)
+        run(env.engine.poll())
+        assert env.rest.positions[SYM] == 1.0 and not env.journal.of_kind("live_partial_close")
+    env.rest.set_price(108.0)  # +4R: единственный тейк
+    run(env.engine.poll())
+    assert SYM not in env.engine.trades and env.rest.positions[SYM] == 0.0
+    assert env.event("live_closed").detail["reason"] == "tp"
+    assert all(a["algoStatus"] != "NEW" for a in env.rest.algos.values())  # стоп снят вместе с закрытием
+
+
+def test_manual_partial_close_resizes_the_stop_at_the_same_price_new_stop_first(tmp_path):
     env = open_long(tmp_path)
     old_stop = env.trade().stop_cid
     n = len(env.rest.requests)
-    env.rest.set_price(102.0)  # сработал TP-уровень +1R
+    env.rest.positions[SYM] = 0.5  # половину закрыли руками на бирже
     run(env.engine.poll())
     t = env.trade()
-    assert env.rest.positions[SYM] == 0.5 and t.levels_done == 1 and t.be_armed and (t.stop_price, t.stop_kind, t.stop_qty) == (100.0, "be", 0.5)
+    assert (t.stop_price, t.stop_kind, t.stop_qty) == (98.0, "sl", 0.5) and not t.be_armed
     tail = env.rest.names()[n:]
     assert tail.index("POST algo:STOP_MARKET") < tail.index("DELETE algo")  # окна без стопа нет: новый стоп раньше снятия старого
     assert env.rest.algos[old_stop]["algoStatus"] == "CANCELED"
-    new = env.rest.algos[t.stop_cid]
-    assert (new["triggerPrice"], new["quantity"], new["algoStatus"]) == ("100", "0.5", "NEW")
-    assert [e.detail["reason"] for e in env.journal.of_kind("live_partial_close")] == ["scale_1r"]
-    assert env.event("live_be_armed").detail["stop"] == 100.0
+    assert env.rest.algos[t.stop_cid]["quantity"] == "0.5" and env.rest.algos[t.stop_cid]["triggerPrice"] == "98"
 
 
-def test_stop_is_resized_after_the_second_level_and_runner_keeps_only_the_stop(tmp_path):
+def test_mark_price_at_1r_does_not_touch_the_stop(tmp_path):
     env = open_long(tmp_path)
-    env.rest.set_price(102.0)
-    run(env.engine.poll())
-    env.rest.set_price(106.0)
-    run(env.engine.poll())
-    t = env.trade()
-    assert env.rest.positions[SYM] == pytest.approx(0.1) and t.levels_done == 2 and t.runner_active
-    assert (t.stop_price, t.stop_qty) == (100.0, pytest.approx(0.1))  # стоп уменьшен до остатка runner'а
-    assert [a["algoStatus"] for a in env.rest.algos.values() if a["algoStatus"] == "NEW"] == ["NEW"]  # на бирже жив один стоп
-    assert [e.detail["reason"] for e in env.journal.of_kind("live_partial_close")] == ["scale_1r", "scale_3r"]
-
-
-def test_mark_price_breakeven_before_any_level(tmp_path):
-    env = open_long(tmp_path)
+    n = len(env.rest.requests)
     env.rest.set_price(101.5)
     env.engine.on_tick(Tick(SYM, 102.0, NOW, "mark"))  # mark коснулась +1R, цена сделок - ещё нет
-    assert env.trade().be_pending and env.trade().stop_price == 98.0
     run(env.engine.poll())
-    assert env.trade().be_armed and env.trade().stop_price == 100.0 and env.trade().levels_done == 0
+    t = env.trade()
+    assert not t.be_armed and t.stop_price == 98.0 and t.stop_kind == "sl" and t.levels_done == 0
+    assert "POST algo:STOP_MARKET" not in env.rest.names()[n:]  # стоп на бирже не перевыставлялся
 
 
-def test_breakeven_whose_stop_is_already_behind_the_price_exits_at_market_without_safe_mode(tmp_path):
+def test_returning_to_entry_after_1r_does_not_close_the_position(tmp_path):
     env = open_long(tmp_path)
     env.engine.on_tick(Tick(SYM, 102.0, NOW, "mark"))
-    env.rest.set_price(99.5)  # до опроса цена вернулась ниже входа: стоп на входе уже «за ценой» (-2021)
+    env.rest.set_price(99.5)  # цена вернулась ниже входа: безубытка нет, стоп 98 на месте
     run(env.engine.poll())
-    assert SYM not in env.engine.trades and env.rest.positions[SYM] == 0.0 and not env.safe.active
-    assert env.event("live_closed").detail["reason"] == "be"
-    assert env.rest.fills[-1]["via"] == "market" and all(a["algoStatus"] != "NEW" for a in env.rest.algos.values())
+    assert SYM in env.engine.trades and env.rest.positions[SYM] == 1.0 and not env.safe.active
+    assert env.trade().stop_price == 98.0
 
 
 def test_stop_replace_failure_is_an_emergency(tmp_path):
     env = open_long(tmp_path)
     env.rest.fail[("POST", config.ALGO_ORDER_PATH)] = [api_error(-4130, "boom")]
-    env.rest.set_price(102.0)
+    env.rest.positions[SYM] = 0.5  # часть позиции закрыта руками: стоп надо уменьшить, а биржа отказывает
     with pytest.raises(LiveExecutionError):
         run(env.engine.poll())
     assert env.safe.active and env.rest.positions[SYM] == 0.0
@@ -105,7 +103,7 @@ def test_state_is_written_before_the_entry_order_and_before_the_protective_order
     run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))
     assert seen["entry"] == (ENTRY, True, True)  # намерение и id входа на диске ДО ордера
     status, stop_cid, level_cids = seen["algo"]
-    assert status == OPEN and stop_cid and len(level_cids) == 2  # id защитных ордеров на диске ДО их выставления
+    assert status == OPEN and stop_cid and len(level_cids) == 1  # id защитных ордеров на диске ДО их выставления
 
 
 def test_record_roundtrip_keeps_every_field(tmp_path):
@@ -133,37 +131,33 @@ def test_corrupt_or_foreign_state_file_stops_the_start(tmp_path):
 # -------------------------------------------------------------------------------------- перезапуск
 
 
-def test_restart_in_the_middle_of_scale_out_continues_without_new_orders(tmp_path):
+def test_restart_with_an_open_position_continues_without_new_orders(tmp_path):
     env = open_long(tmp_path)
-    env.rest.set_price(102.0)
-    run(env.engine.poll())  # первый уровень исполнен, стоп на входе
+    env.rest.set_price(104.0)
+    run(env.engine.poll())  # +2R: ничего не происходит
     before = (len(env.rest.orders), len(env.rest.algos), dict(env.rest.positions))
     engine = env.reborn()
     run(engine.recover([SYM]))
     t = engine.trades[SYM]
-    assert (t.status, t.levels_done, t.be_armed, t.stop_price, t.remaining) == (OPEN, 1, True, 100.0, 0.5)
+    assert (t.status, t.levels_done, t.be_armed, t.stop_price, t.remaining) == (OPEN, 0, False, 98.0, 1.0)
     assert env.risk.busy() == {SYM: t.trade_id}  # монета занята восстановленной сделкой
     assert (len(env.rest.orders), len(env.rest.algos), dict(env.rest.positions)) == before  # ни одного нового ордера
-    assert env.event("live_recovered").detail["levels_done"] == 1
-    env.rest.set_price(106.0)  # продолжение: второй уровень и runner
+    assert env.event("live_recovered").detail["levels_done"] == 0
+    env.rest.set_price(108.0)  # продолжение: единственный тейк закрывает всё
     run(engine.poll())
-    assert engine.trades[SYM].levels_done == 2 and env.rest.positions[SYM] == pytest.approx(0.1)
-    env.rest.set_price(99.0)  # runner выбит безубытком
-    run(engine.poll())
-    assert SYM not in engine.trades and env.risk.busy() == {}
-    assert [e.detail["reason"] for e in env.journal.of_kind("live_closed")] == ["be"]
+    assert SYM not in engine.trades and env.risk.busy() == {} and env.rest.positions[SYM] == 0.0
+    assert [e.detail["reason"] for e in env.journal.of_kind("live_closed")] == ["tp"]
 
 
-def test_level_that_fired_while_the_bot_was_down_is_accounted_and_breakeven_applied(tmp_path):
+def test_take_profit_that_fired_while_the_bot_was_down_closes_the_trade_as_tp(tmp_path):
     env = open_long(tmp_path)
-    env.rest.set_price(102.0)  # уровень сработал, пока процесса не было (poll не вызывался)
-    assert env.trade().levels_done == 0 and env.rest.positions[SYM] == 0.5
+    env.rest.set_price(108.0)  # тейк сработал, пока процесса не было (poll не вызывался)
+    assert env.rest.positions[SYM] == 0.0
     engine = env.reborn()
     run(engine.recover([SYM]))
-    t = engine.trades[SYM]
-    assert t.levels_done == 1 and t.be_armed and t.stop_price == 100.0 and t.stop_qty == 0.5
-    assert [e.detail["reason"] for e in env.journal.of_kind("live_partial_close")] == ["scale_1r"]
-    assert [a["algoStatus"] for a in env.rest.algos.values()].count("NEW") == 2  # живы: новый стоп и уровень +3R
+    assert SYM not in engine.trades and env.risk.busy() == {}
+    assert env.event("live_closed").detail["reason"] == "tp"
+    assert all(a["algoStatus"] != "NEW" for a in env.rest.algos.values())  # стоп снят
 
 
 def test_stop_that_fired_while_the_bot_was_down_closes_the_trade_and_cleans_up(tmp_path):
@@ -184,7 +178,7 @@ def test_protection_that_was_planned_but_never_placed_is_placed_after_restart(tm
     engine = env.reborn()
     run(engine.recover([SYM]))
     placed = sorted((a["orderType"], a["triggerPrice"], a["quantity"]) for a in env.rest.algos.values())
-    assert placed == [("STOP_MARKET", "98", "1"), ("TAKE_PROFIT_MARKET", "102", "0.5"), ("TAKE_PROFIT_MARKET", "106", "0.4")]
+    assert placed == [("STOP_MARKET", "98", "1"), ("TAKE_PROFIT_MARKET", "108", "1")]
     assert all(a["algoStatus"] == "NEW" for a in env.rest.algos.values())
 
 
@@ -197,7 +191,7 @@ def test_restart_with_a_pending_limit_keeps_waiting_and_then_protects(tmp_path):
     assert engine.trades[SYM].status == ENTRY and len(env.rest.orders) == 1 and env.rest.algos == {}
     env.rest.fill_limit(cid)
     run(engine.poll())
-    assert engine.trades[SYM].status == OPEN and len(env.rest.algos) == 3
+    assert engine.trades[SYM].status == OPEN and len(env.rest.algos) == 2
 
 
 def test_entry_that_the_exchange_does_not_know_after_restart_is_cancelled(tmp_path):
@@ -247,9 +241,9 @@ def test_position_with_exchange_stop_but_no_record_is_adopted_and_managed(tmp_pa
     assert env.risk.busy() == {SYM: t.trade_id} and env.event("live_adopted").detail["stop"] == 98.0
     n_algos = len(env.rest.algos)
     env.rest.set_price(102.0)
-    run(env.engine.poll())  # дальше - обычное сопровождение: уровень, безубыток
+    run(env.engine.poll())  # дальше - обычное сопровождение: уровень
     t = env.engine.trades[SYM]
-    assert t.levels_done == 1 and t.stop_price == 100.0 and env.rest.positions[SYM] == 0.5
+    assert t.levels_done == 1 and t.stop_price == 98.0 and env.rest.positions[SYM] == 0.5
     assert len(env.rest.algos) == n_algos + 1  # один новый стоп; чужие ордера не дублировались
 
 
@@ -279,27 +273,3 @@ def test_restart_without_anything_to_recover_is_a_noop(tmp_path):
     env = Env(tmp_path)
     run(env.engine.recover([SYM]))
     assert env.engine.trades == {} and env.rest.orders == {} and env.rest.algos == {}
-
-
-def test_stop_never_moves_away_from_profit_even_if_breakeven_or_an_old_trail_target_arrives_late(tmp_path):
-    from orchestrator.tracker import ScaleOutPlan
-    from orchestrator.types import BarInfo
-
-    plan = ScaleOutPlan(((1.0, 0.5), (3.0, 0.4)), be_after_first=False, trail_mode="atr")  # безубыток только по mark price
-    env = Env(tmp_path, risk_kw={"plans": {STRATEGY: plan}})
-    run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))
-    for price in (102.0, 106.0):  # оба уровня; mark price к бирже не обращалась - безубыток ещё не взведён
-        env.rest.set_price(price)
-        run(env.engine.poll())
-    t = env.trade()
-    assert t.runner_active and not t.be_armed and t.stop_price == 98.0
-    env.engine.on_tick(Tick(SYM, 110.0, NOW, "trade"))
-    env.engine.on_bar_closed(SYM, T0 + 900_000, 110.0, NOW, BarInfo(110.0, 109.0, 0.5))  # лучшая 110 - 3 * 0.5 = 108.5
-    env.rest.set_price(110.0)
-    run(env.engine.poll())
-    assert (t.stop_price, t.stop_kind) == (108.5, "trail")
-    env.engine.on_tick(Tick(SYM, 107.0, NOW, "mark"))  # mark >= +1R: запрос безубытка опоздал, стоп уже гораздо лучше
-    assert t.be_pending
-    t.trail_target = 99.0  # и устаревшая цель трейлинга хуже действующего стопа
-    run(env.engine.poll())
-    assert t.stop_price == 108.5 and t.stop_kind == "trail" and t.be_armed and not t.be_pending and t.trail_target is None

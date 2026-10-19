@@ -134,20 +134,18 @@ def test_max_hold_scales_with_the_signal_interval():
     assert t.exit_reason == "timeout"
 
 
-def test_runner_trailing_uses_only_bars_of_its_own_interval():
-    """Трейлинг runner'а (10%): ATR берётся из закрытых 5m-свечей сделки; 15m-свечи с другим ATR на стоп не влияют."""
+def test_static_stop_ignores_bars_of_any_interval_and_last_level_closes_the_rest():
+    """Стоп статичен: свечи (своего и чужого таймфрейма) его не двигают; последний уровень (+3R) закрывает остаток."""
     tr = VirtualTracker(MemoryEventLog(), equity=10_000.0)
     tr.submit(five_minute(mk()), 1000)
     t = tr.trades[-1]
     tr.on_tick(tick(100.5, 10))
-    tr.on_tick(tick(84.0, 20))  # +3.2R: уровни 1R и 3R закрыты, остаётся runner, лучшая цена 84
-    assert t.runner_active
-    tr.on_bar_closed(SYM, 1 * M15, 95.0, 30, BarInfo(95.5, 94.5, 50.0), interval="15m")  # чужой таймфрейм: не считается вовсе
-    assert t.stop_m == 100.0 and t.stop_kind == "be"
-    tr.on_bar_closed(SYM, 1 * M5, 90.0, 31, BarInfo(90.5, 89.5, 2.0), interval="5m")  # 5m: стоп = 84 + 3 * 2 = 90
-    assert t.stop_m == pytest.approx(90.0) and t.stop_kind == "trail"
-    tr.on_tick(tick(90.4, 40))  # откат до стопа: выход остатка по цене тика
-    assert t.exit_reason == "trail" and t.legs[-1].price == 90.4
+    tr.on_tick(tick(94.0, 20))  # +1R: частичных закрытий нет
+    tr.on_bar_closed(SYM, 1 * M15, 95.0, 30, BarInfo(95.5, 94.5, 50.0), interval="15m")
+    tr.on_bar_closed(SYM, 1 * M5, 90.0, 31, BarInfo(90.5, 89.5, 2.0), interval="5m")
+    assert t.stop_m == 105.0 and t.stop_kind == "sl"
+    tr.on_tick(tick(79.0, 40))  # +4R: единственный тейк
+    assert t.exit_reason == "tp" and [g.reason for g in t.legs] == ["tp"]
 
 
 def test_untagged_bars_keep_the_old_behaviour_for_existing_callers():

@@ -91,7 +91,7 @@ class StrategySMC:
             geometry("marker", ctx.bar_open_time, ctx.bar_open_time, ctx.last_close, ctx.last_close, "CHoCH"),
             geometry("line", close_ms, ttl_end, last[f"{side}_entry"], last[f"{side}_entry"], "вход (50% FVG)"),
             geometry("line", close_ms, ttl_end, last[f"{side}_sl"], last[f"{side}_sl"], "SL"),
-            geometry("line", close_ms, ttl_end, last[f"{side}_tp"], last[f"{side}_tp"], "TP 3R"),
+            geometry("line", close_ms, ttl_end, last[f"{side}_tp"], last[f"{side}_tp"], "TP 1:4"),
         )
         return Signal(
             signal_id=_signal_id(self.name, ctx, direction), strategy=self.name, symbol=ctx.symbol, interval=ctx.interval,

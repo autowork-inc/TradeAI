@@ -50,7 +50,7 @@ def test_accepted_signal_gets_a_snapshot_with_candles_and_geometry_after_the_tra
     assert snap["trade_id"] == "smc:BTCUSDT:15m:2:short" and snap["created_at"] == 3 * IV + 1000
     assert [c["open_time"] for c in snap["candles"]] == [0, IV, 2 * IV] and snap["candles"][1]["atr"] == 1.5 and snap["candles"][0]["atr"] is None
     assert set(snap["candles"][0]) == {"open_time", "open", "high", "low", "close", "volume", "atr"}
-    assert snap["meta"]["sl"] == 105.0 and snap["meta"]["tp"] == 85.0 and snap["geometry"] == []
+    assert snap["meta"]["sl"] == 105.0 and snap["meta"]["tp"] == 80.0 and snap["geometry"] == []
     to_args(snap, schema.SNAPSHOT_COLUMNS)
     assert rec.trades[snap["trade_id"]]["status"] == "pending_limit"  # строка сделки записана раньше снапшота (внешний ключ)
 

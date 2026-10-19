@@ -67,23 +67,6 @@ def test_position_closed_by_stop_while_down_is_closed_in_db_with_exchange_price_
     assert [e.detail["source"] for e in env.journal.of_kind("live_closed_offline")] == ["exchange"]
 
 
-def test_offline_close_after_a_recorded_partial_continues_the_close_sequence(tmp_path):
-    env, rec, sig = opened(tmp_path)
-    env.rest.now_ms = NOW + 1_000
-    env.rest.set_price(102.0)  # первый уровень (+1R, половина) - записан в БД при работающем боте
-    env.clock.t = NOW + 2_000
-    run(env.engine.poll())
-    rows = db_rows(rec, sig)
-    env.rest.now_ms = NOW + 5_000
-    env.rest.set_price(100.0)  # остаток выбит безубытком, пока бота не было
-    lose_state_and_restart(env, rows)
-    row = rec.trades[live_trade_id(sig.signal_id)]
-    assert [c["seq"] for c in rec.closes] == [1, 2] and rec.closes[1]["reason"] == "closed_offline"
-    assert rec.closes[1]["qty"] == pytest.approx(0.5) and rec.closes[1]["price"] == pytest.approx(100.0)
-    assert row["status"] == "closed" and row["exit_price"] == pytest.approx(101.0)  # (0.5 * 102 + 0.5 * 100) / 1
-    assert row["pnl"] == pytest.approx(sum(c["pnl"] for c in rec.closes)) and row["pnl"] > 0
-
-
 def test_open_position_is_picked_up_under_its_own_id_and_managed_further(tmp_path):
     env, rec, sig = opened(tmp_path)
     rows = db_rows(rec, sig)
@@ -99,15 +82,15 @@ def test_open_position_is_picked_up_under_its_own_id_and_managed_further(tmp_pat
     assert row["r_multiple"] == pytest.approx((-2.0 - TAKER * 100.0 - TAKER * 98.0) / 2.0)
 
 
-def test_open_position_after_a_level_keeps_the_original_volume_and_close_numbering(tmp_path):
+def test_open_position_after_a_partial_close_keeps_the_original_volume_and_close_numbering(tmp_path):
     env, rec, sig = opened(tmp_path)
-    env.rest.set_price(102.0)
+    env.rest.positions[SYM] = 0.5  # единственное частичное закрытие возможно только руками на бирже (бот закрывает одним тейком)
     run(env.engine.poll())
     rows = db_rows(rec, sig)
     engine = lose_state_and_restart(env, rows)
     t = engine.trades[SYM]
     assert t.filled_qty == pytest.approx(1.0) and t.remaining == pytest.approx(0.5) and t.legs_put == 1
-    env.rest.set_price(100.0)
+    env.rest.set_price(97.0)
     run(engine.poll())
     assert [c["seq"] for c in rec.closes] == [1, 2]
     assert sum(c["frac"] for c in rec.closes) == pytest.approx(1.0)

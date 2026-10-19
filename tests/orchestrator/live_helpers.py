@@ -29,5 +29,7 @@ def signal(*, strategy=STRATEGY, symbol="SOLUSDT", direction=Direction.LONG, kin
 
 
 def manager(tmp_path: Path, *, approved=(STRATEGY,), margin=10.0, leverage=10, limit=50.0, filters=FILTERS, **kw) -> LiveRiskManager:
+    # Стандартная фикстура: вход 100, SL 98 (стоп 2%). Риск подобран так, чтобы объём остался прежним (margin * leverage / 100): margin 10 -> 2 USDT -> 1.0 лот.
+    kw.setdefault("risk_usdt", margin * leverage * 0.02)
     return LiveRiskManager(filters, approved_strategies=approved, margin_usdt=margin, leverage=leverage, daily_loss_limit_usdt=limit,
                            state_path=tmp_path / "risk.json", **kw)

@@ -140,7 +140,7 @@ def test_ambiguous_bar_with_both_sides_gives_nothing():
     n = 60
     bar = {"open": 102.3, "high": 103.5, "low": 101.2, "close": 102.4}  # тени по 48% размаха
     df = scenario(n=n, bar=bar, htf_bias=0)
-    p = TrendlineParams(min_wick_frac=0.4)
+    p = TrendlineParams(min_wick_frac=0.4, htf_filter=False)  # трендовый фильтр разрешает лишь одну сторону - неоднозначность проверяем без него
     assert idx(run(df, p), "tl_short_signal") == [J]  # без поддержки - чистый свип сопротивления
     sup = {"sl1_price": 101.0, "sl1_time": 41 * STEP, "sl2_price": 100.0, "sl2_time": 21 * STEP}
     df = df.with_columns(*[pl.Series(k, [v if i >= 45 else df[k][i] for i in range(n)], dtype=df[k].dtype) for k, v in sup.items()])
@@ -151,7 +151,8 @@ def test_ambiguous_bar_with_both_sides_gives_nothing():
 
 
 def test_htf_contract_and_input_contract_r1():
-    assert idx(run(scenario(htf_bias=0)), "tl_long_signal") == [J]
+    assert idx(run(scenario(htf_bias=0)), "tl_long_signal") == []  # Neutral - запрет
+    assert idx(run(scenario(htf_bias=1)), "tl_long_signal") == [J]
     nulls = scenario().with_columns(pl.lit(None, dtype=pl.Int8).alias("htf_bias"))
     assert idx(run(nulls), "tl_long_signal") == []
     with pytest.raises(DataError, match="htf_bias"):

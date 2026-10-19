@@ -11,7 +11,7 @@ DEFAULT_COINS = ("BTCUSDT", "ETHUSDT", "EURUSD", "XAUUSD", "XAGUSD")  # = config
 
 
 DEFAULT_STRATEGIES = ("SMC_Pro_Trend", "SMC_Counter_Trend", "OBI_Breakout", "ICT_Killzones", "VWAP_Reversion",
-                      "Horizontal_Breakout", "Trendline_Breakout")  # = orchestrator.registry.SHADOW_STRATEGIES
+                      "Horizontal_Breakout", "Trendline_Breakout", "Horizontal_Breakout_CHR", "Trendline_Breakout_CHR")  # = orchestrator.registry.SHADOW_STRATEGIES
 
 
 class ApiConfigError(Exception):

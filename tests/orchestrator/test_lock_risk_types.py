@@ -44,22 +44,23 @@ def test_protocol_violations_are_errors_not_silence_r1():
 # ------------------------------------------------------------------------------------------- RiskSizer
 
 
-def test_sizing_one_percent_risk_and_exposure():
+def test_sizing_fixed_five_usdt_risk_and_exposure():
     s = RiskSizer().size(10_000, entry=100.0, sl=105.0)
     assert isinstance(s, Sizing)
-    assert s.risk_amount == pytest.approx(100.0) and s.qty == pytest.approx(20.0)  # 100 / R(5)
-    assert s.notional == pytest.approx(2000.0) and s.exposure == pytest.approx(0.2)
+    assert s.risk_amount == pytest.approx(5.0) and s.qty == pytest.approx(1.0)  # 5 / R(5)
+    assert s.notional == pytest.approx(100.0) and s.exposure == pytest.approx(0.01)
 
 
-def test_stop_03_percent_needs_about_3_3x_and_passes_cap_5_o12():
-    s = RiskSizer().size(10_000, entry=100.0, sl=100.3)
-    assert isinstance(s, Sizing) and s.exposure == pytest.approx(0.01 / 0.003)
+def test_loss_is_five_usdt_regardless_of_the_stop_percentage():
+    for sl in (100.3, 101.0, 105.0, 130.0):
+        s = RiskSizer().size(10_000, entry=100.0, sl=sl)
+        assert isinstance(s, Sizing) and s.qty * abs(sl - 100.0) == pytest.approx(5.0)
 
 
 def test_exposure_above_cap_is_rejected_not_shrunk_o8():
-    r = RiskSizer().size(10_000, entry=100.0, sl=100.1)  # плечо 10 > 5
+    r = RiskSizer().size(10_000, entry=100.0, sl=100.005)  # объём 1000, позиция 100 000 = плечо 10 > 5
     assert isinstance(r, SizingRejected) and r.reason == "exposure" and r.exposure == pytest.approx(10.0)
-    assert isinstance(RiskSizer(max_exposure=1.0).size(10_000, 100.0, 100.5), SizingRejected)  # старый потолок 1.0
+    assert isinstance(RiskSizer(max_exposure=1.0).size(10_000, 100.0, 100.04), SizingRejected)  # потолок 1.0: плечо 1.25
     assert isinstance(RiskSizer().size(10_000, 100.0, 100.0), SizingRejected)  # нулевой риск
 
 
@@ -67,8 +68,8 @@ def test_sizer_validates_input_and_config():
     with pytest.raises(DataError):
         RiskSizer().size(0, 100.0, 105.0)
     with pytest.raises(ConfigError):
-        RiskSizer(risk_per_trade=0)
-    assert RiskSizer().max_exposure == 5.0 and RiskSizer().risk_per_trade == 0.01
+        RiskSizer(risk_usdt=0)
+    assert RiskSizer().max_exposure == 5.0 and RiskSizer().risk_usdt == 5.0
 
 
 # ------------------------------------------------------------------------------------------ типы

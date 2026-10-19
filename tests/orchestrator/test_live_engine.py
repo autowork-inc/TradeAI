@@ -89,14 +89,13 @@ def test_market_long_entry_then_sl_and_scale_out_levels_in_the_right_order(tmp_p
     env = Env(tmp_path, price=100.5)
     run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))
     assert env.rest.names() == ["GET income", "GET balance", "GET mark", "POST margin", "POST leverage", "POST order:MARKET",
-                                "POST algo:STOP_MARKET", "POST algo:TAKE_PROFIT_MARKET", "POST algo:TAKE_PROFIT_MARKET"]
+                                "POST algo:STOP_MARKET", "POST algo:TAKE_PROFIT_MARKET"]
     (entry,) = env.posts()
     assert (entry["side"], entry["quantity"], entry["symbol"]) == ("BUY", "1", SYM) and "reduceOnly" not in entry
-    sl, l1, l2 = env.algos()
+    sl, tp = env.algos()
     assert (sl["side"], sl["triggerPrice"], sl["quantity"], sl["reduceOnly"]) == ("SELL", "98", "1", True)
-    # R от ФАКТИЧЕСКОЙ цены 100.5: R = 2.5; уровни плана SMC_Pro_Trend: 50% на +1R и 40% на +3R, остальные 10% - runner без тейка
-    assert [(a["triggerPrice"], a["quantity"], a["side"], a["reduceOnly"]) for a in (l1, l2)] == [("103", "0.5", "SELL", True),
-                                                                                                    ("108", "0.4", "SELL", True)]
+    # R от ФАКТИЧЕСКОЙ цены 100.5: R = 2.5; единственный тейк 1:4 на весь объём: 100.5 + 4 * 2.5 = 110.5
+    assert (tp["triggerPrice"], tp["quantity"], tp["side"], tp["reduceOnly"]) == ("110.5", "1", "SELL", True)
     assert env.rest.calls("POST", config.MARGIN_TYPE_PATH) == [{"symbol": SYM, "marginType": "ISOLATED"}]
     assert env.rest.calls("POST", config.LEVERAGE_PATH) == [{"symbol": SYM, "leverage": 10}]
     assert env.kinds() == ["live_intent", "live_entry_filled", "live_protected"] and env.trade().status == OPEN
@@ -110,15 +109,15 @@ def test_entry_price_falls_back_to_position_risk_when_the_exchange_sends_no_avg_
     run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))
     assert env.trade().fill_price == 100.5 and env.trade().status == OPEN
     assert env.event("live_entry_filled").detail["avg_price"] == 100.5
-    assert [a["triggerPrice"] for a in env.algos()] == ["98", "103", "108"]  # уровни - от фактической цены, как при avgPrice в ответе
+    assert [a["triggerPrice"] for a in env.algos()] == ["98", "110.5"]  # тейк - от фактической цены, как при avgPrice в ответе
 
 
 def test_market_short_is_mirrored(tmp_path):
     env = Env(tmp_path, price=100.0)
     run(env.engine.execute(signal(direction=Direction.SHORT, entry=100.0, sl=102.0), NOW))
     assert env.posts()[0]["side"] == "SELL" and env.rest.positions[SYM] == -1.0
-    sl, l1, l2 = env.algos()
-    assert (sl["side"], sl["triggerPrice"], l1["side"], l1["triggerPrice"], l2["triggerPrice"]) == ("BUY", "102", "BUY", "98", "94")
+    sl, tp = env.algos()
+    assert (sl["side"], sl["triggerPrice"], tp["side"], tp["triggerPrice"]) == ("BUY", "102", "BUY", "92")  # R = 2, тейк 100 - 4 * 2
 
 
 def test_intent_is_journaled_and_flushed_before_the_first_order_request(tmp_path):
@@ -156,9 +155,9 @@ def test_unapproved_strategy_places_nothing(tmp_path):
 
 def test_insufficient_balance_and_active_safe_mode_place_nothing(tmp_path):
     env = Env(tmp_path)
-    env.rest.available = 9.99  # меньше маржи 10 USDT
+    env.rest.available = 9.99  # меньше маржи 10 USDT (позиция 100 USDT при плече 10)
     run(env.engine.execute(signal(), NOW))
-    assert env.event("live_rejected").detail["reason"] == "insufficient_balance" and env.posts() == [] and env.risk.busy() == {}
+    assert env.event("live_rejected").detail["reason"] == "insufficient_margin" and env.posts() == [] and env.risk.busy() == {}
 
     env2 = Env(tmp_path / "2")
     env2.safe.trip("тест")
@@ -189,7 +188,7 @@ def test_daily_loss_limit_cancels_pending_entries_but_keeps_open_positions_prote
     assert SYM not in env.engine.trades  # неисполненный вход снят
     assert env.rest.orders[limit_cid]["status"] == "CANCELED"
     assert env.engine.trades["XRPUSDT"].status == OPEN  # открытая позиция остаётся под защитой на бирже и сопровождается дальше
-    assert [a["algoStatus"] for a in env.rest.algos.values()] == ["NEW", "NEW", "NEW"]
+    assert [a["algoStatus"] for a in env.rest.algos.values()] == ["NEW", "NEW"]
 
 
 # --------------------------------------------------------------------------------------- LIMIT
@@ -197,7 +196,7 @@ def test_daily_loss_limit_cancels_pending_entries_but_keeps_open_positions_prote
 
 def limit_env(tmp_path):
     env = Env(tmp_path)
-    run(env.engine.execute(signal(kind=Kind.LIMIT, entry=100.0, sl=98.0, tp=106.0, inval=98.0), NOW))
+    run(env.engine.execute(signal(kind=Kind.LIMIT, entry=100.0, sl=98.0, tp=108.0, inval=98.0), NOW))
     return env
 
 
@@ -211,8 +210,8 @@ def test_limit_entry_waits_then_is_protected_after_the_fill_and_closes_on_stop(t
     env.rest.fill_limit(env.trade().entry_cid)
     run(env.engine.poll())
     assert env.trade().status == OPEN
-    sl, l1, l2 = env.algos()
-    assert (sl["triggerPrice"], l1["triggerPrice"], l2["triggerPrice"]) == ("98", "102", "106")  # от цены лимитки 100, R = 2
+    sl, tp = env.algos()
+    assert (sl["triggerPrice"], tp["triggerPrice"]) == ("98", "108")  # от цены лимитки 100, R = 2: тейк 1:4
 
     stop_cid, level_cids = env.trade().stop_cid, [v.cid for v in env.trade().levels]
     run(env.engine.poll())
@@ -224,19 +223,17 @@ def test_limit_entry_waits_then_is_protected_after_the_fill_and_closes_on_stop(t
     assert all(env.rest.algos[c]["algoStatus"] == "CANCELED" for c in level_cids)  # уровни сняты: они опасны для следующей сделки
 
 
-def test_last_level_without_runner_is_reported_as_tp(tmp_path):
-    from orchestrator.registry import VWAP_PLAN  # 50% на +1R и 50% на +2R, остатка нет
-
-    env = Env(tmp_path, risk_kw={"plans": {STRATEGY: VWAP_PLAN}})
-    run(env.engine.execute(signal(kind=Kind.LIMIT, entry=100.0, sl=98.0, tp=106.0, inval=98.0), NOW))
+def test_take_profit_closes_the_whole_position_and_is_reported_as_tp(tmp_path):
+    env = limit_env(tmp_path)
     env.rest.fill_limit(env.trade().entry_cid)
     run(env.engine.poll())
     stop_cid = env.trade().stop_cid
-    env.rest.set_price(102.0)  # +1R
+    for price in (102.0, 104.0, 106.0):  # +1R, +2R, +3R: частичных закрытий нет
+        env.rest.set_price(price)
+        run(env.engine.poll())
+        assert env.rest.positions[SYM] == 1.0 and not env.journal.of_kind("live_partial_close")
+    env.rest.set_price(108.0)  # +4R: единственный тейк
     run(env.engine.poll())
-    env.rest.set_price(104.0)  # +2R: последний уровень
-    run(env.engine.poll())
-    assert [e.detail["reason"] for e in env.journal.of_kind("live_partial_close")] == ["scale_1r", "tp"]
     assert env.event("live_closed").detail["reason"] == "tp" and env.rest.algos[stop_cid]["algoStatus"] != "NEW"
     assert env.rest.positions[SYM] == 0.0 and SYM not in env.engine.trades
 
@@ -263,7 +260,7 @@ def test_limit_ttl_cancels_the_order_after_ten_bars(tmp_path):
     assert env.event("live_trade_cancelled").detail["reason"] == "ttl"
 
 
-@pytest.mark.parametrize("close, reason", [(97.5, "invalidated"), (106.5, "tp_before_fill")])
+@pytest.mark.parametrize("close, reason", [(97.5, "invalidated"), (108.5, "tp_before_fill")])
 def test_limit_is_cancelled_like_in_shadow_when_invalidated_or_tp_reached_first(tmp_path, close, reason):
     env = limit_env(tmp_path)
     env.engine.on_bar_closed(SYM, T0 + BAR, close, NOW + BAR)
@@ -285,17 +282,9 @@ def test_partial_fill_cancels_the_rest_and_protects_exactly_the_filled_quantity(
     env.rest.fill_limit(cid, qty=8.0)
     run(env.engine.poll())
     assert env.rest.orders[cid]["status"] == "CANCELED"  # остаток снят: больше позиция не вырастет
-    sl, l1, l2 = env.algos()
-    assert (sl["quantity"], l1["quantity"], l2["quantity"]) == ("8", "4", "3.2")  # 50% / 40% от ИСПОЛНЕННОГО объёма, runner 0.8
+    sl, tp = env.algos()
+    assert (sl["quantity"], tp["quantity"]) == ("8", "8")  # стоп и тейк - на весь ИСПОЛНЕННЫЙ объём
     assert env.trade().status == OPEN and env.trade().filled_qty == 8.0
-
-
-def test_partial_fill_that_the_plan_cannot_split_is_closed_without_safe_mode(tmp_path):
-    env = limit_env(tmp_path)
-    env.rest.fill_limit(env.trade().entry_cid, qty=0.4)  # 0.4 на шаге 0.1 не делится 50/40/10
-    run(env.engine.poll())
-    assert env.rest.positions[SYM] == 0.0 and env.algos() == [] and SYM not in env.engine.trades and not env.safe.active
-    assert env.event("live_closed").detail["reason"] == "plan_not_representable"
 
 
 def test_post_only_rejection_by_status_cancels_the_trade(tmp_path):
@@ -495,7 +484,7 @@ def test_real_smc_signal_goes_through_the_mirror_to_real_orders(tmp_path):
     t = env.engine.trades[SYMBOL]
     assert t.plan.side == "SELL" and t.plan.kind is Kind.LIMIT and t.status == ENTRY
     assert env.posts()[0]["price"] == "105" and env.posts()[0]["type"] == "LIMIT"
-    assert t.plan.sl == pytest.approx(112.2) and t.plan.tp == pytest.approx(83.4)
+    assert t.plan.sl == pytest.approx(112.2) and t.plan.tp == pytest.approx(105.0 - 4 * 7.2)  # тейк строго 1:4
 
 
 # ----------------------------------------------------------------- сборка и защита от включения

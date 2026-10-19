@@ -8,9 +8,9 @@
 Правила (все жёсткие, без «мягких» режимов):
   1. Фильтр стратегий `approved_strategies`: чужие сигналы получают `strategy_not_approved` (Shadow-трекер их по-прежнему
      пишет - это решает `LiveMirrorSink`, менеджер лишь страхует).
-  2. Фиксированный объём: позиция = `margin_usdt * leverage` в USDT (по умолчанию 10 USDT маржи с плечом 10x = 100 USDT),
-     объём - вниз до шага лота. Риск сделки = объём * |вход - SL| (не «1% от депозита», как в Shadow): расстояние до стопа
-     разное, поэтому проверяется потолок, см. п. 4.
+  2. Фиксированный риск (2026-10-19): объём = `risk_usdt` (5 USDT) / |вход - SL|, вниз до шага лота. Процент стопа на сумму убытка не влияет.
+     Маржа = позиция / плечо должна помещаться в доступный баланс (`insufficient_margin`), иначе вход отклоняется значением (в лог и журнал),
+     процесс продолжает работу. Позиция меньше minQty/minNotional - `below_min_size` (объём молча не округляется ВВЕРХ: риск был бы выше 5 USDT).
   3. Суточный лимит убытка (UTC): результат счёта с 00:00 UTC (реализованный PnL + комиссии + фандинг, данные биржи)
      <= -`daily_loss_limit_usdt` -> торговля полностью блокируется до 00:00 UTC следующих суток. Блокировка - защёлка в файле:
      рестарт процесса её не снимает. Нет свежего значения PnL (старше `pnl_max_age_s` или не получено) - новых сделок нет
@@ -35,6 +35,7 @@ from typing import Any
 
 import config
 from execution.exchange_filters import SymbolFilters
+from features import defaults as D
 from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan
 from orchestrator.types import Direction, Kind, Signal
 from utils.errors import ConfigError, DataError
@@ -71,7 +72,7 @@ class LiveOrderPlan:
     margin_usdt: float  # маржа, которую займёт позиция (= notional / leverage)
     notional_usdt: float
     max_loss_usdt: float  # потеря при срабатывании SL, без комиссий и проскальзывания
-    exit_plan: ScaleOutPlan  # ТОТ ЖЕ план управления позицией, что у VirtualTracker для этой стратегии (Scale Out + безубыток + runner)
+    exit_plan: ScaleOutPlan  # ТОТ ЖЕ план управления позицией, что у VirtualTracker для этой стратегии (Scale Out)
 
     @property
     def close_side(self) -> str:
@@ -80,7 +81,7 @@ class LiveOrderPlan:
 
 @dataclass(frozen=True)
 class LiveRejected:
-    reason: str  # trading_blocked | pnl_unavailable | strategy_not_approved | symbol_busy | below_min_size | plan_not_representable | sl_too_far | bad_risk
+    reason: str  # trading_blocked | pnl_unavailable | strategy_not_approved | symbol_busy | below_min_size | insufficient_margin | plan_not_representable | sl_too_far | bad_risk
     detail: dict[str, Any] | None = None
 
 
@@ -99,9 +100,12 @@ class LiveRiskManager:
         plans: Mapping[str, ScaleOutPlan] | None = None,
         venues: Collection[str] = ("binance",),
         max_open_positions: int = config.LIVE_MAX_OPEN_POSITIONS,
+        risk_usdt: float = D.RISK_USDT,
     ):
         if not (margin_usdt > 0 and isinstance(leverage, int) and 1 <= leverage <= 125 and daily_loss_limit_usdt > 0):
             raise ConfigError("LiveRiskManager: margin_usdt > 0, leverage целое 1..125, daily_loss_limit_usdt > 0")
+        if not risk_usdt > 0:
+            raise ConfigError(f"LiveRiskManager: risk_usdt > 0, получено {risk_usdt}")
         if not (0 < liq_safety <= 1 and pnl_max_age_s > 0):
             raise ConfigError("LiveRiskManager: liq_safety в (0, 1], pnl_max_age_s > 0")
         approved = tuple(approved_strategies)
@@ -115,7 +119,9 @@ class LiveRiskManager:
         self.max_open_positions = max_open_positions
         self._filters = dict(filters)
         self.approved = frozenset(approved)
+        # margin_usdt оставлен для совместимости (старый размер позиции); на объём больше не влияет - его задаёт risk_usdt
         self.margin_usdt, self.leverage, self.daily_loss_limit = float(margin_usdt), leverage, float(daily_loss_limit_usdt)
+        self.risk_usdt = float(risk_usdt)
         self._liq_safety, self._pnl_max_age_ms = liq_safety, int(pnl_max_age_s * 1000)
         self._plans = dict(plans or {})  # strategy_id -> план выхода (нет в словаре - DEFAULT_PLAN, как у VirtualTracker)
         self._state_path = Path(state_path)
@@ -226,8 +232,9 @@ class LiveRiskManager:
             raise DataError(f"{symbol}: уже удерживается {self._busy[symbol]}")
         self._busy[symbol] = signal_id
 
-    def evaluate(self, signal: Signal, now_ms: int) -> LiveOrderPlan | LiveRejected:
-        """Одобряет сигнал (и резервирует монету до `release`) или отказывает. Порядок проверок - от дешёвых и общих к частным."""
+    def evaluate(self, signal: Signal, now_ms: int, available_usdt: float | None = None) -> LiveOrderPlan | LiveRejected:
+        """Одобряет сигнал (и резервирует монету до `release`) или отказывает. Порядок проверок - от дешёвых и общих к частным.
+        `available_usdt` - свободный баланс; None - проверка маржи пропускается (тесты расчёта без биржи)."""
         rejected = self.gate(signal, now_ms)
         if rejected is not None:
             return rejected
@@ -242,15 +249,19 @@ class LiveRiskManager:
         distance = abs(sl - entry) / entry
         if distance >= self._liq_safety / self.leverage:
             return LiveRejected("sl_too_far", {"distance": distance, "max": self._liq_safety / self.leverage})
-        notional_target = self.margin_usdt * self.leverage
-        qty = _floor_to_step(notional_target / entry, f.step_size)
+        raw_qty = self.risk_usdt / abs(entry - sl)  # риск фиксирован: 5 USDT / дистанция до стопа
+        qty = _floor_to_step(raw_qty, f.step_size)  # ВНИЗ до шага лота: фактический риск <= risk_usdt
         if qty < f.min_qty - _EPS or qty * entry < f.min_notional:
-            return LiveRejected("below_min_size", {"qty": qty, "notional": qty * entry, "min_notional": f.min_notional})
+            return LiveRejected("below_min_size", {"qty": qty, "raw_qty": raw_qty, "notional": qty * entry, "min_notional": f.min_notional})
+        margin_required = qty * entry / self.leverage
+        if available_usdt is not None and margin_required > available_usdt + _EPS:
+            return LiveRejected("insufficient_margin", {"margin_required": margin_required, "available": available_usdt, "leverage": self.leverage,
+                                                        "notional": qty * entry, "risk_usdt": self.risk_usdt})
         tp = _to_grid(signal.tp, f.tick_size) if signal.tp is not None else None
         exit_plan = self._plans.get(signal.strategy, DEFAULT_PLAN)
         if split_levels(exit_plan, qty, f) is None:  # Scale Out не делится на сетку лота: торговать по другой математике нельзя
             return LiveRejected("plan_not_representable", {"qty": qty, "step": f.step_size, "min_qty": f.min_qty,
-                                                           "levels": [list(x) for x in exit_plan.levels], "runner_frac": exit_plan.runner_frac})
+                                                           "levels": [list(x) for x in exit_plan.levels]})
         notional = qty * entry
         plan = LiveOrderPlan(
             signal_id=signal.signal_id, strategy=signal.strategy, symbol=signal.symbol, direction=signal.direction, kind=signal.kind,
@@ -287,11 +298,10 @@ def _floor_to_step(qty: float, step: float) -> float:
     return float((Decimal(repr(float(qty))) / s).to_integral_value(rounding=ROUND_FLOOR) * s)
 
 
-def split_levels(plan: ScaleOutPlan, qty: float, f: SymbolFilters) -> tuple[tuple[tuple[float, float], ...], float] | None:
-    """Делит объём позиции по плану Scale Out на сетке лота: ((уровень в R, объём), ...) и объём runner'а.
+def split_levels(plan: ScaleOutPlan, qty: float, f: SymbolFilters) -> tuple[tuple[float, float], ...] | None:
+    """Делит объём позиции по плану Scale Out на сетке лота: ((уровень в R, объём), ...) (последний уровень забирает хвост).
 
-    Доли плана - от ИСХОДНОГО объёма (как у VirtualTracker); объём каждого уровня - вниз до шага лота, остаток (runner или, если
-    его нет, хвост последнего уровня) - разница, поэтому сумма точно равна позиции. None - какая-то часть меньше minQty или её доля отличается от плана больше чем на MAX_FRAC_ERROR (план
+    Доли плана - от ИСХОДНОГО объёма (как у VirtualTracker); объём каждого уровня - вниз до шага лота, хвост последнего уровня - разница, поэтому сумма точно равна позиции. None - какая-то часть меньше minQty или её доля отличается от плана больше чем на MAX_FRAC_ERROR (план
     на таком объёме не воспроизводится, и менеджер отказывает вместо того, чтобы молча исполнить другую математику).
     """
     step, min_qty = Decimal(repr(float(f.step_size))), Decimal(repr(float(f.min_qty)))
@@ -300,15 +310,12 @@ def split_levels(plan: ScaleOutPlan, qty: float, f: SymbolFilters) -> tuple[tupl
     planned: list[tuple[Decimal, Decimal]] = []  # (доля плана, объём на сетке лота)
     last = len(plan.levels) - 1
     for i, (_, frac) in enumerate(plan.levels):
-        if i == last and plan.runner_frac <= _EPS:
-            part = total - used  # последний уровень без runner'а забирает хвост
+        if i == last:
+            part = total - used  # последний уровень забирает хвост (остатка-runner нет)
         else:
             part = (total * Decimal(repr(float(frac))) / step).to_integral_value(rounding=ROUND_FLOOR) * step
         planned.append((Decimal(repr(float(frac))), part))
         used += part
-    runner = total - used  # без runner'а хвост уже в последнем уровне, остаток = 0
-    if plan.runner_frac > _EPS:
-        planned.append((Decimal(repr(plan.runner_frac)), runner))
     if any(part < min_qty - Decimal("1e-12") or abs(part / total - frac) > MAX_FRAC_ERROR for frac, part in planned):
         return None
-    return tuple((r, float(part)) for (r, _), (_, part) in zip(plan.levels, planned)), float(runner)
+    return tuple((r, float(part)) for (r, _), (_, part) in zip(plan.levels, planned))

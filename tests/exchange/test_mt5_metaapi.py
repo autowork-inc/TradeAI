@@ -471,12 +471,12 @@ def test_quote_carries_tick_values_for_the_risk_calculator(client):
 
 def test_end_to_end_plan_to_order(client):
     """Связка: спецификация -> лоты по риску -> ордер со стопом (всё на моках)."""
-    from exchange.mt5_risk import size_position
+    from exchange.mt5_risk import Mt5RiskParams, size_position
     from exchange.symbol_mapper import parse_spec
 
     raw = run(client.get_symbol_specification("EURUSD"))
     spec = parse_spec("EURUSD", "EURUSD", {**raw, "contractSize": 100_000, "point": 0.00001, "profitCurrency": "USD"})
-    plan = size_position(spec, side="BUY", entry=1.1, sl=1.098, tp=1.106, equity=100_000.0, free_margin=100_000.0, tick_value=1.0,
+    plan = size_position(spec, side="BUY", entry=1.1, sl=1.098, tp=1.106, equity=100_000.0, free_margin=100_000.0, tick_value=1.0, params=Mt5RiskParams(risk_usdt=1000.0),
                          margin_per_lot=run(client.calculate_margin("EURUSD", "BUY", 1.0, 1.1)))
     assert plan.lots == 5.0
     res = run(client.market_order(plan.broker_symbol, plan.side, plan.lots, plan.sl, plan.tp, client_id="tb1"))

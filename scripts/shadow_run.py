@@ -15,7 +15,7 @@ MT5-символы (EURUSD, XAUUSD, XAGUSD): Binance их не отдаёт, п�
 включаются, только если в окружении есть METAAPI_TOKEN и METAAPI_ACCOUNT_ID (без них - предупреждение в лог, процесс работает по крипте).
 HTF Bias (2026-10-11): вторым фидом идут свечи H4 (kline_4h + история REST); структура H4 (features/htf.py) присоединяется
 к контексту M15, и автомат SMC не начинает сетап против тренда H4 (шорт при Bullish, лонг при Bearish). Управление
-позицией - Scale Out (50% на +1R с безубытком, 40% на +3R, 10% runner с трейлингом; см. orchestrator/tracker.py).
+позицией - один тейк 1:4 на весь объём, стоп статичен; см. orchestrator/tracker.py.
 Все решения и сделки пишутся в журнал JSONL (<DATA_DIR>/shadow_events.jsonl) и, если задан DATABASE_URL, в PostgreSQL
 (trades, trade_closes, trade_snapshots, state_events; схема - persistence/schema.py). Сводка - в лог раз в час и при выходе.
 Состояние сделок живёт в памяти: при перезапуске открытые виртуальные позиции теряются; в БД они помечаются aborted
@@ -88,7 +88,7 @@ class Options:
 def parse_args(argv: Sequence[str] | None = None) -> Options:
     p = argparse.ArgumentParser(description="Shadow Mode (виртуальные сделки по реальному рынку)")
     p.add_argument("--interval", default="15m", choices=["15m", "1h"], help="таймфрейм стратегий")
-    p.add_argument("--equity", type=float, default=10_000.0, help="виртуальный эквити для расчёта объёма (риск 1%% от него)")
+    p.add_argument("--equity", type=float, default=10_000.0, help="виртуальный эквити для расчёта объёма (риск сделки - фиксированные 5 USDT, от эквити зависит только проверка плеча)")
     p.add_argument("--history", type=int, default=300, help="сколько закрытых свечей держать для признаков")
     p.add_argument("--allow-testnet", action="store_true", help="разрешить профиль testnet (цены не реальные: только для проверки связи)")
     a = p.parse_args(argv)

@@ -9,11 +9,11 @@ SYM = "BTCUSDT"
 
 
 def mk(strategy="smc", symbol=SYM, direction=Direction.SHORT, kind=Kind.LIMIT, entry=100.0, sl=None, tp=None, inval=None, bar=0) -> Signal:
-    """Шорт: вход 100, SL 105 (R = 5), TP 85, отмена при close > 106. Лонг - зеркально (SL 95, TP 115, отмена < 94)."""
+    """Шорт: вход 100, SL 105 (R = 5), TP 80 (1:4), отмена при close > 106. Лонг - зеркально (SL 95, TP 120, отмена < 94)."""
     sgn = direction.sgn
     sl = sl if sl is not None else entry + sgn * 5
     if kind is Kind.LIMIT:
-        tp = tp if tp is not None else entry - sgn * 15
+        tp = tp if tp is not None else entry - sgn * 20
         inval = inval if inval is not None else sl + sgn * 1
     return Signal(
         signal_id=f"{strategy}:{symbol}:15m:{bar}:{direction.value}", strategy=strategy, symbol=symbol, interval="15m",

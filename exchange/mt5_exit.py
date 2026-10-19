@@ -7,23 +7,19 @@
 Правила (зеркало VirtualTracker, R8):
   * R = |фактическая цена входа - SL|; уровни = вход -+ r * R, от ФАКТИЧЕСКОЙ цены входа (MARKET - по факту, LIMIT - по цене заявки).
   * Уровень достигнут, когда цена сделки (тот же поток тиков, что у Shadow) дошла до него; несколько уровней за раз (гэп) закрываются подряд.
-  * Безубыток: mark price коснулась +1R (D11) ИЛИ исполнен первый уровень (`be_after_first`): `modify_position(sl=вход, tp=...)`, только к прибыли.
-  * Runner (остаток): трейлинг по закрытой свече (`atr`: лучшая цена -+ k*ATR; `wick`: экстремум последних N свечей), вступает в силу
-    со следующего опроса; стоп только подтягивается и не лежит дальше безубытка.
+  * Безубытка, трейлинга и остатка-runner нет: стоп брокера статичен всю сделку, последний уровень закрывает остаток.
   * Тайм-аут: `max_hold_bars` свечей после входа -> закрытие остатка по рынку.
-  * Брокерский TP: при плане БЕЗ runner'а - цена последнего уровня (брокер закроет остаток и при выключенном боте); при runner'е TP нет
-    (иначе брокер закрыл бы и runner на последнем уровне, а Shadow ведёт его трейлингом).
+  * Брокерский TP: цена последнего уровня (брокер закроет остаток и при выключенном боте).
 Устойчивость к сбоям: состояние берётся у брокера. Выполненные уровни выводятся из ФАКТИЧЕСКИХ лотов позиции (`lots <= остаток после уровня k`),
 а объём закрытия считается как «лоты сейчас - остаток после уровня», поэтому повтор после неизвестного исхода или рестарта не закроет лишнего.
 
 Закрытый рынок (retcode 10018 / `MarketClosedError`) - не авария и не Safe Mode: действие остаётся ожидающим, в журнал один раз
 пишется `deferred`, при следующем опросе оно повторяется, при успехе пишется `replayed`. Неизвестный исход запроса (таймаут, обрыв) -
 повтор в следующий опрос (все операции идемпотентны по лотам/цене). «Стоп уже за ценой» при переносе (INVALID_STOPS 10016) - выход по рынку
-с причиной `be`/`trail` без Safe Mode (аналог -2021 на Binance). Любая другая ошибка брокера - исключение (R1).
+без Safe Mode. Любая другая ошибка брокера - исключение (R1).
 """
 
 import logging
-import math
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -48,7 +44,7 @@ class Mt5ExitError(TradingInfraError):
 
 @dataclass(frozen=True)
 class Mt5ExitEvent:
-    kind: str  # partial_close | be_armed | trail_moved | closed | deferred | replayed | plan_not_representable
+    kind: str  # partial_close | closed | deferred | replayed | plan_not_representable
     detail: dict[str, Any] = field(default_factory=dict)
 
 
@@ -63,24 +59,19 @@ class Mt5Exit:
     risk: float
     initial_lots: float
     levels: list[list[float]]  # [[r, цена, лоты], ...]
-    runner_lots: float
     stop_price: float
-    stop_kind: str = "sl"  # sl | be | trail - причина выхода, если стоп брокера сработает
-    tp_price: float | None = None  # брокерский TP (только у плана без runner'а)
+    stop_kind: str = "sl"  # sl - причина выхода, если стоп брокера сработает
+    tp_price: float | None = None  # брокерский TP (цена последнего уровня)
     levels_done: int = 0
-    be_armed: bool = False
-    be_pending: bool = False
-    trail_target: float | None = None
     best_q: float = 0.0  # лучшая цена с входа в «шортовом мире» (sgn * цена): ниже - лучше
     last_q: float | None = None  # последняя цена сделки в «шортовом мире»
     bars_closed: int = 0
     fill_bar_no: int = 1
-    recent_bars: list[list[float]] = field(default_factory=list)  # [high, low] последних закрытых свечей
-    forced_reason: str | None = None  # ожидает закрытия остатка по рынку: timeout | be | trail | fill_beyond_stop | plan_not_representable
+    forced_reason: str | None = None  # ожидает закрытия остатка по рынку: timeout | fill_beyond_stop | plan_not_representable
     deferred: list[str] = field(default_factory=list)  # действия, отложенные из-за закрытого рынка (уже записаны в журнал)
 
     def expected_after(self, k: int) -> float:
-        """Лоты позиции после исполнения уровня k (0-based); у плана без runner'а после последнего уровня - 0."""
+        """Лоты позиции после исполнения уровня k (0-based); после последнего уровня - 0."""
         return round(self.initial_lots - sum(lvl[2] for lvl in self.levels[: k + 1]), 8)
 
     def to_record(self) -> dict[str, Any]:
@@ -92,9 +83,8 @@ class Mt5Exit:
     def from_record(cls, rec: Mapping[str, Any]) -> "Mt5Exit":
         try:
             ep = rec["plan"]
-            plan = ScaleOutPlan(tuple((float(r), float(f)) for r, f in ep["levels"]), bool(ep["be_after_first"]), ep["trail_mode"],
-                                float(ep["trail_atr_mult"]), int(ep["trail_wick_bars"]))
-            data = {k: v for k, v in rec.items() if k != "plan"}
+            plan = ScaleOutPlan.from_record(ep["levels"])
+            data = {k: v for k, v in rec.items() if k not in ("plan", "be_armed", "be_pending", "trail_target", "recent_bars", "runner_lots")}  # поля файлов до отмены безубытка и трейлинга
             return cls(plan=plan, **data)
         except (KeyError, TypeError, ValueError) as exc:
             raise DataError(f"Запись сопровождения MT5-позиции не читается ({exc!r}): {str(rec)[:300]}") from exc
@@ -114,9 +104,7 @@ def _snap(price: float, spec: Mt5SymbolSpec) -> float:
 
 
 def broker_tp(plan: ScaleOutPlan, entry: float, sl: float, sgn: float, spec: Mt5SymbolSpec) -> float | None:
-    """Брокерский TP: цена последнего уровня, если у плана нет runner'а; иначе None (runner не должен закрываться брокером)."""
-    if plan.runner_frac > _EPS:
-        return None
+    """Брокерский TP: цена последнего уровня плана."""
     return level_price(entry, sgn, plan.last_r, abs(entry - sl), spec)
 
 
@@ -127,57 +115,31 @@ def build_exit(plan: ScaleOutPlan, pos: MetaApiPosition, sl: float, spec: Mt5Sym
     risk = abs(entry - sl)
     stop = pos.stop_loss if pos.stop_loss is not None else sl
     split = split_levels(plan, pos.lots, lot_filters(spec))
-    base = dict(plan=plan, sgn=sgn, entry=entry, sl0=sl, risk=risk, initial_lots=pos.lots, runner_lots=0.0, stop_price=stop, best_q=sgn * entry)
+    base = dict(plan=plan, sgn=sgn, entry=entry, sl0=sl, risk=risk, initial_lots=pos.lots, stop_price=stop, best_q=sgn * entry)
     if not sgn * sl > sgn * entry:
         return Mt5Exit(levels=[], **base, forced_reason="fill_beyond_stop")  # вход исполнен уже за стопом (гэп)
     if split is None:
         return Mt5Exit(levels=[], **base, forced_reason="plan_not_representable")
-    levels = [[r, level_price(entry, sgn, r, risk, spec), lots] for r, lots in split[0]]
-    base["runner_lots"] = split[1]
+    levels = [[r, level_price(entry, sgn, r, risk, spec), lots] for r, lots in split]
     return Mt5Exit(levels=levels, **base, tp_price=broker_tp(plan, entry, sl, sgn, spec))
 
 
 # ------------------------------------------------------------------------------------------------ тики и свечи
 
 
-def on_tick(ex: Mt5Exit, tick: Tick, be_trigger_r: float = D.BE_TRIGGER_R) -> None:
-    """Те же тики, что получает VirtualTracker: лучшая и последняя цена - по сделкам, безубыток +1R - по mark price (D11)."""
+def on_tick(ex: Mt5Exit, tick: Tick) -> None:
+    """Те же тики, что получает VirtualTracker: лучшая и последняя цена - по сделкам (mark price стоп не двигает)."""
     q = ex.sgn * tick.price
-    if tick.kind == "mark":
-        if not ex.be_armed and not ex.be_pending and q <= ex.sgn * ex.entry - be_trigger_r * ex.risk:
-            ex.be_pending = True
-    else:
+    if tick.kind != "mark":
         ex.best_q = min(ex.best_q, q)
         ex.last_q = q
 
 
 def on_bar_closed(ex: Mt5Exit, bar: BarInfo | None, spec: Mt5SymbolSpec, max_hold_bars: int) -> None:
-    """Закрытие свечи: тайм-аут, трейлинг runner'а (как VirtualTracker._trail; исполняется следующим опросом)."""
+    """Закрытие свечи: тайм-аут (исполняется следующим опросом)."""
     ex.bars_closed += 1
     if ex.bars_closed - ex.fill_bar_no >= max_hold_bars:
         ex.forced_reason = ex.forced_reason or "timeout"
-        return
-    plan = ex.plan
-    if bar is not None and bar.high is not None and bar.low is not None:
-        ex.recent_bars = (ex.recent_bars + [[bar.high, bar.low]])[-plan.trail_wick_bars:]
-    if not runner_active(ex):
-        return
-    if bar is None:
-        raise Mt5ExitError("runner без данных закрытой свечи - трейлинг невозможен")
-    if plan.trail_mode == "atr":
-        if bar.atr is None or not math.isfinite(bar.atr) or bar.atr <= 0:
-            raise Mt5ExitError(f"нет ATR для трейлинга ({bar.atr!r})")
-        candidate = ex.best_q + plan.trail_atr_mult * bar.atr
-    else:
-        if not ex.recent_bars:
-            return
-        candidate = max(max(ex.sgn * h, ex.sgn * lo) for h, lo in ex.recent_bars)
-    if candidate < ex.sgn * ex.stop_price - 1e-12:
-        ex.trail_target = _snap(ex.sgn * candidate, spec)
-
-
-def runner_active(ex: Mt5Exit) -> bool:
-    return ex.plan.runner_frac > _EPS and bool(ex.levels) and ex.levels_done == len(ex.levels)
 
 
 # ------------------------------------------------------------------------------------------------ шаг сопровождения
@@ -188,7 +150,7 @@ def _market_closed(exc: MetaApiTradeError) -> bool:
 
 
 async def step(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPosition, spec: Mt5SymbolSpec) -> list[Mt5ExitEvent]:
-    """Один опрос открытой позиции: выполненные уровни (по лотам брокера) -> уровни по цене -> безубыток/трейлинг -> тайм-аут/принудительный выход.
+    """Один опрос открытой позиции: выполненные уровни (по лотам брокера) -> уровни по цене -> тайм-аут/принудительный выход.
 
     `pos` - свежая позиция у брокера. Возвращает события; полное закрытие - событие `closed` (позиции у брокера больше нет)."""
     events: list[Mt5ExitEvent] = []
@@ -198,8 +160,6 @@ async def step(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPosition, spe
         k = ex.levels_done
         ex.levels_done += 1
         events.append(Mt5ExitEvent("partial_close", {"reason": _level_reason(ex, k), "lots": ex.levels[k][2], "remaining": lots, "source": "broker_lots"}))
-    if ex.levels_done >= 1 and ex.plan.be_after_first and not ex.be_armed:
-        ex.be_pending = True
     # 2) принудительный выход (тайм-аут, «стоп уже за ценой», вход за стопом, план не делится)
     if ex.forced_reason is not None:
         return events + await _close_all(ex, client, pos, ex.forced_reason, "forced")
@@ -228,57 +188,12 @@ async def step(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPosition, spe
         ex.levels_done += 1
         lots = target
         events.append(Mt5ExitEvent("partial_close", {"reason": _level_reason(ex, k), "lots": volume, "price": price, "remaining": lots, "source": "bot"}))
-        if ex.levels_done == 1 and ex.plan.be_after_first:
-            ex.be_pending = True
-    # 4) безубыток и трейлинг: стоп переносится только к прибыли
-    events += await _apply_stop(ex, client, pos, spec)
     return events
 
 
 def _level_reason(ex: Mt5Exit, k: int) -> str:
     last = len(ex.levels) - 1
-    return "tp" if k == last and ex.plan.runner_frac <= _EPS else f"scale_{ex.levels[k][0]:g}r"
-
-
-async def _apply_stop(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPosition, spec: Mt5SymbolSpec) -> list[Mt5ExitEvent]:
-    sgn = ex.sgn
-    price, kind = ex.stop_price, ex.stop_kind
-    be_requested = ex.be_pending
-    if be_requested:
-        be_price = _snap(ex.entry, spec)
-        if sgn * be_price < sgn * price:
-            price, kind = be_price, "be"
-    trail = ex.trail_target
-    if trail is not None and sgn * trail < sgn * price - 1e-12:
-        price, kind = trail, "trail"
-    if price == ex.stop_price:
-        ex.be_armed = ex.be_armed or be_requested
-        ex.be_pending, ex.trail_target = False, None
-        return []
-    key = "be" if kind == "be" else "trail"
-    try:
-        await client.modify_position(pos.position_id, sl=price, tp=ex.tp_price)
-    except MetaApiTradeError as exc:
-        if _market_closed(exc):
-            return _defer(ex, key, exc)
-        if exc.numeric_code == RETCODE_INVALID_STOPS:  # цена уже за новым стопом: выход по рынку (BE/трейлинг-выход), не авария
-            ex.forced_reason = kind
-            return await _close_all(ex, client, pos, kind, "stop_too_close")
-        if exc.outcome_unknown:
-            log.warning("%s: исход переноса стопа неизвестен (%s): повтор в следующем опросе", pos.symbol, exc)
-            return []
-        raise
-    events = _replayed(ex, key)
-    ex.stop_price, ex.stop_kind = price, kind
-    if be_requested:
-        ex.be_armed, ex.be_pending = True, False
-        if kind == "be":
-            events.append(Mt5ExitEvent("be_armed", {"stop": price}))
-    if ex.trail_target is not None:
-        ex.trail_target = None
-        if kind == "trail":
-            events.append(Mt5ExitEvent("trail_moved", {"stop": price, "mode": ex.plan.trail_mode}))
-    return events
+    return "tp" if k == last else f"scale_{ex.levels[k][0]:g}r"
 
 
 async def _close_all(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPosition, reason: str, key: str) -> list[Mt5ExitEvent]:
@@ -315,7 +230,7 @@ def _replayed(ex: Mt5Exit, key: str) -> list[Mt5ExitEvent]:
 
 
 def vanished_reason(ex: Mt5Exit) -> str:
-    """Позиция исчезла у брокера без нашего закрытия: сработал SL брокера (sl / be / trail) либо брокерский TP последнего уровня."""
+    """Позиция исчезла у брокера без нашего закрытия: сработал SL брокера (sl) либо брокерский TP последнего уровня."""
     if ex.forced_reason is not None:
         return ex.forced_reason
     if ex.tp_price is not None and ex.levels_done >= len(ex.levels) - 1 and ex.last_q is not None and ex.last_q <= ex.sgn * ex.tp_price + 1e-12:

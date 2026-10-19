@@ -102,8 +102,9 @@ def test_breakout_is_an_event_not_a_state():
     assert idx(detect_horizontal_breakout(df), "hb_long_signal") == [J]
 
 
-def test_htf_neutral_allows_both_sides_and_missing_bias_is_fail_closed():
-    assert idx(detect_horizontal_breakout(scenario(htf_bias=0)), "hb_long_signal") == [J]
+def test_htf_neutral_and_missing_bias_are_blocked_fail_closed():
+    assert idx(detect_horizontal_breakout(scenario(htf_bias=0)), "hb_long_signal") == []  # Neutral - запрет (жёсткий фильтр, 2026-10-19)
+    assert idx(detect_horizontal_breakout(scenario(htf_bias=1)), "hb_long_signal") == [J]
     nulls = scenario().with_columns(pl.lit(None, dtype=pl.Int8).alias("htf_bias"))
     assert idx(detect_horizontal_breakout(nulls), "hb_long_signal") == []
     no_col = scenario().drop("htf_bias")

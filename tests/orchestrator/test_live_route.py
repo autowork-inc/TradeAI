@@ -24,6 +24,7 @@ from tests.execution.fake_algo import FakeAlgoExchange
 from tests.execution.helpers import EXEC_CFG, make_env
 from tests.orchestrator.helpers import IV, Scripted, ctx, mk
 from utils.errors import ConfigError, DataError
+from orchestrator.risk import RiskSizer
 
 SYM = "BTCUSDT"
 
@@ -87,6 +88,7 @@ def make_harness(e, tmp_path, by_bar, *, strategies=("smc",), equity=10_000.0, b
     async def equity_source() -> float:
         return equity
 
+    sink_kw.setdefault("sizer", RiskSizer(risk_usdt=equity * 0.01))  # замороженный LiveBarrier: прежняя математика «1% эквити» (боевой дефолт теперь 5 USDT)
     sink = LiveBarrierSink(e.barrier, e.safe, journal, store, equity_source, e.rest.now_ms, interval_ms=IV, symbols=(SYM,), **sink_kw)
     scripted = [Scripted(name, {base + k: sigs for k, sigs in by_bar.get(name, {}).items()}) for name in strategies]
     orch = Orchestrator(scripted, {s.name: Route(Mode.LIVE, sink) for s in scripted}, journal)
@@ -301,8 +303,8 @@ def test_market_signal_enters_at_once_and_tp_is_3r_from_the_actual_fill(tmp_path
 
     order, protection, position = run(body())
     assert order["type"] == "MARKET" and order["side"] == "BUY" and position == pytest.approx(0.1)
-    # исполнение по 60 100 (проскальзывание): R = 1 100 от факта, тейк = 60 100 + 3 * 1 100; стоп остаётся на рассчитанном уровне
-    assert protection == [("STOP_MARKET", 59_000.0), ("TAKE_PROFIT_MARKET", 63_400.0)]
+    # исполнение по 60 100 (проскальзывание): R = 1 100 от факта, тейк = 60 100 + 4 * 1 100; стоп остаётся на рассчитанном уровне
+    assert protection == [("STOP_MARKET", 59_000.0), ("TAKE_PROFIT_MARKET", 64_500.0)]
 
 
 # ============================================================================= отмены и сроки

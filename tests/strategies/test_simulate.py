@@ -131,20 +131,20 @@ def market_long(**kw) -> pl.DataFrame:
 def test_market_long_uses_next_open_and_computes_tp_from_it():
     p = SimParams(maker_fee=0, taker_fee=0, max_hold=2)
     r = one([FLAT, (101, 102, 100, 101), (101.5, 110, 101.5, 108), (108, 114, 108, 113)], market_long(), p)
-    assert r["entry_px"] == 101.0 and r["risk"] == 5.0 and r["outcome"] == "timeout"  # TP 116 не достигнут за 2 бара
-    r2 = one([FLAT, (101, 102, 100, 101), (101.5, 110, 101.5, 108), (108, 117, 108, 116)], market_long())
-    assert r2["outcome"] == "tp" and r2["exit_px"] == 116.0 and r2["gross_r"] == pytest.approx(3.0)
+    assert r["entry_px"] == 101.0 and r["risk"] == 5.0 and r["outcome"] == "timeout"  # TP 121 (4R) не достигнут за 2 бара
+    r2 = one([FLAT, (101, 102, 100, 101), (101.5, 110, 101.5, 108), (108, 122, 108, 121)], market_long())
+    assert r2["outcome"] == "tp" and r2["exit_px"] == 121.0 and r2["gross_r"] == pytest.approx(4.0)
 
 
 def test_market_rejected_when_leverage_exceeds_cap_o8():
     b = [FLAT, (100, 101, 99, 100), (100, 101, 99, 100)]
-    s = sig(sgn=-1.0, kind="market", sl=99.5, tp=None, inval=None)  # R = 0.5 -> плечо 0.01 * 100 / 0.5 = 2
+    s = sig(sgn=-1.0, kind="market", sl=99.96, tp=None, inval=None)  # R = 0.04 -> плечо 0.0005 * 100 / 0.04 = 1.25
     assert one(b, s, SimParams(maker_fee=0, taker_fee=0, max_exposure=1.0))["outcome"] == "rejected_exposure"
     assert one(b, s, SimParams(max_exposure=3.0))["outcome"] != "rejected_exposure"
     assert SimParams().max_exposure == 5.0  # дефолт после О12
-    tight = sig(sgn=-1.0, kind="market", sl=99.9, tp=None, inval=None)  # R = 0.1 -> плечо 10 > 5
+    tight = sig(sgn=-1.0, kind="market", sl=99.995, tp=None, inval=None)  # R = 0.005 -> плечо 10 > 5
     assert one(b, tight)["outcome"] == "rejected_exposure"
-    assert one(b, s)["outcome"] != "rejected_exposure"  # плечо 2 проходит при дефолтном потолке 5
+    assert one(b, s)["outcome"] != "rejected_exposure"  # плечо 1.25 проходит при дефолтном потолке 5
 
 
 def test_market_without_next_bar_or_nonpositive_risk():

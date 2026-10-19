@@ -90,7 +90,7 @@ def test_lock_is_released_when_position_closes_by_tick():
     orch, tracker, _ = build([smc])
     feed(orch, 1)
     tracker.on_tick(tick(100.5, 10))
-    tracker.on_tick(tick(84.0, 11))  # TP
+    tracker.on_tick(tick(79.0, 11))  # TP
     assert orch.held() == {}
     events = feed_from(orch, 2, 3)
     assert kinds(events) == ["signal_accepted"]
@@ -122,7 +122,7 @@ def test_replayed_bars_still_advance_tracker_bar_counters():
 
 
 def test_risk_refusal_from_sink_releases_the_lock_and_is_logged():
-    bad = mk(bar=1, entry=100.0, sl=100.02, tp=85.0, inval=101.0)  # плечо 50 > 5
+    bad = mk(bar=1, entry=100.0, sl=100.005, tp=80.0, inval=101.0)  # плечо 50 > 5
     ok = mk(bar=1, direction=Direction.LONG)
     orch, tracker, _ = build([Scripted("smc", {1: [bad, ok]})])
     events = feed(orch, 1)

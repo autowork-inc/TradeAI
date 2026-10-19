@@ -74,21 +74,6 @@ def test_partial_manual_close_recomputes_pnl_and_r_then_the_stop_closes_the_rest
     assert row["gap_affected"] is False and sum(c["frac"] for c in rec.closes) == pytest.approx(1.0)
 
 
-def test_bot_fills_are_not_counted_as_manual(tmp_path):
-    """TP бота (0.5 по 102) уже учтён; ручное закрытие остатка - последнее исполнение, цена берётся только из него."""
-    env, rec, tid = opened(tmp_path)
-    env.clock.t = NOW + 1_000
-    env.rest.now_ms = NOW + 1_000
-    env.rest.set_price(102.0)  # уровень +1R: 0.5 по 102 (исполнение с временем NOW + 1000)
-    run(env.engine.poll())
-    env.clock.t = NOW + 20_000
-    manual(env, 0.5, 103.0, NOW + 15_000)
-    run(env.engine.poll())
-    assert [c["reason"] for c in rec.closes] == ["scale_1r", "manual_binance"]
-    assert rec.closes[1]["price"] == pytest.approx(103.0) and rec.closes[1]["qty"] == pytest.approx(0.5)
-    assert rec.trades[tid]["exit_reason"] == "manual_binance" and rec.trades[tid]["status"] == "closed"
-
-
 def test_non_usdt_commission_falls_back_to_the_fee_rate(tmp_path):
     env, rec, tid = opened(tmp_path)
     env.rest.commission_asset = "BNB"

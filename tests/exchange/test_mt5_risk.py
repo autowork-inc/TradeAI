@@ -7,7 +7,8 @@ from exchange.mt5_risk import Mt5OrderPlan, Mt5Rejected, Mt5RiskParams, approx_m
 from exchange.symbol_mapper import parse_spec
 from utils.errors import ConfigError
 
-EQUITY = 100_000.0  # 1% = 1 000 USD
+EQUITY = 100_000.0
+RISK = 1_000.0  # риск для проверки математики на «круглых» числах (боевой дефолт - 5 USD, см. test_default_risk_is_fixed_five_usd)
 
 
 def spec(internal, broker, **kw):
@@ -30,7 +31,7 @@ def ok(plan) -> Mt5OrderPlan:
 
 
 def kw(**over):
-    base = dict(equity=EQUITY, free_margin=EQUITY, leverage=100)
+    base = dict(equity=EQUITY, free_margin=EQUITY, leverage=100, params=Mt5RiskParams(risk_usdt=RISK))
     return {**base, **over}
 
 
@@ -78,7 +79,7 @@ def test_lots_are_floored_to_the_step_never_rounded_up():
         s = spec("EURUSD", "EURUSD", volumeStep=step, minVolume=min(step, 0.01))
         plan = ok(size_position(s, side="BUY", entry=1.1, sl=1.1 - 0.001955, tick_value=1.0, **kw()))
         assert plan.lots == pytest.approx(expected)
-        assert plan.risk_amount <= plan.risk_target + 1e-9 and plan.risk_pct_actual <= 0.01 + 1e-12
+        assert plan.risk_amount <= plan.risk_target + 1e-9 and plan.risk_amount <= RISK + 1e-9
 
 
 def test_floor_to_step_has_no_float_noise():
@@ -98,9 +99,10 @@ def test_mirror_buy_sell_gives_equal_lots():
 
 def test_below_min_size():
     # риск 3 USD, на лот 200 -> 0.015 лота -> вниз до 0.01: ровно минимум, сделка допустима (риск 2 USD <= 3)
-    edge = ok(size_position(EURUSD, side="BUY", entry=1.1, sl=1.098, tick_value=1.0, **kw(equity=300.0, free_margin=300.0, leverage=1000)))
+    P = lambda usd: Mt5RiskParams(risk_usdt=usd)  # noqa: E731
+    edge = ok(size_position(EURUSD, side="BUY", entry=1.1, sl=1.098, tick_value=1.0, equity=300.0, free_margin=300.0, leverage=1000, params=P(3.0)))
     assert edge.lots == 0.01 and edge.risk_amount == pytest.approx(2.0)
-    r = size_position(EURUSD, side="BUY", entry=1.1, sl=1.098, tick_value=1.0, **kw(equity=100.0, free_margin=100.0))  # риск 1 USD -> 0.005 лота
+    r = size_position(EURUSD, side="BUY", entry=1.1, sl=1.098, tick_value=1.0, equity=100.0, free_margin=100.0, leverage=100, params=P(1.0))  # риск 1 USD -> 0.005 лота
     assert r.reason == "below_min_size" and r.detail["risk_needed_for_min_lot"] == pytest.approx(2.0)
 
 
@@ -111,15 +113,15 @@ def test_above_max_volume_is_exposure_and_not_clamped():
 
 def test_margin_limit_is_exposure():
     # 5 лотов EURUSD при плече 30: 100000 * 1.1 / 30 = 3666.67 на лот -> 18 333 USD
-    common = dict(side="BUY", entry=1.1, sl=1.098, tick_value=1.0, equity=EQUITY, leverage=30)
+    common = dict(side="BUY", entry=1.1, sl=1.098, tick_value=1.0, equity=EQUITY, leverage=30, params=Mt5RiskParams(risk_usdt=RISK))
     r = size_position(EURUSD, free_margin=10_000.0, **common)
     assert isinstance(r, Mt5Rejected) and r.reason == "exposure" and r.detail["why"] == "margin" and r.detail["margin_required"] == pytest.approx(5 * 3666.6667, rel=1e-4)
     assert ok(size_position(EURUSD, free_margin=20_000.0, **common)).margin_required == pytest.approx(18333.33, rel=1e-4)
-    assert size_position(EURUSD, free_margin=20_000.0, params=Mt5RiskParams(max_margin_use=0.5), **common).reason == "exposure"  # запас по марже
+    assert size_position(EURUSD, free_margin=20_000.0, **{**common, "params": Mt5RiskParams(risk_usdt=RISK, max_margin_use=0.5)}).reason == "exposure"  # запас по марже
 
 
 def test_explicit_margin_per_lot_overrides_the_leverage_estimate():
-    r = size_position(EURUSD, side="BUY", entry=1.1, sl=1.098, tick_value=1.0, equity=EQUITY, free_margin=1_000.0, margin_per_lot=300.0)  # 5 * 300 = 1500
+    r = size_position(EURUSD, side="BUY", entry=1.1, sl=1.098, tick_value=1.0, equity=EQUITY, free_margin=1_000.0, margin_per_lot=300.0, params=Mt5RiskParams(risk_usdt=RISK))  # 5 * 300 = 1500
     assert r.reason == "exposure" and r.detail["margin_required"] == pytest.approx(1500.0)
 
 
@@ -146,7 +148,7 @@ def test_programming_errors_raise_config_error():
     with pytest.raises(ConfigError):
         loss_per_lot(EURUSD, 0.0, tick_value=1.0)
     with pytest.raises(ConfigError):
-        Mt5RiskParams(risk_pct=0.5)
+        Mt5RiskParams(risk_usdt=0)
     with pytest.raises(ConfigError):
         Mt5RiskParams(max_margin_use=0)
 
@@ -155,3 +157,14 @@ def test_helpers():
     assert approx_margin_per_lot(EURUSD, 1.1, 100) == pytest.approx(1100.0)
     assert loss_per_lot(XAUUSD, 10.0, tick_value=1.0) == pytest.approx(1000.0)
     assert loss_per_lot(XAUUSD, 10.0, quote_to_account=1.0) == pytest.approx(1000.0)  # 10 * 100 унций
+
+
+def test_default_risk_is_fixed_five_usd_regardless_of_equity_and_stop_size():
+    for equity in (100.0, 100_000.0):  # EURUSD: потеря на лот при SL 20 пипсов = 200 USD -> 5 / 200 = 0.025 -> 0.02 лота
+        plan = ok(size_position(EURUSD, side="BUY", entry=1.1, sl=1.098, tick_value=1.0, equity=equity, free_margin=equity, leverage=100))
+        assert plan.lots == 0.02 and plan.risk_target == 5.0 and plan.risk_amount == pytest.approx(4.0) and plan.risk_amount <= 5.0
+
+
+def test_default_risk_below_one_minimum_lot_is_rejected_not_rounded_up():
+    r = size_position(EURUSD, side="BUY", entry=1.1, sl=1.09, tick_value=1.0, equity=EQUITY, free_margin=EQUITY, leverage=100)  # 5 / 1000 = 0.005 < 0.01
+    assert isinstance(r, Mt5Rejected) and r.reason == "below_min_size"

@@ -60,14 +60,13 @@ def test_tracker_rows_fit_the_schema_exactly():
     tr.submit(mk(), 1000)
     tr.on_tick(tick(100.5, 10))
     tr.on_tick(tick(94.0, 20))
-    tr.on_tick(tick(84.0, 21))
     tr.on_bar_closed("BTCUSDT", IV, 90.0, 1, BarInfo(91.0, 88.0, 2.0))
-    tr.on_tick(tick(90.5, 30))
+    tr.on_tick(tick(79.5, 30))  # единственный тейк 1:4
     for row in rec.trade_history:
         to_args(row, schema.TRADE_COLUMNS)  # лишнее поле или неверный тип - DataError
     for row in rec.closes:
         to_args(row, schema.CLOSE_COLUMNS)
-    assert len(rec.closes) == 3 and rec.trade_history[-1]["status"] == "closed"
+    assert len(rec.closes) == 1 and rec.trade_history[-1]["status"] == "closed"
     with pytest.raises(DataError, match="Лишние"):
         to_args({**rec.trade_history[0], "bogus": 1}, schema.TRADE_COLUMNS)
 

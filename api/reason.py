@@ -60,7 +60,7 @@ def _smc(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[st
         f"3. CHoCH{on_work_tf}: закрытие {'ниже' if short else 'выше'} последнего подтверждённого {'Swing Low' if short else 'Swing High'} "
         f"после свипа - смена характера рынка.",
         f"4. Заявка LIMIT на 50% FVG = {fmt_price(trade.get('planned_entry'))}; SL {fmt_price(trade.get('sl'))} за экстремум свипа с буфером по ATR; "
-        f"TP (3R) {fmt_price(trade.get('tp'))}.",
+        f"TP (1:4) {fmt_price(trade.get('tp'))}.",
     ]
     facts = [("Таймфрейм", interval)] + ([] if htf_tag is None else [(f"Тренд {tf} (HTF Bias)", htf_label)]) + [
              *([("Таймфрейм свипа", sweep_tf)] if isinstance(sweep_tf, str) else []),
@@ -196,6 +196,52 @@ def _trendline(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tu
     return "\n".join(steps), facts
 
 
+def _chr_common(long: bool, meta: dict[str, Any]) -> tuple[str, str]:
+    pts = [fmt_price(v) for v in meta.get("squeeze_points") or [] if isinstance(v, (int, float))]
+    squeeze = (f"{'повышающиеся минимумы (higher lows)' if long else 'понижающиеся максимумы (lower highs)'} "
+               + (" -> ".join(pts) if pts else "—"))
+    return squeeze, f"{'Bullish' if long else 'Bearish'} (жёсткий фильтр: только по тренду H4)"
+
+
+def _chr_horizontal(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[str, list[tuple[str, str]]]:
+    long = trade["side"] == "long"
+    level, touches = _num(meta, "level"), meta.get("touches")
+    squeeze, trend = _chr_common(long, meta)
+    steps = [
+        f"0. Тренд H4: {meta.get('htf_label') or '—'} - {'лонг' if long else 'шорт'} разрешён только по тренду.",
+        f"1. {'Сопротивление' if long else 'Поддержка'} {fmt_price(level)}: {touches if touches is not None else '—'} подтверждённых касаний "
+        f"за {meta.get('window') or '—'} баров.",
+        f"2. Поджатие к уровню: {squeeze}.",
+        f"3. Пробой: закрытие {'выше' if long else 'ниже'} уровня полнотелой свечой (тело {_x(_num(meta, 'body_frac'), '.0%')} размаха).",
+        f"4. {_entry_line(trade)} Стоп за последней точкой поджатия, статичный; тейк 1:4 ({fmt_price(trade.get('tp'))}) на весь объём, частичных фиксаций и безубытка нет.",
+    ]
+    facts = [("Таймфрейм", interval), ("Тренд H4", trend), ("Уровень", fmt_price(level)), ("Касаний уровня", str(touches if touches is not None else "—")),
+             ("Поджатие", squeeze), ("Тело пробойной свечи", _x(_num(meta, "body_frac"), ".0%")), ("Риск, ATR", _x(_num(meta, "risk_atr"), ".2f")),
+             ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
+    return "\n".join(steps), facts
+
+
+def _chr_trendline(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[str, list[tuple[str, str]]]:
+    long = trade["side"] == "long"
+    touches = meta.get("touches")
+    squeeze, trend = _chr_common(long, meta)
+    line = "сопротивления (нисходящая)" if long else "поддержки (восходящая)"
+    steps = [
+        f"0. Тренд H4: {meta.get('htf_label') or '—'} - {'лонг' if long else 'шорт'} разрешён только по тренду.",
+        f"1. Наклонная линия {line}: {fmt_price(_num(meta, 'anchor1_price'))} -> {fmt_price(_num(meta, 'anchor2_price'))}, "
+        f"наклон {_x(_num(meta, 'slope_atr'), '+.3f')} ATR/бар, касаний {touches if touches is not None else '—'}, экстремумы за линию не выходили.",
+        f"2. Поджатие к линии: {squeeze}.",
+        f"3. Пробой: закрытие {'выше' if long else 'ниже'} линии ({fmt_price(_num(meta, 'line_level'))}) полнотелой свечой "
+        f"(тело {_x(_num(meta, 'body_frac'), '.0%')} размаха).",
+        f"4. {_entry_line(trade)} Стоп за последней точкой поджатия, статичный; тейк 1:4 ({fmt_price(trade.get('tp'))}) на весь объём, частичных фиксаций и безубытка нет.",
+    ]
+    facts = [("Таймфрейм", interval), ("Тренд H4", trend), ("Линия на сигнале", fmt_price(_num(meta, "line_level"))),
+             ("Наклон, ATR за бар", _x(_num(meta, "slope_atr"), "+.3f")), ("Касаний линии", str(touches if touches is not None else "—")),
+             ("Поджатие", squeeze), ("Тело пробойной свечи", _x(_num(meta, "body_frac"), ".0%")), ("Риск, ATR", _x(_num(meta, "risk_atr"), ".2f")),
+             ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
+    return "\n".join(steps), facts
+
+
 def build_reason(trade: dict[str, Any], meta: dict[str, Any] | None, geometry: list[dict[str, Any]]) -> dict[str, Any]:
     """trade - строка сделки (ключи strategy_id/strategy_name, side, coin, planned_entry, sl, tp, entry_price). -> {title, summary, facts[], levels[]}."""
     meta = meta or {}
@@ -217,12 +263,17 @@ def build_reason(trade: dict[str, Any], meta: dict[str, Any] | None, geometry: l
         title, (summary, facts) = "Horizontal Breakout", _horizontal(trade, meta, interval)
     elif name == "Trendline_Breakout":
         title, (summary, facts) = "Trendline Breakout", _trendline(trade, meta, interval)
+    elif name == "Horizontal_Breakout_CHR":
+        title, (summary, facts) = "Horizontal Breakout (CHR)", _chr_horizontal(trade, meta, interval)
+    elif name == "Trendline_Breakout_CHR":
+        title, (summary, facts) = "Trendline Breakout (CHR)", _chr_trendline(trade, meta, interval)
     else:
         title = name
         summary = "Причина входа для этой стратегии не описана в API; ниже - все параметры сигнала из снапшота."
         facts = [(str(k), fmt_price(v) if isinstance(v, float) else str(v)) for k, v in sorted(meta.items())]
     labels = [str(g.get("label")) for g in geometry if g.get("label")]
-    htf_tag = _htf(meta)[0] if name in ("smc", "SMC_Pro_Trend", "SMC_Counter_Trend", "Horizontal_Breakout", "Trendline_Breakout") else None
+    htf_tag = _htf(meta)[0] if name in ("smc", "SMC_Pro_Trend", "SMC_Counter_Trend", "Horizontal_Breakout", "Trendline_Breakout",
+                                         "Horizontal_Breakout_CHR", "Trendline_Breakout_CHR") else None
     return {
         "title": f"{title} · {SIDE_RU.get(trade['side'], trade['side'])} · {trade['coin']}" + ("" if htf_tag is None else f" ({htf_tag})"),
         "summary": summary,
