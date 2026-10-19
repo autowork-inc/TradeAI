@@ -71,7 +71,7 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT")
 # 2026-10-18 (решение пользователя): состав Binance-крипты определяет АВТОСЕЛЕКТОР по суточному объёму (orchestrator/universe.py, обновление раз в 6 ч);
 # жёстко закреплены только BTC и ETH. Здесь - статичная основа процесса: закреплённые монеты и MT5-символы (Forex/металлы).
 UNIVERSE_PINNED = ("BTCUSDT", "ETHUSDT")  # всегда live-уровень, независимо от объёма
-CORE_SHADOW_SYMBOLS = UNIVERSE_PINNED + ("EURUSD", "XAUUSD", "XAGUSD")
+CORE_SHADOW_SYMBOLS = UNIVERSE_PINNED + ("EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "XAGUSD")  # 2026-10-19: GBPUSD и USDJPY - для профиля CHR клиента (❓ имена у брокера не сверялись: нет символа - ConfigError при старте MT5-данных)
 SHADOW_SYMBOLS = CORE_SHADOW_SYMBOLS  # статичная основа; монеты автоселектора добавляются в работающий процесс (потоки подписываются без разрыва существующих)
 UNIVERSE_AUTO = os.environ.get("UNIVERSE_AUTO", "true").strip().lower() not in ("0", "false", "no", "off")
 UNIVERSE_REFRESH_S = 6 * 3600.0
@@ -212,7 +212,7 @@ LIVE_RISK_STATE_NAME = ".live_risk_state.json"  # защёлка блокиро�
 # Мульти-биржевой боевой контур (решение пользователя 2026-10-13, вариант А): какой символ исполняется на какой площадке. Любой другой символ
 # получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - MetaApiLiveClient (MT5).
 LIVE_BINANCE_SYMBOLS = SymbolSet(UNIVERSE_PINNED)  # 2026-10-18: live-уровень = BTC, ETH + монеты с объёмом >= UNIVERSE_LIVE_MIN_USDT (автоселектор дополняет набор на месте); TRADE_MODE по умолчанию shadow
-LIVE_MT5_SYMBOLS = ("EURUSD", "XAUUSD", "XAGUSD")
+LIVE_MT5_SYMBOLS = ("EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "XAGUSD")
 # Стратегии, которым разрешены только перечисленные символы (остальные - на любых). OBI_Breakout читает L2-стакан и ленту: они есть только у Binance Futures.
 STRATEGY_SYMBOLS = {"OBI_Breakout": LIVE_BINANCE_SYMBOLS}  # OBI_Breakout читает стакан и ленту: только ликвидный live-уровень (>= 400M); Binance Test и MT5 исключены
 LIVE_ENABLE_MT5 = _env_bool("LIVE_ENABLE_MT5")  # подключать MT5 (MetaApi) к боевому контуру; по умолчанию выключено: Binance-контур работает без ключей MetaApi

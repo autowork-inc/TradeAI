@@ -210,7 +210,7 @@ def test_shadow_symbols_are_the_combat_pool_without_touching_the_ml_bot_symbols(
     assert config.SYMBOLS == ("BTCUSDT", "ETHUSDT")  # сборщики стакана и live_run читают SYMBOLS: пул ML-контура не меняется
     # 2026-10-11: боевой пул вместо тестового; BTC/ETH остаются только у ML-контура (SYMBOLS)
     # 2026-10-18: статичная основа - закреплённые BTC/ETH и MT5; остальные Binance-монеты определяет автоселектор по объёму (tests/orchestrator/test_universe.py)
-    assert config.SHADOW_SYMBOLS == ("BTCUSDT", "ETHUSDT", "EURUSD", "XAUUSD", "XAGUSD")
+    assert config.SHADOW_SYMBOLS == ("BTCUSDT", "ETHUSDT", "EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "XAGUSD")
     config.validate()
 
 

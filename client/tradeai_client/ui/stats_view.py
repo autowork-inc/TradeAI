@@ -30,13 +30,15 @@ class StatsView:
         self._side = _dropdown("Сторона", [("all", "Все"), ("long", "Лонг"), ("short", "Шорт")], 120, self._changed)
         self._period = _dropdown("Период", [(k, v[0]) for k, v in PERIODS.items()], 170, self._changed)
         self._stamp = ft.Text("", size=12, color=w.MUTED)
-        self._goal = w.GoalBar(fmt.TRADES_GOAL)
+        self._goal = w.GoalBar(fmt.TRADES_GOAL, width=150)
         self._body = ft.Column(spacing=14)
         self.control = ft.Column(
-            [ft.Container(height=2), ft.Row([self._mode, self._coin.control, self._strategy, self._side, self._period,
-                     ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp],
-                     spacing=10, run_spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-             ft.Row([self._goal.control]),
+            [ft.Container(height=2),
+             # одна линия: фильтры слева (переносятся при узком окне), карточка «значимость выводов» - у правого края
+             ft.Row([ft.Row([self._mode, self._coin.control, self._strategy, self._side, self._period,
+                             ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp],
+                            spacing=10, run_spacing=8, wrap=True, expand=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                     self._goal.control], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START),
              self._body], expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
         self.apply_profile()
 

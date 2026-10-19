@@ -121,7 +121,8 @@ class Shell:
         self._render_account()
 
     async def start(self) -> None:
-        self.page.run_task(self.stats._goal.shimmer)  # переливающаяся рамка карточки значимости
+        for goal in (self.stats._goal, self.analysis._goal):  # переливающаяся рамка карточки значимости
+            self.page.run_task(goal.shimmer)
         if self._settings_error:
             self.show_settings(note=self._settings_error)
         elif not self.settings.api_key:

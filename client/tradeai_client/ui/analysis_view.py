@@ -46,10 +46,12 @@ class AnalysisView:
         self._bar = ft.ProgressBar(width=260, value=0, visible=False, color=w.ACCENT, bgcolor=w.BORDER)
         self._stage = ft.Text("", size=12, color=w.MUTED)
         self._info = ft.Text("", size=12, color=w.MUTED)
+        self._goal = w.GoalBar(fmt.TRADES_GOAL, width=150)  # «значимость выводов»: сделок в отчёте / 200, у правого края строки фильтров
         self._body = ft.Column(spacing=14)
         self.control = ft.Column([ft.Container(height=2),
-                                  ft.Row([self._mode, self._before, self._after, self._run, self._ring, ft.Column([self._bar, self._stage], spacing=2, tight=True)],
-                                         spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True), self._info, self._body],
+                                  ft.Row([ft.Row([self._mode, self._before, self._after, self._run, self._ring, ft.Column([self._bar, self._stage], spacing=2, tight=True)],
+                                                 spacing=10, run_spacing=8, wrap=True, expand=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                                          self._goal.control], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START), self._info, self._body],
                                  expand=True, scroll=ft.ScrollMode.AUTO, spacing=12)
         self._job_id: str | None = None
         self._report: dict | None = None
@@ -72,6 +74,7 @@ class AnalysisView:
         if self._running:
             return
         self._report, self._job_id = None, None
+        self._goal.set(0)
         self._placeholder("Нажмите «Run Deep Analysis»: анализатор посчитает метрики по закрытым сделкам выбранного режима.")
         if w.attached(self.control):
             self.control.update()
@@ -166,6 +169,7 @@ class AnalysisView:
         for text in r.get("warnings") or []:
             out.append(w.banner(text, w.AMBER))
         d, o = r["data"], r["overall"]
+        self._goal.set(int(d["trades"]))
         out.append(w.label(f"Выборка: {d['trades']} закрытых сделок · {', '.join(fmt.STRATEGY_RU.get(s, s) for s in d['strategies']) or '—'} · "
                            f"{fmt.fmt_local(d['from'])} — {fmt.fmt_local(d['to'])} · отчёт {job_id}", size=12))
         out.append(self._overall_kpis(o))
