@@ -108,6 +108,19 @@ deploy_analyzer() {  # изолированный сервис: любой сб�
     return 0
 }
 
+deploy_web() {  # изолированный сервис: любой сбой - предупреждение, бот и его откат не затрагиваются
+    flag="${APPLY_WEB:-$(env_value APPLY_WEB)}"
+    case "${flag:-true}" in false|0|no|off) log "веб-версия: автоуправление выключено (APPLY_WEB)"; return 0 ;; esac
+    [ -f web/Dockerfile ] || { log "веб-версия: в архиве нет web/Dockerfile - пропуск"; return 0; }
+    if [ -z "$(env_value WEB_LOGIN)" ] || [ -z "$(env_value WEB_PASSWORD)" ]; then
+        log "ПРЕДУПРЕЖДЕНИЕ: веб-версия не запущена: в $ENV_FILE нет WEB_LOGIN / WEB_PASSWORD (auto_deploy --web-login --web-password или вручную)" >&2
+        return 0
+    fi
+    log "веб-версия: сборка и запуск (shadow.sh web-up)"
+    if ./deploy/shadow.sh web-up; then log "веб-версия запущена"; else log "ПРЕДУПРЕЖДЕНИЕ: веб-версия не запустилась (бот работает; ./deploy/shadow.sh logs web)" >&2; fi
+    return 0
+}
+
 unpack() {  # $1 = архив
     tar --force-local -xzf "$1" -C "$ROOT"
     chmod +x deploy/shadow.sh deploy/apply.sh
@@ -173,6 +186,7 @@ apply_archive() {  # $1 = архив, $2 = force|normal
         rm -f "$archive.sha256" "$marker"
         log "ГОТОВО: версия ${sha%"${sha#????????????}"} применена, контур $contour"
         deploy_analyzer
+        deploy_web
         return 0
     fi
     log "ПРОВАЛ применения: откат на прежнюю версию" >&2

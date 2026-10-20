@@ -1,0 +1,3 @@
+flet==1.0.4
+flet-web==1.0.4
+aiohttp>=3.9,<4

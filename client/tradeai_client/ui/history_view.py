@@ -48,7 +48,7 @@ class HistoryView:
         self.control = ft.Column([
             ft.Container(height=2),
             ft.Row([self._mode.control, self._status.control, self._coin.control, self._strategy.control, self._bar.control, ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy,
-                    ft.Container(expand=True), self._info, self._prev, self._next], spacing=10),
+                    self._info, self._prev, self._next], spacing=10, run_spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             w.label(hint, size=12),
             ft.Row([header], scroll=ft.ScrollMode.AUTO),
             ft.Column([self._rows], scroll=ft.ScrollMode.AUTO, expand=True),

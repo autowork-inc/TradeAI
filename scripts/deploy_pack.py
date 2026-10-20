@@ -24,10 +24,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN_FILES = ("docker-compose.yml", "Dockerfile", ".dockerignore", "requirements.txt", ".env.shadow.example", ".env.example",
-             "README.md", "deploy/shadow.sh", "deploy/apply.sh")
+             "README.md", "deploy/shadow.sh", "deploy/apply.sh", "web/nginx.conf")
 FULL_ONLY = (".env",)
 EXCLUDED_PARTS = {"__pycache__", ".venv", ".git", "tests", ".pytest_cache", "data", "logs", "backups", "node_modules", "algo_live", "client", "mcp_server"}
-EXTRA_DOCKERFILES = ("api/Dockerfile", "analyzer/Dockerfile")  # образы дополнительных сервисов; контекст сборки у всех - корень проекта
+EXTRA_DOCKERFILES = ("api/Dockerfile", "analyzer/Dockerfile", "web/Dockerfile")  # образы дополнительных сервисов; контекст сборки у всех - корень проекта
 FORBIDDEN_NAMES = {".env", ".env.shadow"}  # в shadow-архиве недопустимы
 FORBIDDEN_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 EXECUTABLE = {"deploy/shadow.sh", "deploy/apply.sh"}
@@ -47,7 +47,9 @@ def dockerfile_sources(dockerfile: Path = ROOT / "Dockerfile") -> list[str]:
 def _walk(path: Path, root: Path) -> list[Path]:
     if path.is_file():
         return [path]
-    return [p for p in sorted(path.rglob("*")) if p.is_file() and not (EXCLUDED_PARTS & set(p.relative_to(root).parts)) and p.suffix != ".pyc"]
+    # исключения считаются от самого пути-источника: `client/tradeai_client` для веб-образа попадает в архив, хотя каталог `client` целиком (venv, dist, build) - нет
+    base = path.parent if path.parent != root else root
+    return [p for p in sorted(path.rglob("*")) if p.is_file() and not (EXCLUDED_PARTS & set(p.relative_to(base).parts)) and p.suffix != ".pyc"]
 
 
 def collect(target: str = "shadow", root: Path = ROOT) -> list[Path]:
@@ -55,7 +57,7 @@ def collect(target: str = "shadow", root: Path = ROOT) -> list[Path]:
     extra = [d for d in EXTRA_DOCKERFILES if (root / d).exists()]
     wanted = list(dict.fromkeys([*dockerfile_sources(root / "Dockerfile"), *(src for d in extra for src in dockerfile_sources(root / d)),
                                  *extra, *RUN_FILES, *(FULL_ONLY if target == "full" else ())]))
-    optional = {".env.example", ".env.shadow.example", "README.md"}
+    optional = {".env.example", ".env.shadow.example", "README.md", "web/nginx.conf"}
     missing = [w for w in wanted if not (root / w).exists() and w not in optional]
     if missing:
         sys.exit(f"Нет обязательных файлов/каталогов: {', '.join(missing)}")

@@ -69,7 +69,10 @@ def test_real_repo_archive_contains_everything_the_image_needs_and_no_secrets(tm
     assert not any(n.startswith(("tests/", "data/", "logs/", "out/algo_live/", ".venv/")) for n in names)
     # Этап 6: образ API едет на сервер (api/Dockerfile и всё, что он копирует), настольный клиент - нет
     assert {"api/Dockerfile", "api/requirements.txt", "api/main.py", "api/security.py", "api/livestate.py"} <= names
-    assert not any(n.startswith("client/") for n in names)
+    # настольный клиент на сервер не едет; в архиве только то, что нужно веб-образу (client/tradeai_client и client/web_app.py), без venv/dist/build
+    assert not any(n.startswith("client/") and not n.startswith(("client/tradeai_client/", "client/web_app.py")) for n in names)
+    assert {"web/Dockerfile", "web/requirements.txt", "web/nginx.conf", "client/web_app.py", "client/tradeai_client/web/app.py"} <= names
+    assert not any(".venv" in n or n.startswith(("client/dist", "client/build")) for n in names)
 
 
 def test_client_directory_is_never_packed_even_if_it_sits_inside_a_copied_directory(tmp_path):
@@ -306,5 +309,24 @@ def test_shadow_script_has_analyzer_commands_and_apply_runs_it_after_a_successfu
     fn = apply[apply.index("deploy_analyzer() {"):apply.index("unpack() {")]
     assert "return 0" in fn and "exit" not in fn and "die " not in fn  # сбой анализатора не откатывает и не валит выкатку бота
     ad = (ROOT / "scripts" / "auto_deploy.py").read_text(encoding="utf-8")
-    assert '"analyzer")' in ad and ad.count('"analyzer"') >= 2 and "--profile analytics ps -a" in ad  # шаг 9 проверяет анализатор
+    assert '"analyzer", "web", "nginx")' in ad and ad.count('"analyzer"') >= 2 and "--profile analytics --profile web ps -a" in ad  # шаг 9 проверяет анализатор и веб
     assert 'env_append "ANALYZER_DB_PASSWORD=$pw"' in text
+
+
+def test_web_client_is_deployed_isolated_from_the_bot_and_checked_by_the_pipeline():
+    """Веб-версия (2026-10-20): отдельный профиль compose, запуск ПОСЛЕ успешного применения бота, сбой не откатывает бота; вход только из .env.shadow; шаг 9 её проверяет."""
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    web = compose[compose.index("\n  web:"):compose.index("\nvolumes:")]
+    assert 'profiles: ["web"]' in web and "read_only: true" in web and "cap_drop:" in web and "WEB_PASSWORD: ${WEB_PASSWORD:-}" in web
+    assert "nginxinc/nginx-unprivileged" in web and "${WEB_PUBLIC_PORT:-8080}:8080" in web and "./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro" in web
+    assert "BINANCE" not in web and "DATABASE_URL" not in web  # ни ключей биржи, ни доступа к БД
+    shadow = (ROOT / "deploy" / "shadow.sh").read_text(encoding="utf-8")
+    assert "web-up)" in shadow and "web-down)" in shadow and "--profile web up -d --build" in shadow and "не задан $k" in shadow
+    apply = (ROOT / "deploy" / "apply.sh").read_text(encoding="utf-8")
+    fn = apply[apply.index("deploy_web() {"):apply.index("unpack() {")]
+    assert "return 0" in fn and "exit" not in fn and "die " not in fn and "APPLY_WEB" in fn
+    assert apply.index('ГОТОВО: версия') < apply.index("        deploy_web") < apply.index("ПРОВАЛ применения")
+    nginx = (ROOT / "web" / "nginx.conf").read_text(encoding="utf-8")
+    assert "$connection_upgrade" in nginx and "proxy_set_header Upgrade" in nginx and "web:8550" in nginx  # WebSocket проксируется
+    ad = (ROOT / "scripts" / "auto_deploy.py").read_text(encoding="utf-8")
+    assert "shadow.sh web-up" in ad and "--web-login" in ad and "--web-password" in ad

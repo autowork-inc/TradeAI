@@ -107,3 +107,14 @@ def test_client_build_runs_before_any_ssh_connection(monkeypatch):
     with pytest.raises(SystemExit):
         ad.main([])
     assert calls == ["client"]
+
+
+def test_web_credentials_are_validated_together_and_never_echoed(capsys):
+    assert ad.validate_web(None, None) == {}
+    assert ad.validate_web("Santa", "Cheshir") == {"WEB_LOGIN": "Santa", "WEB_PASSWORD": "Cheshir"}
+    for bad in (("Santa", None), (None, "Cheshir"), ("Santa", "pa ss"), ("Santa", 'p"w1'), ("Sa nta", "Cheshir"), ("Santa", "abc")):
+        with pytest.raises(SystemExit):
+            ad.validate_web(*bad)
+    assert "Cheshir" not in capsys.readouterr().err
+    assert "WEB_PASSWORD" in ad.METAAPI_KEYS and "WEB_LOGIN" in ad.merge_env_command("~/trading")  # вписываются в .env.shadow тем же безопасным способом
+    assert "web" in ad.REQUIRED_SERVICES and "nginx" in ad.LIVE_REQUIRED_SERVICES

@@ -11,6 +11,9 @@
 .exe и version.json уходят на VPS в ./data/updates). Любой ненулевой код возврата сборки немедленно прерывает деплой ДО подключения к серверу;
 `--skip-client-build` пропускает шаг (только бэкенд). Версия клиента для автообновления берётся из client/tradeai_client/__init__.py: клиенты обновляются,
 только если она НОВЕЕ опубликованной, поэтому перед выпуском поднимите версию и добавьте запись в client/tradeai_client/changelog.json.
+Веб-версия для телефона (2026-10-20, профиль compose `web`: контейнеры web + nginx, порт 8080): после применения обновления шаг 8 запускает
+`deploy/shadow.sh web-up`; вход - `--web-login` / `--web-password` (или WEB_LOGIN / WEB_PASSWORD в окружении; вписываются в ~/trading/.env.shadow, в логах и в git их нет;
+уже записанные на сервере остаются). Шаг 9 проверяет web и nginx наравне с ботом.
 Шаги: 1 архив (deploy_pack, цель shadow, без ключей) · 2 SSH + SFTP · 3 Docker · 4 распаковка · 5 права .env* ·
 6 остановка старых контейнеров · 7 запуск · 8 PostgreSQL и миграции · 9 глубокая проверка (контейнеры, логи, блокировка IP Binance).
 Первый деплой (нет ~/trading/.env.shadow): распаковка и `deploy/shadow.sh up`. Повторный деплой (2026-10-18): шаги 4/6/7 заменены на
@@ -45,14 +48,14 @@ CLIENT_BUILD_CMD = ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", r".
 TIMEOUT = 20
 TOTAL = 9
 DC = "docker compose --env-file .env.shadow"
-REQUIRED_SERVICES = ("postgres", "shadow-run", "api", "analyzer")  # analyzer - изолированный сервис профиля analytics (его поднимает apply.sh / analyzer-up)
+REQUIRED_SERVICES = ("postgres", "shadow-run", "api", "analyzer", "web", "nginx")  # analyzer - изолированный сервис профиля analytics (его поднимает apply.sh / analyzer-up)
 LOG_WINDOW = "10m"  # окно логов шага 9: только свежее (старые ошибки прошлых запусков не считаются)
-LIVE_REQUIRED_SERVICES = ("postgres", "shadow-live", "api", "analyzer")
+LIVE_REQUIRED_SERVICES = ("postgres", "shadow-live", "api", "analyzer", "web", "nginx")
 INCOMING = "trading_incoming"  # каталог на сервере для присланных архивов (его же читает cron: deploy/apply.sh --pending)
 EX_DEFERRED = 75  # deploy/apply.sh: обновление отложено до закрытия боевых позиций
 ENV_FILE = ".env.shadow"
 METAAPI_TMP = ".metaapi.tmp"
-METAAPI_KEYS = ("METAAPI_TOKEN", "METAAPI_ACCOUNT_ID")
+METAAPI_KEYS = ("METAAPI_TOKEN", "METAAPI_ACCOUNT_ID", "WEB_LOGIN", "WEB_PASSWORD")  # значения, которые auto_deploy вписывает в .env.shadow
 
 # Признаки блокировки IP биржей (HTTP 451 — гео/юрисдикция, 429/418 — лимиты и бан IP, отказ рукопожатия WebSocket).
 BLOCK_PATTERNS = (
@@ -124,6 +127,17 @@ def validate_metaapi(token: str | None, account: str | None) -> dict[str, str]:
     return {"METAAPI_TOKEN": token, "METAAPI_ACCOUNT_ID": account}
 
 
+def validate_web(login: str | None, password: str | None) -> dict[str, str]:
+    """Вход в веб-версию: задаётся парой. Значения без пробелов, кавычек и обратной косой черты (они попадают в .env.shadow); в ошибки не выводятся."""
+    if bool(login) != bool(password):
+        fail("Веб-версия: логин и пароль задаются вместе (--web-login и --web-password)")
+    if not login:
+        return {}
+    if not re.fullmatch(r"[A-Za-z0-9._@%+=:-]{2,64}", login) or not re.fullmatch(r"[A-Za-z0-9._@%+=:-]{4,64}", password):
+        fail("--web-login / --web-password: латиница, цифры и . _ @ % + = : - (без пробелов, кавычек и обратной косой черты), пароль от 4 символов")
+    return {"WEB_LOGIN": login, "WEB_PASSWORD": password}
+
+
 def merge_env_command(d: str) -> str:
     """Команда на сервере: строки METAAPI_* из временного файла заменяют/дописывают одноимённые в .env.shadow. Секретов в тексте команды нет."""
     return (f"cd {d} && umask 077 && touch {ENV_FILE} && {{ [ -z \"$(tail -c1 {ENV_FILE})\" ] || echo >> {ENV_FILE}; }} && "
@@ -152,6 +166,8 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--key", default=os.environ.get("VPS_SSH_KEY_PATH"), help="путь к приватному SSH-ключу")
     ap.add_argument("--metaapi-token", default=os.environ.get("METAAPI_TOKEN"), help="токен MetaApi (лучше окружение METAAPI_TOKEN); в логи не выводится")
     ap.add_argument("--metaapi-account", default=os.environ.get("METAAPI_ACCOUNT_ID"), help="id счёта MetaApi (или METAAPI_ACCOUNT_ID)")
+    ap.add_argument("--web-login", default=os.environ.get("WEB_LOGIN"), help="логин входа в веб-версию (или WEB_LOGIN)")
+    ap.add_argument("--web-password", default=os.environ.get("WEB_PASSWORD"), help="пароль входа в веб-версию (лучше окружение WEB_PASSWORD); в логи не выводится")
     ap.add_argument("--remote-dir", default="trading", help="каталог на сервере относительно домашнего (по умолчанию trading)")
     ap.add_argument("--health-wait", type=int, default=15, help="секунд ожидания перед глубокой проверкой (по умолчанию 15)")
     ap.add_argument("--keep-archive", action="store_true", help="не удалять локальный архив после деплоя")
@@ -163,7 +179,7 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
         fail("хост не задан")
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", a.remote_dir) or a.remote_dir.startswith("/") or ".." in a.remote_dir:
         fail("--remote-dir: только относительный путь из латиницы, цифр и ._/-")
-    a.metaapi = validate_metaapi(a.metaapi_token, a.metaapi_account)
+    a.metaapi = {**validate_metaapi(a.metaapi_token, a.metaapi_account), **validate_web(a.web_login, a.web_password)}
     if not a.key and not a.password:
         a.password = getpass.getpass(f"Пароль {a.user}@{a.host}: ")
     return a
@@ -275,9 +291,9 @@ def main(argv: list[str] | None = None) -> int:
         ok(".env / .env.shadow (если есть) — 600")
         if a.metaapi:
             push_metaapi(cli, a.remote_dir, a.metaapi)
-            ok("METAAPI_TOKEN / METAAPI_ACCOUNT_ID записаны в .env.shadow (значения не выводятся)")
+            ok(f"{' / '.join(a.metaapi)} записаны в .env.shadow (значения не выводятся)")
         else:
-            print(_c("33", "  MetaApi: ключи не заданы, .env.shadow не менялся (Forex/металлы заработают после ввода ключей)"))
+            print(_c("33", "  Ключи MetaApi и вход в веб-версию не заданы, .env.shadow не менялся (уже записанные на сервере остаются)"))
 
         if incremental:
             step(6, "Остановка старых контейнеров не нужна: deploy/apply.sh сам перезапускает действующий контур")
@@ -308,7 +324,8 @@ def main(argv: list[str] | None = None) -> int:
             print(_c("1;32", "\nДеплой принят (обновление ждёт закрытия позиций). Дальше на сервере: cd " + d + " && ./deploy/apply.sh --status"))
             return 0
 
-        step(8, "PostgreSQL и миграции")
+        step(8, "Веб-версия (web + nginx) и PostgreSQL с миграциями")
+        run(cli, f"cd {d} && ./deploy/shadow.sh web-up", "запуск веб-версии (shadow.sh web-up)")
         run(cli, f"cd {d} && {DC} exec -T postgres pg_isready -U tradeai -d tradeai", "PostgreSQL не готов")
         applied = ""
         for _ in range(12):  # миграции применяет shadow-run при старте — даём до минуты
@@ -327,14 +344,14 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(a.health_wait)
         required = LIVE_REQUIRED_SERVICES if contour == "live" else REQUIRED_SERVICES
         svc = "shadow-live" if contour == "live" else "shadow-run"
-        _, ps = run(cli, f"cd {d} && {DC} --profile live --profile analytics ps -a --format '{{{{.Service}}}} {{{{.State}}}} {{{{.Health}}}}'", "docker compose ps", quiet=True)
+        _, ps = run(cli, f"cd {d} && {DC} --profile live --profile analytics --profile web ps -a --format '{{{{.Service}}}} {{{{.State}}}} {{{{.Health}}}}'", "docker compose ps", quiet=True)
         states, health = parse_services(ps), parse_health(ps)
         bad = {s: states.get(s, "нет") for s in required if states.get(s) != "running"}
         bad.update({s: "unhealthy (healthcheck не проходит)" for s in required if health.get(s) == "unhealthy"})
         blocked: list[str] = []
         errors: list[str] = []
         for s_ in required:  # логи ВСЕХ обязательных сервисов (а не только бота): ошибка анализатора/БД/API не должна проходить незамеченной
-            _, logs = run(cli, f"cd {d} && {DC} --profile live --profile analytics logs --no-color --since {LOG_WINDOW} --tail 200 {s_}", f"логи {s_}", quiet=True)
+            _, logs = run(cli, f"cd {d} && {DC} --profile live --profile analytics --profile web logs --no-color --since {LOG_WINDOW} --tail 200 {s_}", f"логи {s_}", quiet=True)
             b, e = scan_logs(logs)
             blocked += b if s_ == svc else []  # блокировка IP Binance - только про бота
             errors += [f"[{s_}] {x}" for x in e]

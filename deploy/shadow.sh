@@ -220,10 +220,10 @@ case "$cmd" in
         check_docker; ensure_env
         svc="${2:-shadow-run}"
         case "$svc" in
-            shadow-run|shadow-live|api|postgres|analyzer) ;;
-            *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | shadow-live | api | postgres | analyzer)" >&2; exit 2 ;;
+            shadow-run|shadow-live|api|postgres|analyzer|web|nginx) ;;
+            *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | shadow-live | api | postgres | analyzer | web | nginx)" >&2; exit 2 ;;
         esac
-        $DC --profile live --profile analytics logs -f --tail 50 "$svc"
+        $DC --profile live --profile analytics --profile web logs -f --tail 50 "$svc"
         ;;
     apikey)
         check_docker; ensure_env
@@ -291,13 +291,35 @@ case "$cmd" in
         $DC --profile live --profile analytics stop analyzer
         echo "Анализатор остановлен (том analyzer_data с отчётами сохранён)."
         ;;
+    web-up)
+        check_docker; ensure_env
+        for k in WEB_LOGIN WEB_PASSWORD; do
+            grep -q "^$k=." "$ENV_FILE" || { echo "ОШИБКА: в $ENV_FILE не задан $k (вход в веб-версию не может быть открытым)." >&2; exit 1; }
+        done
+        echo "== Сборка и запуск веб-версии (web + nginx; бот не перезапускается)"
+        $DC --profile web up -d --build --force-recreate --no-deps web nginx
+        i=0
+        while [ "$i" -lt 24 ]; do
+            $DC --profile web ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | grep -q '^web running healthy' && break
+            $DC --profile web ps --format '{{.Service}} {{.State}}' 2>/dev/null | grep -q '^web exited' && { echo "ОШИБКА: web остановился:" >&2; $DC --profile web logs --tail 40 web >&2; exit 1; }
+            i=$((i + 1)); sleep 5
+        done
+        $DC --profile web ps web nginx
+        port="$(grep '^WEB_PUBLIC_PORT=' "$ENV_FILE" | tail -n1 | cut -d= -f2)"
+        echo "Готово: веб-версия на порту ${port:-8080} сервера (http://<IP сервера>:${port:-8080}). Лог: ./deploy/shadow.sh logs web"
+        ;;
+    web-down)
+        check_docker; ensure_env
+        $DC --profile web stop web nginx
+        echo "Веб-версия остановлена."
+        ;;
     down)
         check_docker; ensure_env
         $DC --profile live stop api shadow-run shadow-live postgres
         echo "Остановлено. Данные БД (том pgdata) и журнал ./data/shadow сохранены. Запуск: ./deploy/shadow.sh up"
         ;;
     *)
-        echo "Использование: $0 {up|up-live|status|api|logs [сервис]|stats|backup|psql|apikey|analyzer-init|analyzer-up|analyzer-down|down}" >&2
+        echo "Использование: $0 {up|up-live|status|api|logs [сервис]|stats|backup|psql|apikey|analyzer-init|analyzer-up|analyzer-down|web-up|web-down|down}" >&2
         exit 2
         ;;
 esac

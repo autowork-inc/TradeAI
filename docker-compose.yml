@@ -290,6 +290,60 @@ services:
       retries: 3
       start_period: 20s
 
+  # Веб-версия клиента для телефона (2026-10-20, профиль web; не входит в up / up-live: падение или пересборка веба не трогают бота. Запуск: ./deploy/shadow.sh web-up,
+  # его же вызывает apply.sh после обновления). web - Flet web (без ключей биржи; ключ API бота - из окружения, в браузер не попадает), вход по WEB_LOGIN / WEB_PASSWORD
+  # из .env.shadow. nginx - единственный, кто опубликован наружу (порт WEB_PUBLIC_PORT, по умолчанию 8080), WebSocket проксируется.
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    profiles: ["web"]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    environment:
+      WEB_LOGIN: ${WEB_LOGIN:-}
+      WEB_PASSWORD: ${WEB_PASSWORD:-}
+      WEB_SESSION_SECRET: ${WEB_SESSION_SECRET:-}
+      TRADEAI_API_KEY: ${API_KEY:-}
+      TRADEAI_API_URL: http://api:8000
+      WEB_PORT: "8550"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 200
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8550/', timeout=8).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  nginx:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    profiles: ["web"]
+    restart: unless-stopped
+    depends_on:
+      - web
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PUBLIC_PORT:-8080}:8080"
+    volumes:
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.25
+
 volumes:
   pgdata:
   analyzer_data:
