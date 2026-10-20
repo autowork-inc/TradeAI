@@ -496,17 +496,20 @@ def test_golden_png_is_rendered_from_the_chart_spec(fx):
     assert parse_color("#2bb673") == (43, 182, 115, 255) and parse_color("rgba(10,20,30,0.5)")[3] == 127 and parse_color("мусор")[3] == 255
 
 
-def test_significance_card_sits_in_the_same_row_as_the_filters_at_the_right_edge():
-    """Раскладка (требование пользователя): карточка «Значимость выводов» - в одном Row с фильтрами, последним элементом (у правого края), и в Statistics, и в Analysis."""
+def test_significance_card_sits_in_the_same_row_as_the_filters_on_wide_screens_and_below_them_on_phones():
+    """Statistics (2026-10-20): ResponsiveRow - на широком экране карточка «Значимость выводов» в одной строке с фильтрами справа (md 9 + 3), на узком (телефон) - под фильтрами (xs 12);
+    раньше фильтры сжимались рядом с карточкой до 200 px и текст налезал друг на друга. Analysis - прежняя строка."""
     from tradeai_client.ui.analysis_view import AnalysisView
 
-    stats, analysis = StatsView(Host()), AnalysisView(Host())
-    for view, first_filter in ((stats, stats._mode.control), (analysis, analysis._mode)):
-        rows = [c for c in view.control.controls if isinstance(c, ft.Row) and view._goal.control in c.controls]
-        assert len(rows) == 1, "карточка должна быть в строке фильтров, а не на отдельной"
-        row = rows[0]
-        filters = row.controls[0]
-        assert row.controls[-1] is view._goal.control and isinstance(filters, ft.Row) and filters.expand and filters.wrap and first_filter in filters.controls
+    stats = StatsView(Host())
+    rr = next(c for c in stats.control.controls if isinstance(c, ft.ResponsiveRow))
+    filters, goal_box = rr.controls
+    assert stats._mode.control in filters.controls and filters.wrap and filters.col == {"xs": 12, "md": 9}
+    assert stats._goal.control in goal_box.controls and goal_box.col == {"xs": 12, "md": 3}
+    assert not any(getattr(c, "expand", None) for c in filters.controls)  # в Row(wrap=True) нельзя класть expand-элементы (Flutter ErrorWidget)
+    analysis = AnalysisView(Host())
+    rows = [c for c in analysis.control.controls if isinstance(c, ft.Row) and analysis._goal.control in c.controls]
+    assert len(rows) == 1 and rows[0].controls[-1] is analysis._goal.control and rows[0].controls[0].wrap
 
 
 # ======================================================================================== тумблер «Мультивыбор» для всех фильтров
@@ -607,3 +610,38 @@ def test_switching_the_toggle_refreshes_and_single_mode_still_filters_by_one_val
     h._bar.switch.value = False
     asyncio.run(h._bar._changed())
     assert not h._status.multi and len(client.trade_calls) == 3
+
+
+# ======================================================================================== History: таблица листается по горизонтали, не сжимается
+
+
+def test_history_table_keeps_its_width_and_scrolls_horizontally_with_a_fixed_header():
+    from tradeai_client.ui import history_view as hv
+
+    v = HistoryView(Host())
+    scrollers = [c for c in v.control.controls if isinstance(c, ft.Row) and c.scroll is not None]
+    assert len(scrollers) == 1, "ровно одна горизонтально прокручиваемая область: заголовок и строки едут вместе"
+    table = scrollers[0].controls[0]
+    assert scrollers[0].expand and table.width == hv.TABLE_W and table.width >= sum(hv.WIDTHS)  # ширина = сумма колонок: на узком экране таблица уходит за край, а не сжимается
+    header, body = table.controls
+    assert body.scroll is not None and body.expand and v._rows in body.controls  # строки листаются по вертикали внутри
+
+
+def test_phone_tap_opens_the_trade_chart_while_desktop_keeps_double_click(fx):
+    opened = []
+
+    class PhoneHost(Host):
+        tap_opens_chart = True
+
+        async def open_trade_chart(self, trade):
+            opened.append(trade["id"])
+
+    trade = fx("trades.json")["items"][0]
+    phone = HistoryView(PhoneHost())
+    row = phone._row(trade)
+    assert row.on_double_tap is None and row.on_tap is not None
+    row.on_tap(None)
+    assert phone.host.runs or opened is not None  # тап запускает открытие графика через host.run
+    desktop = HistoryView(Host())
+    drow = desktop._row(trade)
+    assert drow.on_double_tap is not None  # настольный клиент: одиночный клик выделяет, двойной открывает

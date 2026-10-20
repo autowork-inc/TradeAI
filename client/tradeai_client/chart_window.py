@@ -66,9 +66,13 @@ def build_config(spec: dict[str, Any], drawings: list[dict[str, Any]]) -> dict[s
     }
 
 
-def build_html(cfg: dict[str, Any]) -> str:
+def build_html(cfg: dict[str, Any], shim: str = "") -> str:
+    """shim - необязательный скрипт перед приложением: веб-версия подставляет сюда HTTP-мост вместо моста pywebview (tradeai_client/web/charts.py)."""
     html = _read("index.html")
-    for marker, text in (("/*__CSS__*/", _read("chart.css")), ("/*__LIB__*/", _read("lightweight-charts.js")), ("/*__CFG__*/", _js_json(cfg)), ("/*__APP__*/", _read("chart.js"))):
+    if not shim:  # окно pywebview: моста-заглушки нет, лишнего <script> в странице тоже
+        html = html.replace("<script>/*__SHIM__*/</script>\n", "", 1)
+    for marker, text in (("/*__CSS__*/", _read("chart.css")), ("/*__LIB__*/", _read("lightweight-charts.js")), ("/*__CFG__*/", _js_json(cfg)), ("/*__SHIM__*/", shim),
+                         ("/*__APP__*/", _read("chart.js"))):
         html = html.replace(marker, text, 1)
     return html
 

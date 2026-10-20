@@ -40,10 +40,10 @@ def entry(version, *changes, date="2026-10-20", title=""):
 # ======================================================================================== данные
 
 
-def test_current_version_is_1_2_and_the_changelog_starts_from_the_1_0_base():
-    assert __version__ == "1.2"
+def test_current_version_is_1_2_1_and_the_changelog_starts_from_the_1_0_base():
+    assert __version__ == "1.2.1"
     releases = changelog.load()
-    assert releases[0].version == "1.2" and releases[-1].version == "1.0" and releases[-1].date and releases[-1].changes
+    assert releases[0].version == "1.2.1" and releases[-1].version == "1.0" and releases[-1].date and releases[-1].changes
     assert changelog.release_for(releases, __version__) is not None and changelog.release_for(releases, "1.0.0") is not None  # 1.0 == 1.0.0
     assert {c.type for r in releases for c in r.changes} <= set(changelog.TYPES)
 

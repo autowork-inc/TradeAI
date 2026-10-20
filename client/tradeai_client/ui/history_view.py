@@ -15,6 +15,7 @@ STATUS_FILTERS = {"all": ("Все", None), "closed": ("Закрытые", ["clos
 COLS = [("Сигнал", 96), ("Монета", 78), ("Стратегия", 110), ("Режим", 70), ("Сторона", 70), ("Статус", 170), ("Вход", 96), ("Выход", 96), ("Итог R", 80),
         ("PnL USDT", 84), ("Выход по", 110), ("★", 44), ("", 44)]
 WIDTHS = [x for _, x in COLS]
+TABLE_W = sum(WIDTHS) + 8 * (len(WIDTHS) - 1) + 24  # ширина таблицы = сумма колонок + промежутки + отступы строки: таблица НЕ сжимается под экран, а листается по горизонтали
 
 
 class HistoryView:
@@ -42,16 +43,18 @@ class HistoryView:
         self._rows = ft.Column(spacing=2)
         self._busy = ft.ProgressRing(width=18, height=18, stroke_width=2, visible=False)
         header = w.table_row([w.cell(t, color=w.MUTED, size=12, align_right=t in ("Итог R", "PnL USDT")) for t, _ in COLS], widths=WIDTHS, height=28)
-        hint = ("Эталонные сетапы, отмеченные звёздочкой (общие для всех профилей). Двойной клик по строке — график; звёздочка в строке снимает отметку."
+        tap = getattr(host, "tap_opens_chart", False)
+        hint = ("Эталонные сетапы, отмеченные звёздочкой (общие для всех профилей). " + ("Тап по строке — график;" if tap else "Двойной клик по строке — график;") + " звёздочка в строке снимает отметку."
                 if favorites else
-                "Двойной клик по строке — график сделки (свечи снапшота, вход/выход, SL/TP, зона FVG, причина входа). Звёздочка — пометить сделку как «идеальный сетап» (попадёт во вкладку «Избранное»).")
+                ("Тап по строке — график сделки" if tap else "Двойной клик по строке — график сделки") + " (свечи снапшота, вход/выход, SL/TP, зона FVG, причина входа). Звёздочка — пометить сделку как «идеальный сетап» (попадёт во вкладку «Избранное»).")
         self.control = ft.Column([
             ft.Container(height=2),
             ft.Row([self._mode.control, self._status.control, self._coin.control, self._strategy.control, self._bar.control, ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy,
                     self._info, self._prev, self._next], spacing=10, run_spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             w.label(hint, size=12),
-            ft.Row([header], scroll=ft.ScrollMode.AUTO),
-            ft.Column([self._rows], scroll=ft.ScrollMode.AUTO, expand=True),
+            # одна горизонтально прокручиваемая область: заголовок и строки едут вместе (раньше строки сжимались до ширины экрана, и тап-зоны ломались), строки листаются по вертикали
+            ft.Row([ft.Column([header, ft.Column([self._rows], scroll=ft.ScrollMode.AUTO, expand=True)], spacing=6, width=TABLE_W)],
+                   scroll=ft.ScrollMode.ADAPTIVE, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH),
         ], expand=True, spacing=10)
         self.apply_profile()
 
@@ -198,6 +201,8 @@ class HistoryView:
         if restart:
             row.tooltip = fmt.RESTART_HINT
         self._boxes[t["id"]] = row
+        if getattr(self.host, "tap_opens_chart", False):  # телефон: двойного тапа нет, один тап открывает график
+            return ft.GestureDetector(content=row, on_tap=lambda e, tr=t: (self._select(tr), self.host.run(self.host.open_trade_chart(tr))))
         return ft.GestureDetector(content=row, mouse_cursor=ft.MouseCursor.CLICK, on_tap=lambda e, tr=t: self._select(tr),
                                   on_double_tap=lambda e, tr=t: self.host.run(self.host.open_trade_chart(tr)))
 

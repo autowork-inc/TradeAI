@@ -243,3 +243,111 @@ def test_narrow_screens_get_compact_page_padding():
     page.width = 1200
     app._adapt()
     assert page.padding == 16
+
+
+# ======================================================================================== графики в вебе
+
+
+def _spec(fx):
+    from tradeai_client.chart_spec import build_chart_spec
+
+    spec = build_chart_spec(fx("snapshot_smc_short.json"), None, now_ms=int(time.time() * 1000))
+    spec["source"] = {"kind": "binance", "symbol": "BTCUSDT", "rest": "https://fapi.binance.com"}
+    return spec
+
+
+def test_chart_page_uses_the_http_bridge_not_pywebview_and_has_no_secrets(fx):
+    from tradeai_client.web import charts
+
+    charts.REGISTRY.clear()
+    cid = charts.register(_spec(fx), {"id": "t1", "coin": "BTCUSDT", "is_favorite": False})
+    html = charts.page_html(charts.lookup(cid))
+    assert "window.pywebview = { api:" in html and "/klines?interval=" in html and "/favorite" in html and "localStorage" in html  # мост: HTTP + рисунки в браузере
+    assert html.count("</script>") == 4 and 'id="b-back"' in html and "@media (max-width: 760px)" in html  # кнопка «Назад» и мобильная раскладка
+    assert "X-API-Key" not in html and "api_key" not in html and KEY not in html  # ключ API в страницу не попадает
+    assert len(cid) >= 32  # неугадываемый идентификатор
+
+
+def test_chart_registry_expires_links_and_is_bounded(fx):
+    from tradeai_client.web import charts
+
+    charts.REGISTRY.clear()
+    spec = _spec(fx)
+    cid = charts.register(spec, {"id": "t1", "coin": "BTCUSDT"}, now=1000.0)
+    assert charts.lookup(cid, now=1000.0 + charts.TTL_S - 1) is not None
+    assert charts.lookup(cid, now=1000.0 + charts.TTL_S + 1) is None and cid not in charts.REGISTRY  # просроченная ссылка не открывается
+    for i in range(charts.MAX_CHARTS + 20):
+        charts.register(spec, {"id": f"t{i}", "coin": "BTCUSDT"}, now=2000.0)
+    assert len(charts.REGISTRY) <= charts.MAX_CHARTS
+
+
+def test_chart_endpoints_serve_page_klines_and_favorite(fx, monkeypatch):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from tradeai_client.api import ApiClient
+    from tradeai_client.chart_window import ChartApi
+    from tradeai_client.settings import ClientSettings
+    from tradeai_client.web import charts
+
+    charts.REGISTRY.clear()
+    calls = {"klines": [], "fav": []}
+    monkeypatch.setattr(ChartApi, "klines", lambda self, iv, end=None, limit=1000: calls["klines"].append((iv, end, limit)) or [[1, 2.0, 3.0, 1.0, 2.5, 10.0]])
+
+    async def add(self, tid, profile, png=None):
+        calls["fav"].append(("add", tid, profile, png))
+        return {}
+
+    async def remove(self, tid):
+        calls["fav"].append(("remove", tid))
+        return {}
+
+    monkeypatch.setattr(ApiClient, "favorite_add", add)
+    monkeypatch.setattr(ApiClient, "favorite_remove", remove)
+    cid = charts.register(_spec(fx), {"id": "tr:1", "coin": "BTCUSDT", "is_favorite": False})
+
+    async def scenario():
+        async with TestClient(TestServer(charts.make_app(ClientSettings(base_url="http://x:1", api_key=KEY)))) as c:
+            page = await c.get(f"/chart/{cid}")
+            assert page.status == 200 and "lightweight" in (await page.text()).lower() and page.headers["Cache-Control"] == "no-store"
+            rows = await (await c.get(f"/chart/{cid}/klines?interval=15m&end=123&limit=500")).json()
+            assert rows == [[1, 2.0, 3.0, 1.0, 2.5, 10.0]] and calls["klines"] == [("15m", 123, 500)]
+            assert (await c.post(f"/chart/{cid}/favorite", json={"add": True})).status == 200
+            assert (await c.post(f"/chart/{cid}/favorite", json={"add": False})).status == 200
+            assert calls["fav"] == [("add", "tr:1", "SANTA", None), ("remove", "tr:1")]
+            for path in ("/chart/нет-такого", "/chart/xx/klines?interval=15m"):
+                assert (await c.get(path)).status == 404  # неизвестная / просроченная ссылка
+            assert (await c.get(f"/chart/{cid}/klines?interval=15m&end=abc")).status == 400
+
+    asyncio.run(scenario())
+
+
+def test_trade_tap_builds_a_chart_link_and_falls_back_to_the_card(fx, monkeypatch):
+    from tradeai_client.web import charts
+
+    charts.REGISTRY.clear()
+    cfg = web_app.WebConfig.from_env(ENV)
+    page = MagicMock()
+    page.width, page.height = 390, 800
+    shell = web_app.WebShell(page, cfg, on_logout=lambda: None)
+    assert shell.tap_opens_chart and shell.history.host.tap_opens_chart
+    launched = []
+
+    async def launch(url, **kw):
+        launched.append((url, kw))
+
+    shell._launcher = MagicMock(launch_url=launch)
+
+    async def build_spec(client, settings, trade):
+        return _spec(fx)
+
+    async def ensure(settings, *a, **k):
+        return None
+
+    monkeypatch.setattr(charts, "build_spec", build_spec)
+    monkeypatch.setattr(charts, "ensure_server", ensure)
+    trade = {"id": "tr:1", "coin": "BTCUSDT", "has_snapshot": True, "strategy_id": "VWAP_Reversion"}
+    asyncio.run(shell.open_trade_chart(trade))
+    url, kw = launched[0]
+    assert url.startswith("/chart/") and kw == {"web_only_window_name": "_self"} and charts.lookup(url.rsplit("/", 1)[1]) is not None
+    asyncio.run(shell.open_trade_chart({**trade, "has_snapshot": False}))  # нет снапшота - понятное сообщение, переход не выполняется
+    assert len(launched) == 1 and page.show_dialog.called

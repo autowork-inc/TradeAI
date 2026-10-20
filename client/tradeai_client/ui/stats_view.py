@@ -35,11 +35,13 @@ class StatsView:
         self._body = ft.Column(spacing=14)
         self.control = ft.Column(
             [ft.Container(height=2),
-             # одна линия: фильтры слева (переносятся при узком окне), карточка «значимость выводов» - у правого края
-             ft.Row([ft.Row([self._mode.control, self._coin.control, self._strategy.control, self._side.control, self._period, self._bar.control,
-                             ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp],
-                            spacing=10, run_spacing=8, wrap=True, expand=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                     self._goal.control], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START),
+             # широкий экран: фильтры слева (переносятся), карточка «значимость выводов» - в той же строке у правого края; узкий (телефон) - карточка под фильтрами,
+             # а не сжатая рядом с ними (раньше фильтры выдавливались в 200 px и текст налезал друг на друга)
+             ft.ResponsiveRow([ft.Row([self._mode.control, self._coin.control, self._strategy.control, self._side.control, self._period, self._bar.control,
+                                       ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp],
+                                      spacing=10, run_spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER, col={"xs": 12, "md": 9}),
+                               ft.Row([self._goal.control], alignment=ft.MainAxisAlignment.END, col={"xs": 12, "md": 3})],
+                              spacing=12, run_spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
              self._body], expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
         self.apply_profile()
 

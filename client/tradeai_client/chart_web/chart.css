@@ -50,3 +50,17 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/
 #panel .warn{color:#ffb300;font-size:13px}
 #panel .bot{border-color:#5b4a14}
 #panel .bot.bad{border-color:#e5534b}
+
+/* телефон (веб-версия): панель разбора - под графиком, инструменты - узкой лентой сверху, шапка переносится, кнопки крупнее для пальца */
+@media (max-width: 760px) {
+  #main { flex-direction: column; }
+  #tools { width: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; padding: 5px 8px; flex: none; }
+  #tools .btn { min-width: 44px; padding: 8px 0; }
+  #tools .sep { width: 1px !important; height: 26px !important; }
+  #tools .hint { display: none; }
+  #chartbox { flex: 1 1 55%; min-height: 220px; }
+  #panel { width: auto; max-width: none; min-width: 0; border-left: 0; border-top: 1px solid var(--line); max-height: 40%; flex: none; }
+  #top .btn { padding: 8px 12px; }
+  #top { gap: 6px; padding: 6px 8px; }
+  #status { margin-left: 0; width: 100%; }
+}

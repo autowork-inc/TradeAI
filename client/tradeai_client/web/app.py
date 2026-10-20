@@ -22,7 +22,7 @@ from tradeai_client.ui import widgets as w
 from tradeai_client.ui.dashboard import DashboardView
 from tradeai_client.ui.history_view import HistoryView
 from tradeai_client.ui.stats_view import StatsView
-from tradeai_client.web import auth
+from tradeai_client.web import auth, charts
 
 log = logging.getLogger("tradeai.web")
 TOKEN_KEY = "tradeai_web_token"
@@ -66,6 +66,9 @@ class WebShell:
         self._stream: LiveStateStream | None = LiveStateStream(self.settings, self._on_message, self._on_status)
         self._tab, self._events_seen, self._closed = TAB_DASHBOARD, (), False
         self.saved_mode, self.default_mode = "", "shadow"
+        self.tap_opens_chart = True  # на телефоне нет двойного тапа: один тап по сделке открывает график
+        self._launcher = ft.UrlLauncher()
+        page.services.append(self._launcher)
         self.dashboard, self.stats, self.history = DashboardView(self), StatsView(self), HistoryView(self)
         self.favorites = HistoryView(self, favorites=True)
         self._dot, self._status_text = w.dot(w.MUTED, 12), ft.Text("Подключение…", size=12, color=w.MUTED)
@@ -207,7 +210,25 @@ class WebShell:
         return now
 
     async def open_trade_chart(self, trade: dict) -> None:
-        """В вебе вместо окна графика - карточка разбора сделки (та же панель, что справа от графика в настольном клиенте)."""
+        """Тап по сделке -> интерактивный график (та же страница, что в настольном клиенте, с HTTP-мостом: web/charts.py) в этой же вкладке браузера, кнопка «‹ Назад» вернёт
+        к списку. Нет снапшота / график не собрался - запасная карточка разбора (текст)."""
+        client = self.client
+        if client is None:
+            return
+        if not trade.get("has_snapshot"):
+            self.notify("У сделки нет снапшота: график недоступен.", error=True)
+            return
+        try:
+            spec = await charts.build_spec(client, self.settings, trade)
+            await charts.ensure_server(self.settings)
+        except (ApiError, ChartDataError, ValueError, OSError) as exc:
+            self.notify(f"График недоступен: {exc}", error=True)
+            await self._open_card(trade)
+            return
+        await self._launcher.launch_url(f"/chart/{charts.register(spec, trade)}", web_only_window_name="_self")
+
+    async def _open_card(self, trade: dict) -> None:
+        """Запасной вариант без графика: карточка разбора сделки (результат, оценка, причина входа)."""
         client = self.client
         if client is None:
             return

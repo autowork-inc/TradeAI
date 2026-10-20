@@ -328,5 +328,6 @@ def test_web_client_is_deployed_isolated_from_the_bot_and_checked_by_the_pipelin
     assert apply.index('ГОТОВО: версия') < apply.index("        deploy_web") < apply.index("ПРОВАЛ применения")
     nginx = (ROOT / "web" / "nginx.conf").read_text(encoding="utf-8")
     assert "$connection_upgrade" in nginx and "proxy_set_header Upgrade" in nginx and "web:8550" in nginx  # WebSocket проксируется
+    assert "location /chart/" in nginx and "web:8551" in nginx  # графики сделок: aiohttp-сервер внутри контейнера web
     ad = (ROOT / "scripts" / "auto_deploy.py").read_text(encoding="utf-8")
     assert "shadow.sh web-up" in ad and "--web-login" in ad and "--web-password" in ad
