@@ -22,20 +22,21 @@ class StatsView:
     def __init__(self, host) -> None:
         self.host = host
         self._server_coins: list[str] = []
-        self._coin = w.MultiSelect("Монеты", [(c, fmt.coin_short(c)) for c in COINS], self._changed, host, width=190)
-        self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 230, self._changed)
-        self._mode = _dropdown("Режим", fmt.MODE_OPTIONS, 180, self._mode_changed)
+        self._coin = w.FilterSelect("Монеты", [(c, fmt.coin_short(c)) for c in COINS], self._changed, host, width=190)
+        self._strategy = w.FilterSelect("Стратегия", fmt.STRATEGY_OPTIONS, self._changed, host, width=230)
+        self._mode = w.FilterSelect("Режим", fmt.MODE_OPTIONS, self._mode_changed, host, width=180)
         saved = getattr(self.host, "saved_mode", "")
         self._mode.value, self._mode_touched = saved or self.host.default_mode, bool(saved)
-        self._side = _dropdown("Сторона", [("all", "Все"), ("long", "Лонг"), ("short", "Шорт")], 120, self._changed)
+        self._side = w.FilterSelect("Сторона", [("long", "Лонг"), ("short", "Шорт")], self._changed, host, width=130)
         self._period = _dropdown("Период", [(k, v[0]) for k, v in PERIODS.items()], 170, self._changed)
+        self._bar = w.FilterBar([self._mode, self._coin, self._strategy, self._side], self._changed)  # период - диапазон времени: всегда один
         self._stamp = ft.Text("", size=12, color=w.MUTED)
         self._goal = w.GoalBar(fmt.TRADES_GOAL, width=150)
         self._body = ft.Column(spacing=14)
         self.control = ft.Column(
             [ft.Container(height=2),
              # одна линия: фильтры слева (переносятся при узком окне), карточка «значимость выводов» - у правого края
-             ft.Row([ft.Row([self._mode, self._coin.control, self._strategy, self._side, self._period,
+             ft.Row([ft.Row([self._mode.control, self._coin.control, self._strategy.control, self._side.control, self._period, self._bar.control,
                              ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._changed), self._stamp],
                             spacing=10, run_spacing=8, wrap=True, expand=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                      self._goal.control], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START),
@@ -51,8 +52,7 @@ class StatsView:
         """Профиль сменился (или только что открыт): варианты стратегий и монет, видимость режима."""
         strategies, pool = self._scope()
         options = fmt.STRATEGY_OPTIONS if strategies is None else [("all", "Все")] + [(k, fmt.strategy_label(k)) for k in strategies]
-        self._strategy.options = [ft.DropdownOption(key=k, text=t) for k, t in options]
-        self._strategy.value = "all"
+        self._strategy.set_options(options, select_all=True)
         self._coin.set_options([(c, fmt.coin_short(c)) for c in (pool if pool is not None else self._all_coins())], select_all=True)
         self._mode.visible = strategies is None  # CHR: только Shadow-стратегии, переключатель режима не нужен
 
@@ -68,9 +68,14 @@ class StatsView:
     async def _changed(self, _=None) -> None:
         await self.refresh()
 
+    def _mode_choice(self) -> str:
+        """Режим для запоминания: один выбранный контур, иначе all."""
+        keys = self._mode.keys()
+        return keys[0] if keys and len(keys) == 1 else "all"
+
     async def _mode_changed(self, _=None) -> None:
         self._mode_touched = True
-        self.host.remember_mode(self._mode.value)
+        self.host.remember_mode(self._mode_choice())
         await self.refresh()
 
     def follow_default_mode(self, mode: str) -> bool:
@@ -81,21 +86,23 @@ class StatsView:
         return True
 
     def _filters(self) -> dict:
-        pick = lambda d: None if d.value in (None, "all") else [d.value]
         strategies, pool = self._scope()
         days = PERIODS[self._period.value or "all"][1]
         since = None if days is None else (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        picked = self._coin.filter()
-        return {"coins": picked if picked is not None else pool, "strategies": pick(self._strategy) or strategies, "sides": pick(self._side), "since": since,
-                "mode": "shadow" if strategies is not None else (self._mode.value or "shadow")}
+        picked = self._coin.keys()
+        modes = self._mode.keys()
+        mode = "all" if modes is None or len(modes) != 1 else modes[0]
+        return {"coins": picked if picked is not None else pool, "strategies": self._strategy.keys() or strategies, "sides": self._side.keys(), "since": since,
+                "mode": "shadow" if strategies is not None else mode}
 
     async def refresh(self) -> None:
         client = self.host.client
         if client is None:
             return
-        if self._coin.is_empty:  # «Снять всё»: ничего не выбрано - показываем пустую статистику, а не всё подряд
+        empty = next((f for f in self._bar.filters if f.is_empty), None)
+        if empty is not None:  # «Снять всё»: ничего не выбрано - показываем пустую статистику, а не всё подряд
             self._goal.set(0)
-            self._body.controls = [w.label("Не выбрано ни одной монеты", size=14)]
+            self._body.controls = [w.label(f"Не выбрано ни одного значения: {empty.label}", size=14)]
             self.control.update()
             return
         try:

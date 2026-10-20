@@ -211,7 +211,7 @@ def test_killzone_params_validation():
 # ======================================================================================== E: VWAP_Reversion
 
 
-def vwap_frame(n: int = 40, at: int = 30, offset: int = 0, **series) -> pl.DataFrame:
+def vwap_frame(n: int = 40, at: int = 30, offset: int = 0, bias: int | None = -1, **series) -> pl.DataFrame:
     """Сутки 00:00 UTC, шаг 15 минут. Закрытие колеблется 99.5 / 100.5 (sd ~ 0.5, полоса 3 sd ~ 101.5), объём 10. Бар 30 - всплеск до 103 (касание полосы),
     бар 31 - медвежье поглощение (открытие >= закрытия 30, закрытие <= открытия 30). `at` сдвигает пару баров (событие на at, at + 1), `offset` - сдвиг сетки
     времени в барах (чтобы полночь пришлась на нужную строку, а кадр был не короче суток)."""
@@ -223,8 +223,12 @@ def vwap_frame(n: int = 40, at: int = 30, offset: int = 0, **series) -> pl.DataF
     base["low"].update({at: 100.4, at + 1: 100.1})
     for k, v in series.items():
         base.setdefault(k, {}).update(v)
-    df = with_cols(frame(n, **base), volume=10.0)
+    df = with_cols(frame(n, **base), volume=10.0, htf_bias=bias)
     return df.with_columns(((pl.int_range(pl.len(), dtype=pl.Int64) + offset) * STEP).alias("open_time")) if offset else df
+
+
+# прежнее поведение (до 2026-10-20): без проверки близости к экстремуму и тренда, стоп по окну касания (3 бара)
+LOOSE = VwapParams(max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)
 
 
 def test_vwap_matches_manual_cumulative_calculation():
@@ -241,7 +245,7 @@ def test_vwap_matches_manual_cumulative_calculation():
 
 
 def test_vwap_short_on_bearish_engulfing_after_touching_the_third_deviation():
-    out = detect_vwap_reversion(vwap_frame())
+    out = detect_vwap_reversion(vwap_frame(), LOOSE)
     assert idx(out, "vw_short_signal") == [31] and not any(out["vw_long_signal"])
     assert out["vw_short_sl"][31] == pytest.approx(103.0 + 0.2)  # максимум за окно касания (бары 29-31) + 0.2 ATR
     assert out["high"][30] >= out["vw_upper"][30] and out["high"][29] < out["vw_upper"][29]  # касание 3-го отклонения случилось на баре 30
@@ -250,7 +254,7 @@ def test_vwap_short_on_bearish_engulfing_after_touching_the_third_deviation():
 def test_vwap_long_is_the_mirror():
     df = vwap_frame()
     m = df.with_columns((200.0 - pl.col("low")).alias("high"), (200.0 - pl.col("high")).alias("low"), (200.0 - pl.col("open")).alias("open"), (200.0 - pl.col("close")).alias("close"))
-    out = detect_vwap_reversion(m)
+    out = detect_vwap_reversion(m, LOOSE)
     assert idx(out, "vw_long_signal") == [31] and not any(out["vw_short_signal"])
     assert out["vw_long_sl"][31] == pytest.approx(200.0 - 103.0 - 0.2)
 
@@ -262,23 +266,23 @@ def test_vwap_long_is_the_mirror():
 ])
 def test_vwap_each_condition_is_required(name, kw):
     df = vwap_frame(**kw["series"])
-    assert idx(detect_vwap_reversion(df), "vw_short_signal") == [], name
+    assert idx(detect_vwap_reversion(df, LOOSE), "vw_short_signal") == [], name
 
 
 def test_vwap_touch_may_precede_the_reversal_pattern_within_the_lookback_window():
     """Касание на баре 30, нейтральный бар 31, поглощение на баре 32 (до касания - два бара): окно 3 бара это допускает, окно 2 - нет."""
     series = {"high": {31: 100.9, 32: 101.1}, "open": {31: 100.0, 32: 101.0}, "close": {31: 100.8, 32: 99.9}, "low": {31: 99.9, 32: 99.8}}
     df = vwap_frame(**series)
-    out = detect_vwap_reversion(df)
+    out = detect_vwap_reversion(df, LOOSE)
     assert idx(out, "vw_short_signal") == [32] and out["high"][32] < out["vw_upper"][32]  # на самом баре 32 касания полосы нет
     assert out["vw_short_sl"][32] == pytest.approx(103.0 + 0.2)  # SL берёт экстремум окна, а не только свечи паттерна
-    assert idx(detect_vwap_reversion(df, VwapParams(touch_lookback=2)), "vw_short_signal") == []
+    assert idx(detect_vwap_reversion(df, VwapParams(touch_lookback=2, max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)), "vw_short_signal") == []
 
 
 def test_vwap_needs_the_day_anchor_and_enough_bars():
     full = vwap_frame()
-    assert idx(detect_vwap_reversion(full.slice(5)), "vw_short_signal") == []  # кадр начинается не с начала суток: VWAP был бы другим
-    assert idx(detect_vwap_reversion(full, VwapParams(min_day_bars=40)), "vw_short_signal") == []  # на бар 31 суток накоплено меньше 40 свечей
+    assert idx(detect_vwap_reversion(full.slice(5), LOOSE), "vw_short_signal") == []  # кадр начинается не с начала суток: VWAP был бы другим
+    assert idx(detect_vwap_reversion(full, VwapParams(min_day_bars=40, max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)), "vw_short_signal") == []  # на бар 31 суток накоплено меньше 40 свечей
     with pytest.raises(ConfigError):
         VwapParams(touch_lookback=0)
     with pytest.raises(DataError, match="volume"):
@@ -287,11 +291,77 @@ def test_vwap_needs_the_day_anchor_and_enough_bars():
 
 def test_vwap_defaults_are_the_original_m15_windows_and_for_interval_keeps_the_calendar_time():
     p = VwapParams()
+    assert (p.max_entry_to_ext_atr, p.swing_lookback, p.require_htf_trend) == (1.0, 12, True)  # фильтры 2026-10-20
     assert (p.min_day_bars, p.touch_lookback) == (16, 3)  # исходные значения 2026-10-11: 4 часа накопления суток, касание за 45 минут
     assert VwapParams.for_interval(STEP) == p
     m5 = VwapParams.for_interval(300_000, sd_mult=2.0)  # 5m поддерживается (эксперимент 2026-10-15), но не используется: те же 4 часа и 45 минут
-    assert (m5.min_day_bars, m5.touch_lookback, m5.sd_mult) == (48, 9, 2.0)
+    assert (m5.min_day_bars, m5.touch_lookback, m5.swing_lookback, m5.sd_mult) == (48, 9, 36, 2.0)
     assert VwapParams.for_interval(3_600_000).min_day_bars == 16  # старше M15 - не меньше исходных
+
+
+# --- фильтры 2026-10-20: близость к экстремуму, структурный стоп, тренд H4, диагностика
+
+NEAR = VwapParams(max_entry_to_ext_atr=2.5)  # на фикстуре вход (100.3) в 2.4 ATR от хая сигнальной свечи (102.7): порог 2.5 пропускает, 1.0 - нет
+
+
+def test_vwap_entry_too_far_from_the_extreme_is_rejected():
+    df = vwap_frame()
+    assert idx(detect_vwap_reversion(df, NEAR), "vw_short_signal") == [31]
+    assert idx(detect_vwap_reversion(df), "vw_short_signal") == []  # по умолчанию 1.0 ATR: закрытие в 2.4 ATR от хая - «середина ничего»
+    assert idx(detect_vwap_reversion(df, VwapParams(max_entry_to_ext_atr=2.3)), "vw_short_signal") == []
+    out = detect_vwap_reversion(df)
+    assert out["vw_short_ext_atr"][31] == pytest.approx(2.4)  # диагностика считается и на отброшенных свечах
+
+
+def test_vwap_long_proximity_is_measured_to_the_low_of_the_wick():
+    m = vwap_frame(bias=1)
+    m = m.with_columns((200.0 - pl.col("low")).alias("high"), (200.0 - pl.col("high")).alias("low"), (200.0 - pl.col("open")).alias("open"), (200.0 - pl.col("close")).alias("close"))
+    assert idx(detect_vwap_reversion(m, NEAR), "vw_long_signal") == [31]
+    assert idx(detect_vwap_reversion(m), "vw_long_signal") == []
+    assert detect_vwap_reversion(m)["vw_long_ext_atr"][31] == pytest.approx(2.4)
+
+
+def test_vwap_stop_is_the_structural_swing_not_just_the_signal_wick():
+    df = vwap_frame(high={26: 103.4})  # более высокий хай за 5 баров до сигнала, вне окна касания (3 бара), но внутри swing_lookback = 12
+    short_sl = detect_vwap_reversion(df, VwapParams(max_entry_to_ext_atr=99.0, swing_lookback=3))
+    wide_sl = detect_vwap_reversion(df, VwapParams(max_entry_to_ext_atr=99.0, swing_lookback=12))
+    assert 31 in idx(wide_sl, "vw_short_signal") and 31 in idx(short_sl, "vw_short_signal")  # сам всплеск на баре 26 тоже даёт сигнал - он не предмет теста
+    assert short_sl["vw_short_sl"][31] == pytest.approx(103.0 + 0.2)  # прежняя логика: только окно касания
+    assert wide_sl["vw_short_sl"][31] == pytest.approx(103.4 + 0.2)  # структурный хай + 0.2 ATR
+    assert wide_sl["vw_short_stop_atr"][31] == pytest.approx(103.6 - 100.3)  # стоп от входа в ATR[j-1] (ATR = 1)
+
+
+def test_vwap_long_stop_uses_the_swing_low():
+    df = vwap_frame(high={26: 103.4}, bias=1)
+    m = df.with_columns((200.0 - pl.col("low")).alias("high"), (200.0 - pl.col("high")).alias("low"), (200.0 - pl.col("open")).alias("open"), (200.0 - pl.col("close")).alias("close"))
+    out = detect_vwap_reversion(m, VwapParams(max_entry_to_ext_atr=99.0))
+    assert 31 in idx(out, "vw_long_signal") and out["vw_long_sl"][31] == pytest.approx(200.0 - 103.4 - 0.2)
+
+
+@pytest.mark.parametrize("bias, allowed", [(-1, True), (0, False), (1, False), (None, False)])
+def test_vwap_short_needs_bearish_h4(bias, allowed):
+    out = detect_vwap_reversion(vwap_frame(bias=bias), NEAR)
+    assert (idx(out, "vw_short_signal") == [31]) is allowed
+
+
+@pytest.mark.parametrize("bias, allowed", [(1, True), (0, False), (-1, False), (None, False)])
+def test_vwap_long_needs_bullish_h4(bias, allowed):
+    m = vwap_frame(bias=bias)
+    m = m.with_columns((200.0 - pl.col("low")).alias("high"), (200.0 - pl.col("high")).alias("low"), (200.0 - pl.col("open")).alias("open"), (200.0 - pl.col("close")).alias("close"))
+    assert (idx(detect_vwap_reversion(m, NEAR), "vw_long_signal") == [31]) is allowed
+
+
+def test_vwap_diagnostics_columns_and_params_validation():
+    out = detect_vwap_reversion(vwap_frame(), NEAR)
+    r = out.row(31, named=True)
+    assert r["vw_short_band_atr"] == pytest.approx(r["vw_upper"] - 100.3) and r["vw_short_vwap_atr"] == pytest.approx(100.3 - r["vw_vwap"])
+    assert r["vw_short_ext_atr"] == pytest.approx(2.4) and r["vw_short_stop_atr"] == pytest.approx(r["vw_short_sl"] - 100.3)
+    with pytest.raises(DataError, match="htf_bias"):
+        detect_vwap_reversion(vwap_frame().drop("htf_bias"))
+    assert idx(detect_vwap_reversion(vwap_frame().drop("htf_bias"), LOOSE), "vw_short_signal") == [31]  # без фильтра колонка не нужна
+    for bad in ({"max_entry_to_ext_atr": 0}, {"swing_lookback": 2}, {"swing_lookback": True}, {"require_htf_trend": 1}):
+        with pytest.raises(ConfigError):
+            VwapParams(**bad)  # swing_lookback < touch_lookback (3) тоже запрещён: стоп обязан закрывать окно касания
 
 
 def test_vwap_min_history_covers_the_day_anchor_with_a_margin():
@@ -304,8 +374,8 @@ def test_vwap_frame_that_lost_the_start_of_the_day_is_silent_so_the_depth_must_b
     """Тот же сигнал (бар 99, полночь на строке 48): в кадре из 100 баров он есть, в кадре из 40 последних (начало суток выпало) - детектор молчит без ошибки.
     Поэтому глубину охраняют `ensure_history_depth` (старт) и StrategyVwapReversion.detect (каждая свеча)."""
     df = vwap_frame(n=120, at=98, offset=48).head(100)
-    assert idx(detect_vwap_reversion(df), "vw_short_signal") == [99]
-    assert idx(detect_vwap_reversion(df.slice(60, 40)), "vw_short_signal") == []
+    assert idx(detect_vwap_reversion(df, LOOSE), "vw_short_signal") == [99]
+    assert idx(detect_vwap_reversion(df.slice(60, 40), LOOSE), "vw_short_signal") == []
 
 
 # ========================================================================================== C: OBI_Breakout
@@ -397,13 +467,13 @@ def with_micro(f: pl.DataFrame) -> pl.DataFrame:
 SOFT_CT = CounterTrendParams(min_sweep_atr=0.05, volume_mult=0.5)  # мягкие пороги: на случайных данных глубоких свипов почти нет
 SOFT_OBI = ObiParams(impulse_atr_mult=0.3, obi_min=0.2, delta_min=0.2, delta_volume_mult=0.5)
 SOFT_KZ = KillzoneParams(min_asia_range_atr=0, min_sweep_depth_atr=0, min_wick_frac=0)  # на случайных данных строгие пороги сигналов почти не дают
-SOFT_VW = VwapParams(sd_mult=1.5, min_day_bars=8)
+SOFT_VW = VwapParams(sd_mult=1.5, min_day_bars=8, max_entry_to_ext_atr=99.0)
 
 CASES = {  # имя -> (функция кадр свечей -> кадр с сигналами, колонки сигналов, число баров случайного ряда: сигналы редкие - нужен длинный)
     "counter_trend": (lambda d: detect_counter_trend(with_bias(pipeline_features(d)), SOFT_CT), ("ct_short_signal", "ct_long_signal"), 6000),
     "obi_breakout": (lambda d: detect_obi_breakout(with_micro(pipeline_features(d)), SOFT_OBI), ("obi_long_signal", "obi_short_signal"), 1500),
     "killzones": (lambda d: kz(with_bias(pipeline_features(d)), SOFT_KZ), ("kz_short_signal", "kz_long_signal"), 20000),
-    "vwap_reversion": (lambda d: detect_vwap_reversion(pipeline_features(d), SOFT_VW), ("vw_short_signal", "vw_long_signal"), 1500),
+    "vwap_reversion": (lambda d: detect_vwap_reversion(with_bias(pipeline_features(d)), SOFT_VW), ("vw_short_signal", "vw_long_signal"), 1500),
 }
 
 

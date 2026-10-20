@@ -173,7 +173,9 @@ class StrategyVwapReversion:
             )
             out.append(_market_signal(self.name, ctx, direction, sl, geo, {
                 "vwap": vwap, "sd": last["vw_sd"], "band": band, "sd_mult": self.params.sd_mult,
-                "target_vwap_r": abs(ctx.last_close - vwap) / abs(sl - ctx.last_close), "atr": last["atr"], **_htf_meta(last)}))
+                "target_vwap_r": abs(ctx.last_close - vwap) / abs(sl - ctx.last_close), "atr": last["atr"],
+                "entry_to_ext_atr": last[f"vw_{side}_ext_atr"], "stop_atr": last[f"vw_{side}_stop_atr"],
+                "band_dist_atr": last[f"vw_{side}_band_atr"], "vwap_dist_atr": last[f"vw_{side}_vwap_atr"], **_htf_meta(last)}))
         return tuple(out)
 
 

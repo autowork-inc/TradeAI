@@ -7,6 +7,10 @@
 в командах SSH, в выводе и логах их нет, в архив и в Git они не попадают. Не заданы - `.env.shadow` на сервере не меняется (уже вписанные
 ключи остаются); заглушки не пишутся: shadow-run с фиктивным токеном упал бы при подключении к MetaApi (R1).
 
+Шаг 0 (2026-10-20): сборка и публикация клиента - `powershell.exe -ExecutionPolicy Bypass -File ./client/build_exe.ps1 -Publish` (.exe собирается,
+.exe и version.json уходят на VPS в ./data/updates). Любой ненулевой код возврата сборки немедленно прерывает деплой ДО подключения к серверу;
+`--skip-client-build` пропускает шаг (только бэкенд). Версия клиента для автообновления берётся из client/tradeai_client/__init__.py: клиенты обновляются,
+только если она НОВЕЕ опубликованной, поэтому перед выпуском поднимите версию и добавьте запись в client/tradeai_client/changelog.json.
 Шаги: 1 архив (deploy_pack, цель shadow, без ключей) · 2 SSH + SFTP · 3 Docker · 4 распаковка · 5 права .env* ·
 6 остановка старых контейнеров · 7 запуск · 8 PostgreSQL и миграции · 9 глубокая проверка (контейнеры, логи, блокировка IP Binance).
 Первый деплой (нет ~/trading/.env.shadow): распаковка и `deploy/shadow.sh up`. Повторный деплой (2026-10-18): шаги 4/6/7 заменены на
@@ -23,6 +27,7 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -36,6 +41,7 @@ from persistence.schema import SCHEMA_VERSION
 from scripts.deploy_pack import ROOT, build_archive
 
 ARCHIVE = "trading_shadow.tar.gz"
+CLIENT_BUILD_CMD = ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", r".\client\build_exe.ps1", "-Publish"]
 TIMEOUT = 20
 TOTAL = 9
 DC = "docker compose --env-file .env.shadow"
@@ -149,6 +155,7 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--remote-dir", default="trading", help="каталог на сервере относительно домашнего (по умолчанию trading)")
     ap.add_argument("--health-wait", type=int, default=15, help="секунд ожидания перед глубокой проверкой (по умолчанию 15)")
     ap.add_argument("--keep-archive", action="store_true", help="не удалять локальный архив после деплоя")
+    ap.add_argument("--skip-client-build", action="store_true", help="не собирать и не публиковать клиент (только бэкенд)")
     a = ap.parse_args(argv)
     if not a.host:
         a.host = input("VPS host: ").strip()
@@ -160,6 +167,18 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
     if not a.key and not a.password:
         a.password = getpass.getpass(f"Пароль {a.user}@{a.host}: ")
     return a
+
+
+def build_client(cmd: list[str] | None = None, cwd: Path | None = None) -> None:
+    """Шаг 0: сборка .exe клиента и публикация версии (client/build_exe.ps1 -Publish). Ждёт завершения; код возврата != 0 или нет PowerShell -> fail (деплой прерывается)."""
+    cmd = cmd or CLIENT_BUILD_CMD
+    try:
+        code = subprocess.run(cmd, cwd=str(cwd or ROOT), check=False).returncode
+    except FileNotFoundError:
+        fail(f"сборка клиента: не найден {cmd[0]} (сборка клиента работает на Windows; для деплоя без неё добавьте --skip-client-build)")
+    if code != 0:
+        fail(f"сборка клиента завершилась с кодом {code}: деплой остановлен, сервер не тронут (исправьте ошибку выше или запустите с --skip-client-build)")
+    ok("клиент собран и опубликован (version.json и .exe на сервере)")
 
 
 def connect(a: argparse.Namespace) -> paramiko.SSHClient:
@@ -204,6 +223,11 @@ def main(argv: list[str] | None = None) -> int:
     archive: Path | None = None
     cli: paramiko.SSHClient | None = None
     try:
+        if a.skip_client_build:
+            print(_c("33", "\n[0/9] Сборка клиента пропущена (--skip-client-build)"))
+        else:
+            step(0, "Сборка и публикация клиента (client/build_exe.ps1 -Publish)")
+            build_client()
         step(1, "Сборка архива (цель shadow, без ключей API)")
         archive = build_archive(ROOT / ARCHIVE, "shadow")
         if not archive.is_file() or archive.stat().st_size == 0:

@@ -15,7 +15,7 @@
         1. внутренний символ -> точное имя брокера и спецификация (`SymbolMapper`; чужой символ - `ConfigError`);
         2. торговые часы: свежая спецификация, `tradeMode != FULL` -> отказ `market_closed` (в т.ч. при старте вне сессии);
         3. счёт (Equity, свободная маржа), котировка (Bid/Ask и стоимость тика в валюте счёта), маржа 1 лота от терминала брокера;
-        4. лоты по риску 1% Equity (`exchange.mt5_risk.size_position`): отказы `below_min_size` / `exposure` / `bad_risk` / `stop_too_close`;
+        4. лоты по фиксированному риску 5 USD (RISK_USDT) (`exchange.mt5_risk.size_position`): отказы `below_min_size` / `exposure` / `bad_risk` / `stop_too_close`;
         5. MARKET: цена брокера не дальше `max_entry_deviation` от цены сигнала (иначе `price_deviation`); LIMIT: цена на сетке тика, срок жизни;
         6. отправка ордера СО СТОПОМ (и тейком сигнала, если есть) в одном запросе (R6).
     Рынок закрыт (ответ 10018 `MARKET_CLOSED` или `tradeMode != FULL`) - ОБЫЧНЫЙ отказ сигнала `market_closed`: никакого Safe Mode и падения.
@@ -31,6 +31,7 @@
     счёт MT5 в другой валюте при подключении отвергается).
 """
 
+import hashlib
 import json
 import logging
 import time
@@ -42,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 import config
-from exchange.binance_live import BinanceLiveClient, client_id
+from exchange.binance_live import BinanceLiveClient
 from exchange.mt5_metaapi import MarketClosedError, MetaApiError, MetaApiLiveClient, MetaApiOrder, MetaApiTradeError
 from exchange import mt5_exit
 from exchange.mt5_exit import Mt5Exit
@@ -136,6 +137,12 @@ class Mt5Event:
     kind: str  # opened | closed | cancelled | partial_close | deferred | replayed
     trade: Mt5Tracked
     detail: dict[str, Any] = field(default_factory=dict)
+
+
+def mt5_client_id(prefix: str, key: str) -> str:
+    """clientId для MetaApi: обязателен формат `<стратегия>_<позиция>_<ордер>` (иначе ValidationException «must match required pattern»),
+    вместе с комментарием не длиннее 30-31 символа. Префикс бота остаётся первой частью: `recover_mt5` отличает свои позиции по нему."""
+    return f"{prefix}_{hashlib.sha1(key.encode('utf-8')).hexdigest()[:14]}_E"
 
 
 def _snap(price: float, spec: Mt5SymbolSpec) -> float:
@@ -264,7 +271,7 @@ class ExecutionRouter:
         if split_levels(exit_plan, sized.lots, mt5_exit.lot_filters(spec)) is None:  # Scale Out не делится на сетке лота: другой математикой не торгуем
             return RouteRejected("plan_not_representable", {"lots": sized.lots, "volume_step": spec.volume_step, "min_volume": spec.min_volume,
                                                             "levels": [list(x) for x in exit_plan.levels]})
-        return Mt5Prepared(signal, sized, signal.kind, client_id(self._prefix, "E", signal.signal_id), entry, expires, exit_plan)
+        return Mt5Prepared(signal, sized, signal.kind, mt5_client_id(self._prefix, signal.signal_id), entry, expires, exit_plan)
 
     async def send_mt5(self, prepared: Mt5Prepared) -> Mt5Tracked | RouteRejected:
         """Отправить подготовленный MT5-вход (стоп/тейк - в том же запросе). Рынок закрыт и отказы брокера - значения; неизвестный исход - исключение."""

@@ -284,3 +284,131 @@ def line_chart(series: list[dict], *, width: float = 860, height: float = 260, x
         elements = [cv.Path.MoveTo(px(pts[0][0]), py(pts[0][1]))] + [cv.Path.LineTo(px(x), py(y)) for x, y in pts[1:]]
         shapes.append(cv.Path(elements, paint=ft.Paint(color=s["color"], stroke_width=2, style=ft.PaintingStyle.STROKE)))
     return ft.Column([cv.Canvas(shapes, width=width, height=height), label(f"Ось Y — {y_label}", size=11)], spacing=2, tight=True)
+
+
+class FilterSelect:
+    """Один фильтр в двух видах: обычный `ft.Dropdown` (один вариант) и `MultiSelect` (диалог с чекбоксами). Вид переключается `set_multi` (тумблер «Мультивыбор»
+    в `FilterBar`), выбор при переключении сохраняется. `options` - варианты без «Все»: пункт `all_key` добавляется сам (в Dropdown он есть, в мультивыборе
+    «выбраны все» = «Все»). `keys()` - значение для запроса: None - без фильтра, иначе список ключей; `is_empty` - в мультивыборе не выбрано ничего."""
+
+    def __init__(self, label: str, options: list[tuple[str, str]], on_change, host, *, width: float = 190, all_key: str = "all", all_label: str = "Все") -> None:
+        self.label, self._all_key, self._all_label, self._width = label, all_key, all_label, width
+        self._on_change, self._host = on_change, host
+        self._dropdown = ft.Dropdown(label=label, value=all_key, options=[], width=width, on_select=on_change, border_color=BORDER, bgcolor=CARD)
+        self._multi = MultiSelect(label, [], on_change, host, width=width)
+        self.control = ft.Container(content=self._dropdown)
+        self._is_multi = False
+        self.set_options(options)
+
+    # ------------------------------------------------------------------------------------------ варианты
+
+    def _plain(self, options: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        return [(k, t) for k, t in options if k != self._all_key]
+
+    def set_options(self, options: list[tuple[str, str]], *, select_all: bool = False) -> None:
+        """Новый набор вариантов. Выбор сохраняется, если вариант остался; `select_all` - сбросить на «Все»."""
+        plain = self._plain(options)
+        keys = [k for k, _ in plain]
+        self._dropdown.options = [ft.DropdownOption(key=self._all_key, text=self._all_label), *[ft.DropdownOption(key=k, text=t) for k, t in plain]]
+        if select_all or self._dropdown.value not in [self._all_key, *keys]:
+            self._dropdown.value = self._all_key
+        self._multi.set_options(plain, select_all=select_all)
+        self._refresh()
+
+    @property
+    def options(self) -> list[ft.DropdownOption]:
+        return self._dropdown.options
+
+    @property
+    def _options(self) -> list[tuple[str, str]]:
+        return self._multi._options
+
+    # ------------------------------------------------------------------------------------------ значение
+
+    @property
+    def multi(self) -> bool:
+        return self._is_multi
+
+    @property
+    def value(self) -> str | None:
+        return self._dropdown.value
+
+    @value.setter
+    def value(self, key: str | None) -> None:
+        self._dropdown.value = key
+        if key in (None, self._all_key):
+            self._multi.set_selected([k for k, _ in self._multi._options])
+        else:
+            self._multi.set_selected([key])
+        self._refresh()
+
+    @property
+    def visible(self) -> bool:
+        return self.control.visible
+
+    @visible.setter
+    def visible(self, on: bool) -> None:
+        self.control.visible = on
+
+    def keys(self) -> list[str] | None:
+        if self._is_multi:
+            return self._multi.filter()
+        return None if self._dropdown.value in (None, self._all_key) else [self._dropdown.value]
+
+    filter = keys
+
+    @property
+    def selected(self) -> list[str]:
+        """Выбранные ключи (без фильтра - все варианты)."""
+        keys = self.keys()
+        return [k for k, _ in self._multi._options] if keys is None else keys
+
+    @property
+    def is_empty(self) -> bool:
+        return self._is_multi and self._multi.is_empty
+
+    def set_selected(self, keys: list[str]) -> None:
+        """Программно задать выбор (в обычном виде - только если выбран ровно один вариант, иначе «Все»)."""
+        known = {k for k, _ in self._multi._options}
+        picked = [k for k in keys if k in known]
+        self._multi.set_selected(picked)
+        self._dropdown.value = picked[0] if len(picked) == 1 else self._all_key
+        self._refresh()
+
+    def set_multi(self, on: bool) -> None:
+        """Переключить вид; выбор переносится: «Все» <-> все отмечены, один вариант <-> одна отметка; несколько отметок при возврате в обычный вид -> «Все»."""
+        if on == self._is_multi:
+            return
+        if on:
+            key = self._dropdown.value
+            self._multi.set_selected([k for k, _ in self._multi._options] if key in (None, self._all_key) else [key])
+        else:
+            chosen = self._multi.selected
+            self._dropdown.value = chosen[0] if len(chosen) == 1 else self._all_key
+        self._is_multi = on
+        self.control.content = self._multi.control if on else self._dropdown
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if attached(self.control):
+            self.control.update()
+
+
+class FilterBar:
+    """Тумблер «Мультивыбор» для набора `FilterSelect`: ВЫКЛ - все фильтры обычные выпадающие списки, ВКЛ - каждый открывает диалог с чекбоксами."""
+
+    def __init__(self, filters: list[FilterSelect], on_toggle) -> None:
+        self.filters, self._on_toggle = filters, on_toggle
+        self.switch = ft.Switch(label="Мультивыбор", value=False, on_change=self._changed, active_color=ACCENT)
+        self.control = ft.Container(content=self.switch, tooltip="Выбор нескольких значений в каждом фильтре (кроме периода)")
+
+    def set(self, on: bool) -> None:
+        self.switch.value = on
+        for f in self.filters:
+            f.set_multi(on)
+
+    async def _changed(self, _=None) -> None:
+        self.set(bool(self.switch.value))
+        res = self._on_toggle()
+        if asyncio.iscoroutine(res):
+            await res

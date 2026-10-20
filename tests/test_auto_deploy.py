@@ -1,4 +1,6 @@
 """Тесты чистой логики автодеплоя (без SSH). Пропускаются, если paramiko не установлен."""
+import sys
+
 import pytest
 
 pytest.importorskip("paramiko")
@@ -71,3 +73,37 @@ def test_parse_health_and_step9_scans_every_required_service():
     src = open(ad.__file__, encoding="utf-8").read()
     assert "for s_ in required:" in src and "--profile analytics logs" in src and "unhealthy" in src  # логи всех обязательных сервисов + health
     assert "analyzer" in ad.REQUIRED_SERVICES and "analyzer" in ad.LIVE_REQUIRED_SERVICES
+
+
+def test_client_build_command_is_the_publishing_powershell_script():
+    assert ad.CLIENT_BUILD_CMD == ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", r".\client\build_exe.ps1", "-Publish"]
+
+
+def test_build_client_waits_for_the_process_and_passes_on_success(tmp_path, capsys):
+    ad.build_client([sys.executable, "-c", "import sys; sys.exit(0)"], tmp_path)
+    assert "клиент собран" in capsys.readouterr().out
+
+
+def test_build_client_failure_aborts_the_deploy_with_the_exit_code(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        ad.build_client([sys.executable, "-c", "import sys; sys.exit(3)"], tmp_path)
+    assert e.value.code == 1 and "кодом 3" in capsys.readouterr().err
+
+
+def test_build_client_without_powershell_aborts(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        ad.build_client(["definitely-not-a-real-executable-xyz"], tmp_path)
+    assert "--skip-client-build" in capsys.readouterr().err
+
+
+def test_client_build_runs_before_any_ssh_connection(monkeypatch):
+    """Порядок в main: сборка клиента -> архив -> SSH. Упавшая сборка не должна дойти до сборки архива и подключения."""
+    calls = []
+    monkeypatch.setattr(ad, "get_params", lambda argv=None: __import__("argparse").Namespace(remote_dir="trading", skip_client_build=False, host="h", user="u", port=22,
+                                                                                            key=None, password="x", metaapi={}, health_wait=0, keep_archive=True))
+    monkeypatch.setattr(ad, "build_client", lambda *a, **k: (calls.append("client"), ad.fail("сборка упала"))[1])
+    monkeypatch.setattr(ad, "build_archive", lambda *a, **k: calls.append("archive"))
+    monkeypatch.setattr(ad, "connect", lambda a: calls.append("ssh"))
+    with pytest.raises(SystemExit):
+        ad.main([])
+    assert calls == ["client"]

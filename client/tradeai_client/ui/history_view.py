@@ -17,11 +17,6 @@ COLS = [("Сигнал", 96), ("Монета", 78), ("Стратегия", 110),
 WIDTHS = [x for _, x in COLS]
 
 
-def _dropdown(label: str, options: list[tuple[str, str]], width: float, on_select) -> ft.Dropdown:
-    return ft.Dropdown(label=label, value=options[0][0], options=[ft.DropdownOption(key=k, text=t) for k, t in options], width=width,
-                       on_select=on_select, border_color=w.BORDER, bgcolor=w.CARD)
-
-
 class HistoryView:
     def __init__(self, host, *, favorites: bool = False) -> None:
         self.host = host
@@ -32,10 +27,11 @@ class HistoryView:
         self._favorite_busy = False
         self._server_coins: list[str] = []
         self._boxes: dict[str, ft.Container] = {}  # id сделки -> контейнер строки (подсветка выбранной без пересборки таблицы)
-        self._status = _dropdown("Статус", [(k, v[0]) for k, v in STATUS_FILTERS.items()], 190, self._filter_changed)
-        self._coin = w.MultiSelect("Монеты", [(c, fmt.coin_short(c)) for c in COINS], self._filter_changed, host, width=190)
-        self._strategy = _dropdown("Стратегия", fmt.STRATEGY_OPTIONS, 230, self._filter_changed)
-        self._mode = _dropdown("Режим", fmt.MODE_OPTIONS, 180, self._mode_changed)
+        self._status = w.FilterSelect("Статус", [(k, v[0]) for k, v in STATUS_FILTERS.items()], self._filter_changed, host, width=190)
+        self._coin = w.FilterSelect("Монеты", [(c, fmt.coin_short(c)) for c in COINS], self._filter_changed, host, width=190)
+        self._strategy = w.FilterSelect("Стратегия", fmt.STRATEGY_OPTIONS, self._filter_changed, host, width=230)
+        self._mode = w.FilterSelect("Режим", fmt.MODE_OPTIONS, self._mode_changed, host, width=180)
+        self._bar = w.FilterBar([self._mode, self._status, self._coin, self._strategy], self._filter_changed)
         saved = getattr(self.host, "saved_mode", "")  # последний выбор пользователя; пока его нет, режим следует за активным контуром
         self._mode.value, self._mode_touched = saved or self.host.default_mode, bool(saved)
         if favorites:
@@ -51,7 +47,7 @@ class HistoryView:
                 "Двойной клик по строке — график сделки (свечи снапшота, вход/выход, SL/TP, зона FVG, причина входа). Звёздочка — пометить сделку как «идеальный сетап» (попадёт во вкладку «Избранное»).")
         self.control = ft.Column([
             ft.Container(height=2),
-            ft.Row([self._mode, self._status, self._coin.control, self._strategy, ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy,
+            ft.Row([self._mode.control, self._status.control, self._coin.control, self._strategy.control, self._bar.control, ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy,
                     ft.Container(expand=True), self._info, self._prev, self._next], spacing=10),
             w.label(hint, size=12),
             ft.Row([header], scroll=ft.ScrollMode.AUTO),
@@ -71,8 +67,7 @@ class HistoryView:
         """Профиль сменился (или только что открыт): варианты стратегий и монет, видимость режима."""
         strategies, pool = self._scope()
         options = fmt.STRATEGY_OPTIONS if strategies is None else [("all", "Все")] + [(k, fmt.strategy_label(k)) for k in strategies]
-        self._strategy.options = [ft.DropdownOption(key=k, text=t) for k, t in options]
-        self._strategy.value = "all"
+        self._strategy.set_options(options, select_all=True)
         if pool is not None:
             self._coin.set_options([(c, fmt.coin_short(c)) for c in pool], select_all=True)
         else:
@@ -91,19 +86,35 @@ class HistoryView:
 
     def _query_filters(self) -> tuple[list[str] | None, list[str] | None, str]:
         strategies, pool = self._scope()
-        picked_coins = self._coin.filter()
+        picked_coins = self._coin.keys()
         coins = picked_coins if picked_coins is not None else pool
-        picked = None if self._strategy.value in (None, "all") else [self._strategy.value]
-        mode = "all" if self.favorites else ("shadow" if strategies is not None else (self._mode.value or "shadow"))
-        return (picked or strategies), coins, mode
+        mode = "all" if self.favorites else ("shadow" if strategies is not None else self._mode_query())
+        return (self._strategy.keys() or strategies), coins, mode
+
+    def _mode_query(self) -> str:
+        """Параметр `mode` API (shadow | live | all) из фильтра «Режим»: в мультивыборе оба контура = all."""
+        keys = self._mode.keys()
+        return "all" if keys is None or len(keys) != 1 else keys[0]
+
+    def _statuses(self) -> list[str] | None:
+        """Статусы запроса: группы фильтра («Закрытые», «Открытые и ждущие»...) объединяются; None - без фильтра."""
+        keys = self._status.keys()
+        if keys is None:
+            return None
+        return list(dict.fromkeys(s for k in keys for s in (STATUS_FILTERS[k][1] or [])))
 
     async def _filter_changed(self, _=None) -> None:
         self._offset = 0
         await self.refresh()
 
+    def _mode_choice(self) -> str:
+        """Режим для запоминания: один выбранный контур, иначе all."""
+        keys = self._mode.keys()
+        return keys[0] if keys and len(keys) == 1 else "all"
+
     async def _mode_changed(self, _=None) -> None:
         self._mode_touched = True
-        self.host.remember_mode(self._mode.value)
+        self.host.remember_mode(self._mode_choice())
         await self._filter_changed()
 
     def follow_default_mode(self, mode: str) -> bool:
@@ -128,7 +139,7 @@ class HistoryView:
         client = self.host.client
         if client is None:
             return
-        if self._coin.is_empty:  # «Снять всё»: ничего не выбрано - ничего и не показываем (запрос без фильтра вернул бы всё)
+        if any(f.is_empty for f in self._bar.filters):  # «Снять всё» в каком-то фильтре: ничего не выбрано - ничего и не показываем (запрос без фильтра вернул бы всё)
             self._items, self._total, self._offset = [], 0, 0
             self._rebuild()
             self._info.value, self._prev.disabled, self._next.disabled = "0–0 из 0", True, True
@@ -138,7 +149,7 @@ class HistoryView:
         self._busy.visible = True
         self.control.update()
         try:
-            data = await client.trades(limit=PAGE, offset=self._offset, statuses=STATUS_FILTERS[self._status.value or "all"][1], coins=coins,
+            data = await client.trades(limit=PAGE, offset=self._offset, statuses=self._statuses(), coins=coins,
                                        strategies=strategies, mode=mode, favorite=self.favorites)
         except ApiError as exc:
             self._rows.controls = [w.banner(str(exc), w.RED, ft.Icons.ERROR)]

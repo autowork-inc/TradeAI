@@ -196,7 +196,7 @@ def test_registry_rejects_unknown_and_duplicate_names(monkeypatch):
     monkeypatch.setattr("features.defaults.HTF_FILTER_ENABLED", False)
     with pytest.raises(ConfigError, match="HTF"):
         build_strategies((A,))
-    assert [s.name for s in build_strategies((VWAP_REVERSION,))] == [VWAP_REVERSION]  # стратегиям без H4 фильтр не нужен
+    assert [s.name for s in build_strategies((OBI_BREAKOUT,))] == [OBI_BREAKOUT]  # стратегиям без H4 фильтр не нужен
 
 
 # ============================== сквозной прогон: пять настоящих детекторов на одном ряду свечей, окно 300 баров, тики на каждую свечу
@@ -206,7 +206,7 @@ SOFT = {
     SMC_COUNTER_TREND: lambda: StrategyCounterTrend(CounterTrendParams(min_sweep_atr=0.05, volume_mult=0.5)),
     OBI_BREAKOUT: lambda: StrategyObiBreakout(ObiParams(impulse_atr_mult=0.3, obi_min=0.2, delta_min=0.2, delta_volume_mult=0.5)),
     ICT_KILLZONES: lambda: StrategyKillzones(KillzoneParams(min_asia_range_atr=0, min_sweep_depth_atr=0, min_wick_frac=0)),
-    VWAP_REVERSION: lambda: StrategyVwapReversion(VwapParams(sd_mult=1.5, min_day_bars=8)),
+    VWAP_REVERSION: lambda: StrategyVwapReversion(VwapParams(sd_mult=1.5, min_day_bars=8, max_entry_to_ext_atr=99.0)),
     HORIZONTAL_BREAKOUT: lambda: StrategyHorizontalBreakout(HorizontalParams(volume_mult=0.5, min_clv=0.3, max_box_atr=8.0, min_touches=2,
                                                                              min_body_atr=0.1, max_risk_atr=6.0)),
     TRENDLINE_BREAKOUT: lambda: StrategyTrendlineBreakout(TrendlineParams(volume_mult=0.5, sweep_volume_mult=0.5, min_clv=0.3, min_body_atr=0.1,
@@ -361,7 +361,7 @@ def test_depth_feed_over_a_local_websocket_reconnects_and_reports_the_gap():
 
 def test_micro_structure_is_not_needed_for_other_strategies():
     from orchestrator.registry import NEEDS_HTF, NEEDS_MICRO
-    assert NEEDS_MICRO == (OBI_BREAKOUT,) and set(NEEDS_HTF) == {SMC_PRO_TREND, SMC_COUNTER_TREND, ICT_KILLZONES, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT,
+    assert NEEDS_MICRO == (OBI_BREAKOUT,) and set(NEEDS_HTF) == {SMC_PRO_TREND, SMC_COUNTER_TREND, ICT_KILLZONES, VWAP_REVERSION, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT,
                                                                   HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR}
     assert config.DEPTH_LEVELS == 10 and config.DEPTH_UPDATE_SPEED == "500ms"  # DepthFeed подписывается ровно на depth10@500ms
 

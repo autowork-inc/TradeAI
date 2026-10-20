@@ -203,10 +203,12 @@ def test_stats_render_for_chr_shows_pnl_from_zero(fx):
 def test_empty_coin_selection_queries_nothing(fx):
     client = FakeClient(fx)
     v = StatsView(Host(client=client))
+    v._bar.set(True)  # «ничего не выбрано» возможно только в мультивыборе
     v._coin.set_selected([])
     asyncio.run(v.refresh())
     assert client.stat_calls == []
     h = HistoryView(Host(client=client))
+    h._bar.set(True)
     h._coin.set_selected([])
     asyncio.run(h.refresh())
     assert client.trade_calls == [] and h._total == 0
@@ -499,9 +501,109 @@ def test_significance_card_sits_in_the_same_row_as_the_filters_at_the_right_edge
     from tradeai_client.ui.analysis_view import AnalysisView
 
     stats, analysis = StatsView(Host()), AnalysisView(Host())
-    for view, first_filter in ((stats, stats._mode), (analysis, analysis._mode)):
+    for view, first_filter in ((stats, stats._mode.control), (analysis, analysis._mode)):
         rows = [c for c in view.control.controls if isinstance(c, ft.Row) and view._goal.control in c.controls]
         assert len(rows) == 1, "карточка должна быть в строке фильтров, а не на отдельной"
         row = rows[0]
         filters = row.controls[0]
         assert row.controls[-1] is view._goal.control and isinstance(filters, ft.Row) and filters.expand and filters.wrap and first_filter in filters.controls
+
+
+# ======================================================================================== тумблер «Мультивыбор» для всех фильтров
+
+
+def test_filters_are_plain_dropdowns_until_multiselect_is_switched_on():
+    """ВЫКЛ (по умолчанию): все фильтры, включая монеты, - обычные Dropdown; ВКЛ: каждый - кнопка, открывающая диалог с чекбоксами; обратно - снова Dropdown."""
+    h = HistoryView(Host())
+    s = StatsView(Host())
+    for view, names in ((h, ("_mode", "_status", "_coin", "_strategy")), (s, ("_mode", "_coin", "_strategy", "_side"))):
+        assert view._bar.switch.value is False
+        for name in names:
+            assert isinstance(getattr(view, name).control.content, ft.Dropdown), name
+        view._bar.set(True)
+        for name in names:
+            f = getattr(view, name)
+            assert f.multi and isinstance(f.control.content, ft.OutlinedButton), name
+        view._bar.set(False)
+        for name in names:
+            assert isinstance(getattr(view, name).control.content, ft.Dropdown), name
+    assert isinstance(s._period, ft.Dropdown)  # период - один диапазон времени: мультивыбора нет
+
+
+def test_filter_select_carries_the_selection_between_views():
+    f = w.FilterSelect("Стратегия", [("a", "A"), ("b", "B"), ("c", "C")], lambda: None, Host())
+    assert f.keys() is None and [o.key for o in f.options] == ["all", "a", "b", "c"]
+    f.value = "b"
+    f.set_multi(True)
+    assert f.keys() == ["b"]  # один вариант -> одна отметка
+    f._multi.set_selected(["a", "c"])
+    assert f.keys() == ["a", "c"]
+    f.set_multi(False)
+    assert f.value == "all" and f.keys() is None  # несколько отметок в обычный вид не помещаются -> «Все»
+    f.set_multi(True)
+    assert f.keys() is None  # «Все» -> все отмечены -> без фильтра
+    f._multi.set_selected([])
+    assert f.is_empty
+    f.set_options([("a", "A"), ("z", "Z")])
+    assert f.is_empty and [k for k, _ in f._options] == ["a", "z"]
+    f.set_selected(["z"])
+    assert f.keys() == ["z"] and f.value == "z"
+
+
+def test_multiselect_of_strategies_statuses_modes_and_sides_reaches_the_requests(fx):
+    client = FakeClient(fx)
+    h = HistoryView(Host(client=client))
+    h._bar.set(True)
+    h._strategy.set_selected(["SMC_Pro_Trend", "VWAP_Reversion"])
+    h._status._multi.set_selected(["closed", "active"])
+    h._mode._multi.set_selected(["live"])
+    h._coin.set_selected(["BTCUSDT"])
+    asyncio.run(h.refresh())
+    call = client.trade_calls[-1]
+    assert call["strategies"] == ["SMC_Pro_Trend", "VWAP_Reversion"] and call["statuses"] == ["closed", "open", "pending_limit", "pending_market"]
+    assert call["mode"] == "live" and call["coins"] == ["BTCUSDT"]
+    h._mode._multi.set_selected(["live", "shadow"])  # оба контура = all
+    h._status._multi.set_selected(["closed", "cancelled", "aborted", "active"])
+    asyncio.run(h.refresh())
+    assert client.trade_calls[-1]["mode"] == "all"
+
+    s = StatsView(Host(client=client))
+    s._bar.set(True)
+    s._strategy.set_selected(["SMC_Pro_Trend", "OBI_Breakout"])
+    s._side._multi.set_selected(["long"])
+    asyncio.run(s.refresh())
+    f = client.stat_calls[-1]
+    assert f["strategies"] == ["SMC_Pro_Trend", "OBI_Breakout"] and f["sides"] == ["long"]
+    s._side._multi.set_selected(["long", "short"])  # обе стороны = без фильтра
+    assert s._filters()["sides"] is None
+
+
+def test_any_empty_multiselect_filter_queries_nothing(fx):
+    client = FakeClient(fx)
+    h = HistoryView(Host(client=client))
+    h._bar.set(True)
+    h._strategy.set_selected([])
+    h._status._multi.set_selected([])
+    asyncio.run(h.refresh())
+    assert client.trade_calls == [] and h._total == 0
+    s = StatsView(Host(client=client))
+    s._bar.set(True)
+    s._side._multi.set_selected([])
+    asyncio.run(s.refresh())
+    assert client.stat_calls == [] and "Сторона" in s._body.controls[0].value
+
+
+def test_switching_the_toggle_refreshes_and_single_mode_still_filters_by_one_value(fx):
+    client = FakeClient(fx)
+    h = HistoryView(Host(client=client))
+    h._status.value = "closed"
+    h._strategy.value = "VWAP_Reversion"
+    asyncio.run(h.refresh())
+    call = client.trade_calls[-1]
+    assert call["statuses"] == ["closed"] and call["strategies"] == ["VWAP_Reversion"]
+    h._bar.switch.value = True
+    asyncio.run(h._bar._changed())  # тумблер: переключает фильтры и перезапрашивает таблицу
+    assert h._status.multi and len(client.trade_calls) == 2 and client.trade_calls[-1]["strategies"] == ["VWAP_Reversion"]
+    h._bar.switch.value = False
+    asyncio.run(h._bar._changed())
+    assert not h._status.multi and len(client.trade_calls) == 3
