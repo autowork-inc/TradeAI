@@ -100,25 +100,33 @@ def kz(df: pl.DataFrame, params: KillzoneParams | None = None) -> pl.DataFrame:
     return detect_killzones(df, STEP, params)
 
 
-def kz_frame(n: int = 60, start: int = 0, **series) -> pl.DataFrame:
+def kz_frame(n: int = 60, start: int = 0, bias: int | None = -1, **series) -> pl.DataFrame:
     """Свечи 15m с 00:00 UTC (бар i = 00:00 + 15 мин * i): Азия - бары 0..27 (00:00-07:00), London - 28..39 (07:00-10:00), New York - 48..59.
-    Азия: High 102 (бар 10), Low 98 (бар 12)."""
+    Азия: High 102 (бар 10), Low 98 (бар 12), ширина 4 ATR. Тренд H4 по умолчанию медвежий (шорт разрешён)."""
     base = {"high": {10: 102.0}, "low": {12: 98.0}}
     for k, v in series.items():
         base.setdefault(k, {}).update(v)
-    return frame(n, **base).slice(start)
+    return with_cols(frame(n, **base), htf_bias=bias).slice(start)
+
+
+# сигнальная шорт-свеча на баре 30: прокол до 103 (1.0 ATR), закрытие 101 под Asia High, верхняя тень (103 - 101.2) / 3 = 0.6
+SHORT_BAR = {"high": {30: 103.0}, "low": {30: 100.0}, "open": {30: 101.2}, "close": {30: 101.0}}
+# зеркало в New York (бар 50): прокол до 97 (1.0 ATR), закрытие 99, нижняя тень (98.8 - 97) / 3 = 0.6
+LONG_BAR = {"high": {50: 100.0}, "low": {50: 97.0}, "open": {50: 98.8}, "close": {50: 99.0}}
 
 
 def test_killzone_short_sweep_of_asia_high_in_london():
-    out = kz(kz_frame(high={30: 103.0}, low={30: 100.0}, open={30: 102.0}, close={30: 101.0}))
+    out = kz(kz_frame(**SHORT_BAR))
     assert idx(out, "kz_short_signal") == [30] and not any(out["kz_long_signal"])
     r = out.row(30, named=True)
     assert (r["kz_asia_high"], r["kz_asia_low"], r["kz_session"]) == (102.0, 98.0, "london") and r["kz_short_sl"] == pytest.approx(103.2)
+    assert r["kz_range_atr"] == pytest.approx(4.0) and r["kz_short_depth_atr"] == pytest.approx(1.0) and r["kz_short_wick"] == pytest.approx(0.6)
 
 
 def test_killzone_long_sweep_of_asia_low_in_new_york():
-    out = kz(kz_frame(high={50: 100.0}, low={50: 97.0}, open={50: 98.0}, close={50: 99.0}))
+    out = kz(kz_frame(bias=1, **LONG_BAR))
     assert idx(out, "kz_long_signal") == [50] and out["kz_session"][50] == "new_york" and out["kz_long_sl"][50] == pytest.approx(96.8)
+    assert out["kz_long_wick"][50] == pytest.approx(0.6) and out["kz_long_depth_atr"][50] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("name, series", [
@@ -133,17 +141,52 @@ def test_killzone_each_condition_is_required(name, series):
     assert idx(out, "kz_short_signal") == [], name
 
 
+@pytest.mark.parametrize("name, kwargs", [
+    ("тренд H4 бычий: шорт против тренда", {"bias": 1}),
+    ("тренд H4 нейтральный - запрет", {"bias": 0}),
+    ("нет bias (null) - запрет", {"bias": None}),
+    ("прокол микроскопический: 0.1 ATR < 0.15", {"high": {30: 102.1}, "low": {30: 100.0}}),
+    ("слабое отвержение: верхняя тень 0.4 < 0.55", {"open": {30: 101.8}}),
+])
+def test_killzone_quality_filters_block_the_short(name, kwargs):
+    series = {k: dict(v) for k, v in SHORT_BAR.items()}
+    for k, v in kwargs.items():
+        if k != "bias":
+            series.setdefault(k, {}).update(v)
+    out = kz(kz_frame(bias=kwargs.get("bias", -1), **series))
+    assert idx(out, "kz_short_signal") == [], name
+
+
+def test_killzone_narrow_asia_range_gives_no_signal():
+    assert idx(kz(kz_frame(**SHORT_BAR)), "kz_short_signal") == [30]  # ширина 4 ATR
+    assert idx(kz(kz_frame(**SHORT_BAR), KillzoneParams(min_asia_range_atr=4.5)), "kz_short_signal") == []
+
+
+def test_killzone_long_is_blocked_by_bearish_trend_and_weak_wick():
+    assert idx(kz(kz_frame(bias=-1, **LONG_BAR)), "kz_long_signal") == []  # лонг против медвежьего H4
+    weak = {**LONG_BAR, "open": {50: 98.0}}  # нижняя тень (98 - 97) / 3 = 0.33
+    assert idx(kz(kz_frame(bias=1, **weak)), "kz_long_signal") == []
+
+
+def test_killzone_filters_can_be_relaxed_for_calibration():
+    relaxed = KillzoneParams(require_htf_trend=False, min_asia_range_atr=0, min_sweep_depth_atr=0, min_wick_frac=0)
+    weak = kz_frame(bias=1, high={30: 102.1}, low={30: 100.0}, open={30: 101.8}, close={30: 101.0})
+    assert idx(kz(weak), "kz_short_signal") == [] and idx(kz(weak, relaxed), "kz_short_signal") == [30]
+    assert idx(kz(kz_frame().drop("htf_bias"), relaxed), "kz_short_signal") == []  # без фильтра колонка bias не нужна
+
+
 def test_killzone_level_is_used_once_per_day_and_incomplete_asia_gives_nothing():
-    taken = kz_frame(high={30: 103.0, 50: 103.0}, open={30: 102.0, 50: 102.0}, close={30: 101.0, 50: 101.0})  # London уже снял уровень: NY - повтор
-    assert idx(kz(taken), "kz_short_signal") == [30]
-    late = kz_frame(high={30: 103.0}, open={30: 102.0}, close={30: 101.0}, start=10)  # кадр начинается в 02:30: диапазон Азии неполный
+    both = {k: {**v, 50: v[30]} for k, v in SHORT_BAR.items()}
+    assert idx(kz(kz_frame(**both)), "kz_short_signal") == [30]  # London уже снял уровень: NY - повтор
+    late = kz_frame(start=10, **SHORT_BAR)  # кадр начинается в 02:30: диапазон Азии неполный
     assert idx(kz(late), "kz_short_signal") == [] and late.height == 50
 
 
 def test_killzone_next_day_has_its_own_asia_range():
     n = 96 + 40
-    out = kz(frame(n, high={10: 102.0, 96 + 10: 120.0}, low={12: 98.0, 96 + 12: 118.0}, open={96 + 30: 121.0}, close={96 + 30: 119.5}) .with_columns(
-        pl.when(pl.int_range(pl.len()) == 96 + 30).then(121.0).otherwise(pl.col("high")).alias("high")))  # бар 30 второго дня: High 121 > 120
+    base = frame(n, high={10: 102.0, 96 + 10: 120.0}, low={12: 98.0, 96 + 12: 118.0, 96 + 30: 119.0}, open={96 + 30: 119.8}, close={96 + 30: 119.5})
+    base = base.with_columns(pl.when(pl.int_range(pl.len()) == 96 + 30).then(121.0).otherwise(pl.col("high")).alias("high"))  # бар 30 второго дня: High 121 > 120
+    out = kz(with_cols(base, htf_bias=-1))
     assert idx(out, "kz_short_signal") == [96 + 30]
     assert out["kz_asia_high"][96 + 30] == 120.0  # сутки второго дня, а не первого
 
@@ -153,10 +196,15 @@ def test_killzone_params_validation():
         KillzoneParams(london=(6, 10))  # London начинается раньше конца Азии
     with pytest.raises(ConfigError):
         KillzoneParams(new_york=(9, 15))  # NY пересекает London
+    for bad in ({"min_asia_range_atr": -1}, {"min_sweep_depth_atr": True}, {"min_wick_frac": 1.5}, {"require_htf_trend": 1}):
+        with pytest.raises(ConfigError):
+            KillzoneParams(**bad)
     with pytest.raises(ConfigError):
         detect_killzones(kz_frame(), 7 * 60_000)  # интервал не делит час
     with pytest.raises(DataError, match="atr"):
         detect_killzones(kz_frame().drop("atr"), STEP)
+    with pytest.raises(DataError, match="htf_bias"):
+        detect_killzones(kz_frame().drop("htf_bias"), STEP)
     assert HOUR_MS * 24 == DAY_MS
 
 
@@ -348,12 +396,13 @@ def with_micro(f: pl.DataFrame) -> pl.DataFrame:
 
 SOFT_CT = CounterTrendParams(min_sweep_atr=0.05, volume_mult=0.5)  # мягкие пороги: на случайных данных глубоких свипов почти нет
 SOFT_OBI = ObiParams(impulse_atr_mult=0.3, obi_min=0.2, delta_min=0.2, delta_volume_mult=0.5)
+SOFT_KZ = KillzoneParams(min_asia_range_atr=0, min_sweep_depth_atr=0, min_wick_frac=0)  # на случайных данных строгие пороги сигналов почти не дают
 SOFT_VW = VwapParams(sd_mult=1.5, min_day_bars=8)
 
 CASES = {  # имя -> (функция кадр свечей -> кадр с сигналами, колонки сигналов, число баров случайного ряда: сигналы редкие - нужен длинный)
     "counter_trend": (lambda d: detect_counter_trend(with_bias(pipeline_features(d)), SOFT_CT), ("ct_short_signal", "ct_long_signal"), 6000),
     "obi_breakout": (lambda d: detect_obi_breakout(with_micro(pipeline_features(d)), SOFT_OBI), ("obi_long_signal", "obi_short_signal"), 1500),
-    "killzones": (lambda d: kz(pipeline_features(d)), ("kz_short_signal", "kz_long_signal"), 6000),
+    "killzones": (lambda d: kz(with_bias(pipeline_features(d)), SOFT_KZ), ("kz_short_signal", "kz_long_signal"), 20000),
     "vwap_reversion": (lambda d: detect_vwap_reversion(pipeline_features(d), SOFT_VW), ("vw_short_signal", "vw_long_signal"), 1500),
 }
 

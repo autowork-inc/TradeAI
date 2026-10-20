@@ -44,7 +44,7 @@ SHADOW_STRATEGIES = (SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZON
 # Стратегии без доступа к live (2026-10-18): никогда не исполняются боевым движком - config.validate и LiveRiskManager отвергают их в
 # APPROVED_STRATEGIES (ConfigError), LiveMirrorSink их не пересылает. Список продублирован в config (config не импортирует оркестратор).
 SHADOW_ONLY_STRATEGIES = (HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT, HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR)
-NEEDS_HTF = (SMC_PRO_TREND, SMC_COUNTER_TREND, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT, HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR)  # читают колонку htf_bias (H4)
+NEEDS_HTF = (SMC_PRO_TREND, SMC_COUNTER_TREND, ICT_KILLZONES, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT, HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR)  # читают колонку htf_bias (H4)
 NEEDS_MICRO = (OBI_BREAKOUT,)  # читают колонки ms_obi / ms_delta (стакан + лента)
 
 

@@ -135,6 +135,7 @@ class StrategyKillzones:
             )
             out.append(_market_signal(self.name, ctx, direction, sl, geo, {
                 "session": last["kz_session"], "asia_high": last["kz_asia_high"], "asia_low": last["kz_asia_low"], "atr": last["atr"],
+                "asia_range_atr": last["kz_range_atr"], "sweep_depth_atr": last[f"kz_{side}_depth_atr"], "wick_frac": last[f"kz_{side}_wick"],
                 **_htf_meta(last)}))
         return tuple(out)
 
