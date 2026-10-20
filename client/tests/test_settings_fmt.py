@@ -52,13 +52,40 @@ def test_broken_settings_file_is_reported_not_ignored(tmp_path):
         load_settings(p, env={})
 
 
-def test_settings_file_lives_next_to_exe(monkeypatch, tmp_path):
+def test_settings_file_lives_in_the_persistent_user_folder_not_next_to_exe(monkeypatch, tmp_path):
     exe = tmp_path / "TradeAI-Monitor.exe"
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(exe))
-    assert settings_path() == tmp_path / "settings.json"
-    monkeypatch.setattr(sys, "frozen", False, raising=False)
-    assert settings_path() == settings_mod.Path(settings_mod.__file__).resolve().parent.parent / "settings.json"  # client/
+    monkeypatch.setattr(settings_mod.os, "name", "nt")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    assert settings_path() == tmp_path / "Roaming" / "TradeAI-Monitor" / "settings.json"
+    assert settings_mod.legacy_settings_path() == tmp_path / "settings.json"  # прежнее место - только запасной источник
+
+
+def test_settings_survive_a_rebuild_and_the_legacy_file_is_migrated_once(monkeypatch, tmp_path):
+    """Пересборка/обновление .exe стирает папку с .exe, но не %APPDATA%: ключ API не запрашивается заново. Файл рядом с .exe переносится в папку пользователя."""
+    monkeypatch.setattr(settings_mod.os, "name", "nt")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    exe_dir = tmp_path / "dist"
+    exe_dir.mkdir()
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "TradeAI-Monitor.exe"))
+    (exe_dir / "settings.json").write_text(json.dumps({"base_url": "http://203.0.113.7:8001", "api_key": "k" * 40, "profile": "CHR"}), encoding="utf-8")
+    first = load_settings(env={})  # старый файл рядом с .exe
+    assert first.api_key == "k" * 40 and first.profile == "CHR" and first.profile_chosen  # профиль уже был выбран -> экран выбора не нужен
+    assert settings_path().exists()  # перенесён
+    (exe_dir / "settings.json").unlink()  # «пересборка»: папка dist очищена
+    again = load_settings(env={})
+    assert again.api_key == "k" * 40 and again.profile == "CHR" and again.base_url == "http://203.0.113.7:8001"
+    save_settings(ClientSettings(api_key="n" * 40, profile="SANTA", profile_chosen=True))
+    assert load_settings(env={}).api_key == "n" * 40 and not (exe_dir / "settings.json").exists()
+
+
+def test_profile_chosen_defaults_to_false_for_a_new_install_and_is_not_forced_by_garbage(monkeypatch, tmp_path):
+    assert ClientSettings().profile_chosen is False and ClientSettings(profile_chosen="да").profile_chosen is False
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"api_key": "k" * 40}), encoding="utf-8")
+    assert load_settings(p, env={}).profile_chosen is False  # профиля в файле нет -> покажем экран выбора
 
 
 def test_defaults_come_from_build_config_when_no_file(monkeypatch, tmp_path):
@@ -69,15 +96,15 @@ def test_defaults_come_from_build_config_when_no_file(monkeypatch, tmp_path):
 
 
 def test_first_run_saves_next_to_exe_and_second_run_loads_it(monkeypatch, tmp_path):
-    """Сценарий «один клик»: ввод адреса и ключа один раз -> settings.json рядом с .exe -> следующий запуск берёт их оттуда."""
+    """Сценарий «один клик»: ввод адреса и ключа один раз -> settings.json в папке пользователя -> следующий запуск (в т.ч. новый .exe) берёт их оттуда."""
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(tmp_path / "app.exe"))
-    env = {"APPDATA": str(tmp_path / "appdata")}
+    monkeypatch.setattr(settings_mod.os, "name", "nt")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     written = save_settings(ClientSettings(base_url="http://203.0.113.7:8001", api_key="k" * 40))
-    assert written == tmp_path / "settings.json"
-    s = load_settings(env=env)
+    assert written == tmp_path / "appdata" / "TradeAI-Monitor" / "settings.json" and not (tmp_path / "settings.json").exists()
+    s = load_settings(env={})
     assert (s.base_url, s.api_key) == ("http://203.0.113.7:8001", "k" * 40)
-    assert not (tmp_path / "appdata").exists()
 
 
 def test_stale_appdata_file_is_ignored(monkeypatch, tmp_path):
@@ -92,10 +119,10 @@ def test_stale_appdata_file_is_ignored(monkeypatch, tmp_path):
     assert s.base_url == build_defaults.SERVER_URL and s.api_key == build_defaults.API_KEY
 
 
-def test_unwritable_exe_folder_raises_oserror(monkeypatch, tmp_path):
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "ro" / "app.exe"))
-    (tmp_path / "ro").write_text("файл вместо папки: писать рядом с .exe нельзя", encoding="utf-8")
+def test_unwritable_user_folder_raises_oserror(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings_mod.os, "name", "nt")
+    (tmp_path / "ro").write_text("файл вместо папки: писать нельзя", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "ro"))
     with pytest.raises(OSError):
         save_settings(ClientSettings(base_url="http://h:1", api_key="z" * 40))
 

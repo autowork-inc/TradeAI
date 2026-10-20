@@ -178,7 +178,7 @@ class HistoryView:
         r, pnl = t["r_multiple"], t["pnl"]
         exit_label = fmt.EXIT_RU.get(t["exit_reason"], t["exit_reason"] or fmt.DASH)
         restart = t["exit_reason"] == "process_restart"
-        status = fmt.STATUS_RU.get(t["status"], t["status"]) + (" ⚠" if t["gap_affected"] else "")
+        status = fmt.STATUS_RU.get(t["status"], t["status"])  # gap_affected - только в карточке разбора сделки (chart_spec), не в таблице
         if restart:
             status = exit_label  # «Прервана (Рестарт бота)» вместо голого «Прервана»
         side_color = w.GREEN if t["side"] == "long" else w.RED

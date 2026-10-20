@@ -46,23 +46,29 @@
   /* ------------------------------------------------------------------ время и цены */
   const fmtLocal = (sec) => { const d = new Date(sec * 1000); return pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); };
   const ivSec = () => IV[S.interval] || 900;
-  function timeToLogical(t) {
-    const b = S.bars, n = b.length;
+  /* Время <-> логический индекс свечи. Свеча занимает интервал [open, open + iv), её тело нарисовано в центре (open + iv/2), поэтому индекс считается от СЕРЕДИНЫ свечи:
+     иначе точка рисунка, привязанная к абсолютному времени, при смене таймфрейма сдвигалась бы на полсвечи нового таймфрейма. Рисунки хранят только (время UTC, цена). */
+  const barIv = () => S.barsIv || ivSec();
+  const specIv = () => IV[CFG.interval] || ivSec();  // длина свечи таймфрейма СДЕЛКИ: правый край зон/линий сигнала не зависит от выбранного сейчас таймфрейма
+  function rawToLogical(t) {
+    const b = S.bars, n = b.length, iv = barIv();
     if (!n) return null;
-    if (t <= b[0].time) return (t - b[0].time) / ivSec();
-    if (t >= b[n - 1].time) return n - 1 + (t - b[n - 1].time) / ivSec();
+    if (t <= b[0].time) return (t - b[0].time) / iv;
+    if (t >= b[n - 1].time) return n - 1 + (t - b[n - 1].time) / iv;
     let lo = 0, hi = n - 1;
     while (hi - lo > 1) { const m = (lo + hi) >> 1; if (b[m].time <= t) lo = m; else hi = m; }
     return lo + (t - b[lo].time) / (b[hi].time - b[lo].time);
   }
-  function logicalToTime(L) {
-    const b = S.bars, n = b.length;
+  function rawToTime(L) {
+    const b = S.bars, n = b.length, iv = barIv();
     if (!n) return null;
-    if (L <= 0) return b[0].time + L * ivSec();
-    if (L >= n - 1) return b[n - 1].time + (L - (n - 1)) * ivSec();
+    if (L <= 0) return b[0].time + L * iv;
+    if (L >= n - 1) return b[n - 1].time + (L - (n - 1)) * iv;
     const i = Math.floor(L);
     return b[i].time + (L - i) * (b[i + 1].time - b[i].time);
   }
+  const timeToLogical = (t) => rawToLogical(t - barIv() / 2);
+  const logicalToTime = (L) => { const r = rawToTime(L); return r == null ? null : r + barIv() / 2; };
   const X = (sec) => { const L = timeToLogical(sec); return L == null ? null : chart.timeScale().logicalToCoordinate(L); };
   const Y = (price) => series.priceToCoordinate(price);
   const xToTime = (x) => { const L = chart.timeScale().coordinateToLogical(x); return L == null ? null : logicalToTime(L); };
@@ -77,7 +83,7 @@
   /* ------------------------------------------------------------------ данные */
   const toBar = (r) => ({ time: Math.floor(r[0] / 1000), open: +r[1], high: +r[2], low: +r[3], close: +r[4], volume: +r[5] });
   function setBars(arr) {
-    S.bars = arr;
+    S.bars = arr; S.barsIv = ivSec();  // интервал, в котором лежат свечи (S.interval меняется до их загрузки)
     series.setData(arr.map((b) => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
     vol.setData(arr.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? 'rgba(38,166,154,.35)' : 'rgba(239,83,80,.35)' })));
     applyMarkers(); scheduleDraw();
@@ -263,7 +269,7 @@
 
   function drawSpecLayer(ctx, P) {
     for (const b of spec.boxes || []) {
-      const x1 = X(b.t1 / 1000), x2 = X(b.t2 / 1000 + ivSec()), y1 = Y(b.p1), y2 = Y(b.p2);
+      const x1 = X(b.t1 / 1000), x2 = X(b.t2 / 1000 + specIv()), y1 = Y(b.p1), y2 = Y(b.p2);
       if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
       ctx.fillStyle = b.fill; ctx.strokeStyle = b.color; ctx.lineWidth = 1;
       ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
@@ -272,7 +278,7 @@
     }
     for (const g of CFG.chr ? [] : spec.segments || []) {
       // линия геометрии сигнала - ровно от (t1, p1) до (t2, p2): наклонные линии (трендовые) рисуются с настоящим наклоном, горизонтальные - p1 == p2
-      const x1 = X(g.t1 / 1000), x2 = X(g.t2 / 1000 + ivSec()), y1 = Y(g.price), y2 = Y(g.price2 == null ? g.price : g.price2);
+      const x1 = X(g.t1 / 1000), x2 = X(g.t2 / 1000 + specIv()), y1 = Y(g.price), y2 = Y(g.price2 == null ? g.price : g.price2);
       if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
       lineBetween(ctx, { x: x1, y: y1 }, { x: x2, y: y2 }, g.color, 1.5, [5, 4]);
       if (g.label) label(ctx, g.label, x1 + 2, y1 - 10, g.color);
@@ -287,7 +293,7 @@
     if (!S.showBot || !CFG.bot) return;
     for (const it of CFG.bot.items) {
       if (it.kind === 'zone') {
-        const x1 = X(it.t1 / 1000), x2 = X(it.t2 / 1000 + ivSec()), y1 = Y(it.p1), y2 = Y(it.p2);
+        const x1 = X(it.t1 / 1000), x2 = X(it.t2 / 1000 + specIv()), y1 = Y(it.p1), y2 = Y(it.p2);
         if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
         ctx.fillStyle = it.fill; ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.max(2, Math.abs(y2 - y1)));
       } else if (it.kind === 'line') {

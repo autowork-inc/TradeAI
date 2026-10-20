@@ -1,12 +1,14 @@
-"""Настройки клиента: адрес API, ключ, опции графика. Хранятся в settings.json РЯДОМ С .exe (при запуске из исходников - в папке client/).
-Старый файл в %APPDATA% больше не читается (он перебивал бы адрес из сборки).
-Нет файла - берутся значения из build_defaults.py (адрес и, если был задан при сборке, ключ).
+"""Настройки клиента: адрес API, ключ, профиль, опции графика. Хранятся в ПОСТОЯННОЙ папке пользователя %APPDATA%\\TradeAI-Monitor\\settings.json (2026-10-20):
+ни пересборка .exe, ни перенос файла, ни автообновление их не стирают (раньше файл лежал рядом с .exe и пропадал вместе с папкой сборки - ключ API
+запрашивался заново). Старый файл рядом с .exe читается один раз как запасной и переносится в папку пользователя.
+Нет файлов - берутся значения из build_defaults.py (адрес и, если был задан при сборке, ключ).
 
 Ключ API лежит в этом файле открытым текстом: не кладите папку с .exe в общие папки/облако. Ключ можно не сохранять
 (`remember_key = False`) или задать переменной окружения TRADEAI_API_KEY. Ключ никогда не пишется в логи и не передаётся в адресе запроса.
 """
 
 import json
+import logging
 import os
 import sys
 from dataclasses import asdict, dataclass, field, fields
@@ -18,6 +20,7 @@ from tradeai_client import build_defaults
 DEFAULT_URL = build_defaults.SERVER_URL
 DEFAULT_API_KEY = build_defaults.API_KEY
 SETTINGS_FILE = "settings.json"
+log = logging.getLogger(__name__)
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
@@ -35,6 +38,7 @@ class ClientSettings:
     balance_visible: bool = False  # сумма баланса в шапке по умолчанию скрыта (***)
     profile: str = "SANTA"  # активный профиль (SANTA | CHR): запоминается и загружается при следующем запуске
     chr_extra_coins: list[str] = field(default_factory=list)  # монеты, добавленные пользователем в пул профиля CHR (сверх умолчаний tradeai_client.profiles)
+    profile_chosen: bool = False  # пользователь уже выбирал профиль на экране выбора (False - экран покажется при запуске)
     last_seen_version: str = ""  # последняя версия, о которой пользователю показали «Что нового»; пусто - ни одной не видел
     mode_filter: str = ""  # последний выбранный пользователем режим Statistics/History (all|live|shadow); пусто - следовать активному контуру
 
@@ -50,6 +54,7 @@ class ClientSettings:
         """Файл настроек правит человек: неверный профиль -> SANTA, неверный список монет -> пустой (а не падение при старте)."""
         from tradeai_client.profiles import normalize_profile
         self.profile = normalize_profile(self.profile)
+        self.profile_chosen = self.profile_chosen is True
         if not isinstance(self.last_seen_version, str):
             self.last_seen_version = ""
         if not isinstance(self.chr_extra_coins, list) or not all(isinstance(c, str) for c in self.chr_extra_coins):
@@ -78,14 +83,31 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def user_dir() -> Path:
+    """Постоянная папка данных клиента: %APPDATA%\\TradeAI-Monitor (вне папки сборки/обновления .exe)."""
+    base = os.environ.get("APPDATA") if os.name == "nt" else None
+    return (Path(base) if base else Path.home() / ".config") / "TradeAI-Monitor"
+
+
 def settings_path() -> Path:
-    """Основной файл настроек: рядом с .exe."""
+    """Основной файл настроек: папка пользователя (переживает пересборку и обновление .exe)."""
+    return user_dir() / SETTINGS_FILE
+
+
+def legacy_settings_path() -> Path:
+    """Прежнее место (до 2026-10-20): рядом с .exe. Читается как запасное и переносится в папку пользователя."""
     return app_dir() / SETTINGS_FILE
+
+
+def settings_exist() -> bool:
+    return settings_path().exists() or legacy_settings_path().exists()
 
 
 def load_settings(path: Path | None = None, env: dict[str, str] | None = None) -> ClientSettings:
     e = os.environ if env is None else env
-    path = path if path is not None else settings_path()
+    migrate = path is None
+    if path is None:
+        path = settings_path() if settings_path().exists() or not legacy_settings_path().exists() else legacy_settings_path()
     values: dict = {}
     if path is not None and path.exists():
         try:
@@ -96,11 +118,18 @@ def load_settings(path: Path | None = None, env: dict[str, str] | None = None) -
             raise SettingsError(f"Файл настроек {path} имеет неверный формат")
         known = {f.name for f in fields(ClientSettings)}
         values = {k: v for k, v in raw.items() if k in known}
+        if "profile" in raw and "profile_chosen" not in raw:  # файл от клиента до экрана выбора: профиль уже выбран, второй раз не спрашиваем
+            values["profile_chosen"] = True
     s = ClientSettings(**values)
     if e.get("TRADEAI_API_URL"):
         s.base_url = e["TRADEAI_API_URL"]
     if e.get("TRADEAI_API_KEY"):
         s.api_key = e["TRADEAI_API_KEY"]
+    if migrate and path == legacy_settings_path() and path.exists():  # перенос в постоянную папку (ошибку записи не скрываем, но запуск не роняем)
+        try:
+            _write(s, settings_path())
+        except OSError as exc:
+            log.warning("Не удалось перенести настройки в %s: %s", settings_path(), exc)
     return s
 
 
@@ -116,5 +145,5 @@ def _write(s: ClientSettings, path: Path) -> Path:
 
 
 def save_settings(s: ClientSettings, path: Path | None = None) -> Path:
-    """Сохранить настройки рядом с .exe. Нельзя записать - OSError (интерфейс покажет причину: положите .exe в папку с правом записи)."""
+    """Сохранить настройки в папку пользователя. Нельзя записать - OSError (интерфейс покажет причину)."""
     return _write(s, path if path is not None else settings_path())

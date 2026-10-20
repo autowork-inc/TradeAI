@@ -17,3 +17,10 @@ def fx():
         return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
     return load
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_dir(monkeypatch, tmp_path_factory):
+    """Постоянная папка пользователя (%APPDATA%) - во временный каталог: тесты не читают и не пишут настоящие настройки на ПК разработчика."""
+    monkeypatch.setenv("APPDATA", str(tmp_path_factory.mktemp("appdata")))
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))

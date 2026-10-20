@@ -127,11 +127,11 @@ def test_history_row_without_snapshot_has_disabled_button(fx):
     assert button.disabled is True
 
 
-def test_history_row_shows_gap_warning_and_signs(fx):
+def test_history_row_has_no_gap_warning_icon_and_signs(fx):
     v, _ = history_with(fx)
     item = dict(v._items[0], gap_affected=True, status="closed", r_multiple=-1.5, pnl=-12.34)
     t = texts(v._row(item))
-    assert any(x.startswith("Закрыта") and x.endswith("⚠") for x in t) and "−1.50 R" in t and "−12.34" in t
+    assert "Закрыта" in t and not any("⚠" in x for x in t)  # gap_affected - не в таблице (только в карточке разбора) and "−1.50 R" in t and "−12.34" in t
 
 
 def test_closing_the_window_terminates_the_whole_process(monkeypatch):

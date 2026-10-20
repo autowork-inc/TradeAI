@@ -40,10 +40,10 @@ def entry(version, *changes, date="2026-10-20", title=""):
 # ======================================================================================== данные
 
 
-def test_current_version_is_1_1_and_the_changelog_starts_from_the_1_0_base():
-    assert __version__ == "1.1"
+def test_current_version_is_1_2_and_the_changelog_starts_from_the_1_0_base():
+    assert __version__ == "1.2"
     releases = changelog.load()
-    assert releases[0].version == "1.1" and releases[-1].version == "1.0" and releases[-1].date and releases[-1].changes
+    assert releases[0].version == "1.2" and releases[-1].version == "1.0" and releases[-1].date and releases[-1].changes
     assert changelog.release_for(releases, __version__) is not None and changelog.release_for(releases, "1.0.0") is not None  # 1.0 == 1.0.0
     assert {c.type for r in releases for c in r.changes} <= set(changelog.TYPES)
 
@@ -82,9 +82,9 @@ def make_shell(monkeypatch, *, seen="", first_run=False, releases=None):
     from tradeai_client.ui import shell as shell_mod
 
     saved = []
-    monkeypatch.setattr(shell_mod, "load_settings", lambda: ClientSettings(api_key="k" * 40, last_seen_version=seen))
+    monkeypatch.setattr(shell_mod, "load_settings", lambda: ClientSettings(api_key="k" * 40, last_seen_version=seen, profile_chosen=True))
     monkeypatch.setattr(shell_mod, "save_settings", lambda s, path=None: saved.append(s.last_seen_version))
-    monkeypatch.setattr(shell_mod, "settings_path", lambda: Path("/нет/такого/settings.json") if first_run else CLIENT / "settings.json")
+    monkeypatch.setattr(shell_mod, "settings_exist", lambda: not first_run)
     if releases is not None:
         monkeypatch.setattr(changelog, "load", lambda path=None: releases)
     sh = shell_mod.Shell(MagicMock())
@@ -96,30 +96,41 @@ def dialog_of(sh):
     return sh.page.show_dialog.call_args.args[0]
 
 
+def popup_of(sh):
+    """Всплывающее окно «Что нового» / экран выбора пользователя: последний элемент, добавленный в page.overlay."""
+    return sh.page.overlay.append.call_args.args[0]
+
+
+def button_of(c, label):
+    return next(x for x in walk(c) if isinstance(x, ft.FilledButton) and x.content == label)
+
+
 def test_whats_new_dialog_shows_this_versions_changes_and_marks_it_seen(monkeypatch):
     rel = changelog.parse({"versions": [entry("0.9", ("new", "старое")), entry(__version__, ("new", "Новая вкладка"), ("fix", "Починили график"), ("improve", "Быстрее"), title="Большое обновление")]})
     sh, saved = make_shell(monkeypatch, seen="0.9", releases=rel)
     after = []
     sh.show_whats_new(then=lambda: after.append("next"))
-    d = dialog_of(sh)
-    assert d.modal and d.title.value == f"Приложение обновлено до версии {__version__}"
-    t = texts(d.content)
+    d = popup_of(sh)
+    assert d.expand and d.blur is not None and d.alignment == ft.Alignment.CENTER  # на весь экран, фон размыт, карточка по центру
+    t = texts(d)
+    assert t[0] == f"v{__version__}"  # версия - вверху по центру, под ней описание
     assert "Новая вкладка" in t and "Починили график" in t and "Быстрее" in t and "старое" not in t  # именно изменения этой версии
     assert {"Новое", "Исправлено", "Улучшено"} <= set(t) and "Большое обновление" in t
     assert sh.settings.last_seen_version == "0.9" and not after  # пока окно открыто, версия не помечена
-    d.actions[0].on_click(None)  # закрытие
-    assert sh.settings.last_seen_version == __version__ and saved[-1] == __version__ and after == ["next"] and sh.page.pop_dialog.called
+    button_of(d, "Круто!").on_click(None)  # белая кнопка закрывает окно навсегда (для этой версии)
+    assert button_of(d, "Круто!").style.bgcolor == "#ffffff"
+    assert sh.settings.last_seen_version == __version__ and saved[-1] == __version__ and after == ["next"] and sh.page.overlay.remove.called
 
 
 def test_whats_new_mentions_skipped_versions_and_survives_a_missing_entry(monkeypatch):
     rel = changelog.parse({"versions": [entry("0.5", ("new", "a")), entry("0.7", ("new", "b")), entry(__version__, ("new", "c"))]})
     sh, _ = make_shell(monkeypatch, seen="0.5", releases=rel)
     sh.show_whats_new()
-    assert any("Пропущенные версии: v0.7" in x for x in texts(dialog_of(sh).content))
+    assert any("Пропущенные версии: v0.7" in x for x in texts(popup_of(sh)))
     sh2, saved = make_shell(monkeypatch, seen="0.1", releases=changelog.parse({"versions": [entry("0.2", ("new", "x"))]}))  # записи для текущей версии нет
     done = []
     sh2.show_whats_new(then=lambda: done.append(1))
-    assert not sh2.page.show_dialog.called and done == [1] and saved[-1] == __version__  # не зацикливаемся: версия помечена виденной
+    assert not sh2.page.overlay.append.called and done == [1] and saved[-1] == __version__  # не зацикливаемся: версия помечена виденной
 
 
 def test_first_ever_launch_does_not_claim_an_update(monkeypatch):
@@ -139,15 +150,15 @@ def test_startup_shows_whats_new_first_and_checks_updates_only_after_closing_it(
 
     sh.connect = connect
     asyncio.run(sh.start())
-    assert "_check_update" not in runs and sh.page.show_dialog.called  # сначала «Что нового»
-    dialog_of(sh).actions[0].on_click(None)
+    assert "_check_update" not in runs and sh.page.overlay.append.called  # сначала «Что нового»
+    button_of(popup_of(sh), "Круто!").on_click(None)
     assert "_check_update" in runs  # после закрытия - проверка обновления (окна не наслаиваются)
     sh2, _ = make_shell(monkeypatch, seen=__version__)
     runs2 = []
     sh2.page.run_task = lambda fn, *a: runs2.append(getattr(fn, "__name__", str(fn)))
     sh2.connect = connect
     asyncio.run(sh2.start())
-    assert "_check_update" in runs2 and not sh2.page.show_dialog.called  # версия уже виденная: сразу проверка обновления, окна нет
+    assert "_check_update" in runs2 and not sh2.page.overlay.append.called  # версия уже виденная: сразу проверка обновления, окна нет
 
 
 def test_settings_has_a_changelog_button_that_opens_a_scrollable_full_history(monkeypatch):
@@ -200,3 +211,47 @@ def test_card_widgets_render_every_change_type():
     t = texts(release_card(r, current=True))
     assert t[0] == "v2.0" and "T" in t and "2026-10-20" in t and "текущая" in t and {"Новое", "Улучшено", "Исправлено"} <= set(t)
     assert APP_NAME and w.GREEN
+
+
+# ======================================================================================== экран выбора пользователя
+
+
+def make_login_shell(monkeypatch, *, chosen):
+    from tradeai_client.ui import shell as shell_mod
+
+    saved = []
+    monkeypatch.setattr(shell_mod, "load_settings", lambda: ClientSettings(api_key="k" * 40, last_seen_version=__version__, profile_chosen=chosen))
+    monkeypatch.setattr(shell_mod, "save_settings", lambda s, path=None: saved.append((s.profile, s.profile_chosen)))
+    monkeypatch.setattr(shell_mod, "settings_exist", lambda: True)
+    sh = shell_mod.Shell(MagicMock())
+    sh.run = lambda coro: asyncio.run(coro)
+    return sh, saved
+
+
+def test_login_screen_offers_santa_and_chr_remembers_the_choice(monkeypatch):
+    sh, saved = make_login_shell(monkeypatch, chosen=False)
+    picked = []
+    screen = sh.show_login(picked.append)
+    assert screen.expand and "Выберите пользователя" in texts(screen) and {"SANTA", "CHR"} <= set(texts(screen))
+    chr_tile = next(x for x in walk(screen) if isinstance(x, ft.Container) and x.on_click and "CHR" in texts(x))
+    chr_tile.on_click(None)
+    assert picked == ["CHR"] and sh.settings.profile == "CHR" and sh.settings.profile_chosen and saved[-1] == ("CHR", True)
+    assert sh.page.overlay.remove.called  # экран закрыт, дальше обычный запуск
+
+
+def test_startup_asks_for_the_user_only_when_none_was_chosen_yet(monkeypatch):
+    async def connect():
+        pass
+
+    new, _ = make_login_shell(monkeypatch, chosen=False)
+    new.connect = connect
+    new.page.run_task = lambda *a: None
+    shown = []
+    new.show_login = lambda cb: shown.append(cb) or cb("SANTA")  # пользователь сразу «выбирает»
+    asyncio.run(new.start())
+    assert len(shown) == 1
+    old, _ = make_login_shell(monkeypatch, chosen=True)  # выбор уже сделан (в т.ч. до пересборки .exe): экран не показывается
+    old.connect = connect
+    old.page.run_task = lambda *a: None
+    old.show_login = lambda cb: pytest.fail("экран выбора не должен показываться повторно")
+    asyncio.run(old.start())

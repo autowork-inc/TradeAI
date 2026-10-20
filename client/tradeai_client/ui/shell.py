@@ -13,10 +13,10 @@ from tradeai_client.binance import BinanceError, BinanceNoData, fetch_klines_fil
 from tradeai_client.chart_spec import ChartDataError, build_chart_spec, interval_to_ms
 from tradeai_client.chart_window import open_chart
 from tradeai_client.golden_image import render_png
-from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings, settings_path
+from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings, settings_exist
 from tradeai_client.ui import widgets as w
 from tradeai_client.ui.analysis_view import AnalysisView
-from tradeai_client.ui.changelog_view import release_card, releases_list
+from tradeai_client.ui.changelog_view import change_row, release_card, releases_list
 from tradeai_client.ui.dashboard import DashboardView
 from tradeai_client.ui.history_view import HistoryView
 from tradeai_client.ui.stats_view import StatsView
@@ -35,7 +35,7 @@ class Shell:
         self._stream: LiveStateStream | None = None
         self._events_seen: tuple = ()
         self._tab = TAB_DASHBOARD
-        first_run = not settings_path().exists()  # самый первый запуск на этом ПК: «Приложение обновлено» показывать не с чего
+        first_run = not settings_exist()  # самый первый запуск на этом ПК: «Приложение обновлено» показывать не с чего
         try:
             self.settings = load_settings()
             self._settings_error = None
@@ -105,7 +105,7 @@ class Shell:
         profile = profiles.normalize_profile(profile)
         if profile == self.settings.profile:
             return
-        self.settings.profile = profile
+        self.settings.profile, self.settings.profile_chosen = profile, True
         self._persist_prefs()
         self._apply_profile_ui()
         await self._refresh_account()
@@ -127,6 +127,8 @@ class Shell:
     async def start(self) -> None:
         for goal in (self.stats._goal, self.analysis._goal):  # переливающаяся рамка карточки значимости
             self.page.run_task(goal.shimmer)
+        if not self._settings_error and not self.settings.profile_chosen:
+            await self._choose_user()  # как экран входа Windows: выбор запоминается, дальше экран не показывается
         if self._settings_error:
             self.show_settings(note=self._settings_error)
         elif not self.settings.api_key:
@@ -299,7 +301,8 @@ class Shell:
             candidate = ClientSettings(base_url=url.value or "", api_key=(key.value or "").strip(), remember_key=bool(remember.value),
                                        post_signal_candles=bool(post.value), binance_rest=self.settings.binance_rest,
                                        balance_visible=self.settings.balance_visible, mode_filter=self.settings.mode_filter,
-                                       last_seen_version=self.settings.last_seen_version, profile=self.settings.profile, chr_extra_coins=list(self.settings.chr_extra_coins))
+                                       last_seen_version=self.settings.last_seen_version, profile=self.settings.profile, profile_chosen=self.settings.profile_chosen,
+                                       chr_extra_coins=list(self.settings.chr_extra_coins))
             msg.color = w.AMBER
             try:
                 candidate.validate()
@@ -344,6 +347,52 @@ class Shell:
                                 actions=[ft.TextButton("Отмена", on_click=lambda e: self.page.pop_dialog()), ft.FilledButton("Проверить и сохранить", on_click=save)],
                                 actions_alignment=ft.MainAxisAlignment.END)
         self.page.show_dialog(dialog)
+
+    # ------------------------------------------------------------------------------------------ экран выбора пользователя и всплывающие окна
+
+    def _overlay_show(self, control: ft.Control) -> None:
+        self.page.overlay.append(control)
+        self.page.update()
+
+    def _overlay_hide(self, control: ft.Control) -> None:
+        try:
+            self.page.overlay.remove(control)
+        except ValueError:  # уже убрано (двойной клик по кнопке)
+            pass
+        self.page.update()
+
+    async def _choose_user(self) -> None:
+        done = asyncio.get_running_loop().create_future()
+        self.show_login(lambda name: done.set_result(name) if not done.done() else None)
+        await done
+
+    def show_login(self, on_pick) -> ft.Control:
+        """Экран выбора пользователя (как при входе в Windows): крупные плитки SANTA / CHR на весь экран. Выбор запоминается в настройках и больше не спрашивается."""
+        about = {profiles.SANTA: "Все стратегии и монеты, баланс боевого счёта",
+                 profiles.CHR: "Только стратегии CHR, пул монет CHR, баланс с нуля"}
+        screen: list[ft.Control] = []
+
+        def pick(name: str) -> None:
+            self.settings.profile, self.settings.profile_chosen = profiles.normalize_profile(name), True
+            self._persist_prefs()
+            self._profile_btn.content = f"Пользователь: {self.settings.profile}"
+            self._apply_profile_ui()
+            self._overlay_hide(screen[0])
+            on_pick(self.settings.profile)
+
+        tiles = [ft.Container(content=ft.Column([ft.Container(content=ft.Text(name[0], size=40, weight=ft.FontWeight.W_700, color=w.BG), width=96, height=96, border_radius=48,
+                                                              bgcolor=w.ACCENT if name == profiles.SANTA else w.GREEN, alignment=ft.Alignment.CENTER),
+                                                 ft.Text(name, size=20, weight=ft.FontWeight.W_700, color=w.TEXT),
+                                                 ft.Text(about[name], size=12, color=w.MUTED, text_align=ft.TextAlign.CENTER)],
+                                                horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                              width=240, padding=24, border_radius=16, bgcolor=w.CARD, border=ft.Border.all(1, w.BORDER), ink=True, on_click=lambda e, n=name: pick(n))
+                 for name in profiles.PROFILES]
+        screen.append(ft.Container(expand=True, bgcolor=w.BG, alignment=ft.Alignment.CENTER,
+                                   content=ft.Column([ft.Text(APP_NAME, size=28, weight=ft.FontWeight.W_700, color=w.TEXT), ft.Text("Выберите пользователя", size=15, color=w.MUTED),
+                                                      ft.Container(height=18), ft.Row(tiles, spacing=24, alignment=ft.MainAxisAlignment.CENTER)],
+                                                     horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6, tight=True)))
+        self._overlay_show(screen[0])
+        return screen[0]
 
     def show_profile_dialog(self) -> None:
         """Выбор пользователя: SANTA (всё как раньше) или CHR (свои стратегии, свой пул монет, баланс с нуля). Выбор запоминается."""
@@ -424,19 +473,30 @@ class Shell:
                 then()
             return
 
+        box: list[ft.Control] = []
+
         def close(_=None) -> None:
             self.mark_version_seen()
-            self.page.pop_dialog()
+            self._overlay_hide(box[0])
             if then:
                 then()
 
-        body: list[ft.Control] = [release_card(current)]
+        rows: list[ft.Control] = [change_row(c) for c in current.changes]
         if skipped:
-            body.append(ft.Text("Пропущенные версии: " + ", ".join(f"v{r.version}" for r in skipped) + " — подробности в Настройки → «История обновлений».", size=12, color=w.MUTED))
-        self.page.show_dialog(ft.AlertDialog(
-            modal=True, title=ft.Text(f"Приложение обновлено до версии {__version__}", size=20, weight=ft.FontWeight.W_700),
-            content=ft.Container(width=600, content=ft.Column(body, spacing=10, scroll=ft.ScrollMode.AUTO, tight=True), height=min(480, 150 + 52 * len(current.changes))),
-            actions=[ft.FilledButton("Отлично", icon=ft.Icons.CHECK, on_click=close)], actions_alignment=ft.MainAxisAlignment.END, on_dismiss=lambda e: None))
+            rows.append(ft.Text("Пропущенные версии: " + ", ".join(f"v{r.version}" for r in skipped) + " — подробности в Настройки → «История обновлений».", size=12, color=w.MUTED))
+        head: list[ft.Control] = [ft.Text(f"v{current.version}", size=40, weight=ft.FontWeight.W_700, color=w.TEXT, text_align=ft.TextAlign.CENTER)]
+        if current.title:
+            head.append(ft.Text(current.title, size=15, color=w.MUTED, text_align=ft.TextAlign.CENTER))
+        card = ft.Container(
+            width=560, padding=28, border_radius=18, bgcolor=w.CARD, border=ft.Border.all(1, w.BORDER),
+            content=ft.Column([ft.Column(head, horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                               ft.Container(content=ft.Column(rows, spacing=10, scroll=ft.ScrollMode.AUTO), height=min(340, 24 + 54 * len(rows))),
+                               ft.Row([ft.FilledButton("Круто!", on_click=close, style=ft.ButtonStyle(bgcolor="#ffffff", color="#000000", padding=ft.Padding.symmetric(horizontal=36, vertical=16),
+                                                                                                         shape=ft.RoundedRectangleBorder(radius=10)))], alignment=ft.MainAxisAlignment.CENTER)],
+                              spacing=18, tight=True))
+        # весь экран: размытый затемнённый фон блокирует интерфейс под окном, карточка по центру
+        box.append(ft.Container(expand=True, blur=ft.Blur(14, 14), bgcolor=ft.Colors.with_opacity(0.5, "#000000"), alignment=ft.Alignment.CENTER, content=card))
+        self._overlay_show(box[0])
 
     def show_changelog(self) -> None:
         """«История обновлений»: все версии клиента (с v1.0), новые сверху, окно со скроллом."""

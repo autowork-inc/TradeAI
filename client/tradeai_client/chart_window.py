@@ -31,8 +31,16 @@ MAX_KLINES = 1500
 
 
 def drawings_path() -> Path:
-    from tradeai_client.settings import app_dir
-    return app_dir() / drawings_store.FILE_NAME
+    """Рисунки хранятся в папке пользователя (переживают пересборку .exe); старый файл рядом с .exe копируется туда один раз."""
+    from tradeai_client.settings import app_dir, user_dir
+    path, legacy = user_dir() / drawings_store.FILE_NAME, app_dir() / drawings_store.FILE_NAME
+    if not path.exists() and legacy.exists():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(legacy.read_bytes())
+        except OSError:
+            return legacy
+    return path
 
 
 def _read(name: str) -> str:

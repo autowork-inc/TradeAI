@@ -191,3 +191,13 @@ def test_chart_js_guards_the_known_pitfalls():
     assert "#ov{position:absolute;inset:0;pointer-events:none;z-index:5}" in css
     assert "chart.timeScale().width() <= 0" in js and "!S.quiet && !S.view" in js and "tickMarkFormatter" in js and "setMarkers" in js and "createPriceLine" in js
     assert "subscribeVisibleLogicalRangeChange" in js and "wss://fstream.binance.com/market/stream" in js and "'4h'" in js
+
+
+def test_drawings_map_by_absolute_time_from_the_candle_centre():
+    """Рисунки хранят (время UTC, цена); индекс считается от середины свечи [open, open + iv), поэтому смена таймфрейма не сдвигает их на полсвечи."""
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "tradeai_client" / "chart_web" / "chart.js").read_text(encoding="utf-8")
+    assert "rawToLogical(t - barIv() / 2)" in js and "rawToTime(L)" in js and "S.barsIv = ivSec()" in js
+    assert "specIv()" in js  # правый край зон сигнала - по таймфрейму сделки, а не выбранному
+
