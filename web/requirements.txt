@@ -1,3 +1,9 @@
+# Версии зафиксированы по проверенной связке (локально: вход, вкладки, WebSocket): flet-web 1.0.4 несовместим с новыми FastAPI (аргумент openapi_prefix убран).
 flet==1.0.4
 flet-web==1.0.4
+fastapi==0.143.0
+starlette==1.7.0
+uvicorn==0.54.0
+websockets==17.2
+pydantic==2.14.0
 aiohttp>=3.9,<4
