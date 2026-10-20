@@ -351,3 +351,17 @@ def test_trade_tap_builds_a_chart_link_and_falls_back_to_the_card(fx, monkeypatc
     assert url.startswith("/chart/") and kw == {"web_only_window_name": "_self"} and charts.lookup(url.rsplit("/", 1)[1]) is not None
     asyncio.run(shell.open_trade_chart({**trade, "has_snapshot": False}))  # нет снапшота - понятное сообщение, переход не выполняется
     assert len(launched) == 1 and page.show_dialog.called
+
+
+def test_phone_history_collapses_filters_so_rows_are_visible_and_the_button_expands_them():
+    cfg = web_app.WebConfig.from_env(ENV)
+    shell = web_app.WebShell(MagicMock(), cfg, on_logout=lambda: None)
+    h = shell.history
+    assert h._filters_box.visible is False and h._filters_btn.content == "Фильтры"  # свёрнуты: таблица получает весь экран
+    h._toggle_filters()
+    assert h._filters_box.visible is True and h._filters_btn.content == "Скрыть фильтры"
+    flat = list(walk(h.control))
+    assert h._mode.control in flat and h._rows in flat and any(isinstance(x, ft.Row) and x.scroll is not None for x in flat)
+    desktop = web_app.HistoryView  # настольный вид (host без tap_opens_chart) фильтры не сворачивает
+    from tradeai_client.ui.history_view import HistoryView
+    assert not hasattr(HistoryView(MagicMock(tap_opens_chart=False)), "_filters_box")

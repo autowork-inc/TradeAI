@@ -47,15 +47,22 @@ class HistoryView:
         hint = ("Эталонные сетапы, отмеченные звёздочкой (общие для всех профилей). " + ("Тап по строке — график;" if tap else "Двойной клик по строке — график;") + " звёздочка в строке снимает отметку."
                 if favorites else
                 ("Тап по строке — график сделки" if tap else "Двойной клик по строке — график сделки") + " (свечи снапшота, вход/выход, SL/TP, зона FVG, причина входа). Звёздочка — пометить сделку как «идеальный сетап» (попадёт во вкладку «Избранное»).")
-        self.control = ft.Column([
-            ft.Container(height=2),
-            ft.Row([self._mode.control, self._status.control, self._coin.control, self._strategy.control, self._bar.control, ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy,
-                    self._info, self._prev, self._next], spacing=10, run_spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            w.label(hint, size=12),
-            # одна горизонтально прокручиваемая область: заголовок и строки едут вместе (раньше строки сжимались до ширины экрана, и тап-зоны ломались), строки листаются по вертикали
-            ft.Row([ft.Column([header, ft.Column([self._rows], scroll=ft.ScrollMode.AUTO, expand=True)], spacing=6, width=TABLE_W)],
-                   scroll=ft.ScrollMode.ADAPTIVE, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH),
-        ], expand=True, spacing=10)
+        filter_controls = [self._mode.control, self._status.control, self._coin.control, self._strategy.control, self._bar.control,
+                           ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy]
+        pager = [self._info, self._prev, self._next]
+        table = ft.Row([ft.Column([header, ft.Column([self._rows], scroll=ft.ScrollMode.AUTO, expand=True)], spacing=6, width=TABLE_W)],
+                       scroll=ft.ScrollMode.ADAPTIVE, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)  # одна горизонтально прокручиваемая область: заголовок и строки едут вместе
+        if tap:  # телефон: фильтры свёрнуты (иначе они занимают весь экран и строк не видно), «Фильтры» раскрывает; пагинация рядом с кнопкой
+            self._filters_box = ft.Container(content=ft.Row(filter_controls, spacing=10, run_spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER), visible=False)
+            self._filters_btn = ft.TextButton("Фильтры", icon=ft.Icons.FILTER_LIST, on_click=self._toggle_filters)
+            self.control = ft.Column([self._filters_btn, self._filters_box, ft.Row(pager, spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER), table], expand=True, spacing=6)
+        else:
+            self.control = ft.Column([
+                ft.Container(height=2),
+                ft.Row([*filter_controls, *pager], spacing=10, run_spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                w.label(hint, size=12),
+                table,
+            ], expand=True, spacing=10)
         self.apply_profile()
 
     # ------------------------------------------------------------------------------------------ профиль и фильтры
@@ -105,6 +112,12 @@ class HistoryView:
         if keys is None:
             return None
         return list(dict.fromkeys(s for k in keys for s in (STATUS_FILTERS[k][1] or [])))
+
+    def _toggle_filters(self, _=None) -> None:
+        self._filters_box.visible = not self._filters_box.visible
+        self._filters_btn.content = "Скрыть фильтры" if self._filters_box.visible else "Фильтры"
+        self._filters_box.update()
+        self._filters_btn.update()
 
     async def _filter_changed(self, _=None) -> None:
         self._offset = 0
