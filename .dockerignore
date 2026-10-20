@@ -11,7 +11,10 @@ tests
 requirements-dev.txt
 .env.shadow
 backups
-client
+# настольный клиент не нужен ни одному образу, кроме веба: ему - только пакет и точка входа
+client/*
+!client/tradeai_client
+!client/web_app.py
 mcp_server
 analyzer/.venv
 analyzer/tests
