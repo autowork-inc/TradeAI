@@ -160,7 +160,7 @@ def test_strategy_filter_groups_live_shadow_archive_in_that_order():
     assert labels["SMC_Pro_Trend"] == "🟢 [LIVE] SMC Pro Trend" and labels["VWAP_Reversion"].startswith("🟢 [LIVE]")
     assert all(labels[k].startswith("🟡 [SHADOW]") for k in ("OBI_Breakout", "SMC_Counter_Trend", "ICT_Killzones", "Horizontal_Breakout", "Trendline_Breakout",
                                                                  "Horizontal_Breakout_CHR", "Trendline_Breakout_CHR"))
-    assert labels["Trendline_Breakout_CHR"] == "🟡 [SHADOW] Trendline Breakout (CHR)"
+    assert labels["Trendline_Breakout_CHR"] == "🟡 [SHADOW] Наклонка (CHR)"
     assert labels["smc"] == "⚪ [АРХИВ] SMC Swing (до 11.10)" and labels["breakout"].startswith("⚪ [АРХИВ]")
     assert fmt.strategy_label("UNKNOWN") == "⚪ [АРХИВ] UNKNOWN"
     assert [k for k, _ in fmt.MODE_OPTIONS] == ["all", "live", "shadow"] and fmt.MODE_OPTIONS[1][1] == "🟢 Только LIVE"

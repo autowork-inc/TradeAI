@@ -15,7 +15,7 @@ SIDE_RU = {"long": "Лонг", "short": "Шорт"}
 STRATEGY_RU = {"SMC_Pro_Trend": "SMC Pro Trend", "SMC_Counter_Trend": "SMC Counter Trend", "OBI_Breakout": "OBI Breakout",
                "ICT_Killzones": "ICT Killzones", "VWAP_Reversion": "VWAP Reversion",
                "Horizontal_Breakout": "Horizontal Breakout", "Trendline_Breakout": "Trendline Breakout",
-               "Horizontal_Breakout_CHR": "Horizontal Breakout (CHR)", "Trendline_Breakout_CHR": "Trendline Breakout (CHR)", "smc": "SMC Swing (до 11.10)", "breakout": "Breakout (до 11.10)"}
+               "Horizontal_Breakout_CHR": "Пробой уровня (CHR)", "Trendline_Breakout_CHR": "Наклонка (CHR)", "smc": "SMC Swing (до 11.10)", "breakout": "Breakout (до 11.10)"}
 # контур стратегии: боевая (одобрена к live, `config.APPROVED_STRATEGIES`), теневая (только виртуальные сделки) или архивная (прежние имена до 11.10)
 STRATEGY_KIND = {"SMC_Pro_Trend": "live", "VWAP_Reversion": "live", "OBI_Breakout": "shadow", "SMC_Counter_Trend": "shadow", "ICT_Killzones": "shadow",
                  "Horizontal_Breakout": "shadow", "Trendline_Breakout": "shadow",

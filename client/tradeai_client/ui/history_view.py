@@ -9,6 +9,7 @@ from tradeai_client.api import ApiError
 from tradeai_client.ui import widgets as w
 
 PAGE = 50
+COMPACT_PX = 768  # уже этого (page.width) - телефон: вместо широкой таблицы вертикальные карточки
 COINS = fmt.COINS
 STATUS_FILTERS = {"all": ("Все", None), "closed": ("Закрытые", ["closed"]), "active": ("Открытые и ждущие", ["open", "pending_limit", "pending_market"]),
                   "cancelled": ("Отменённые", ["cancelled"]), "aborted": ("Прерванные", ["aborted"])}
@@ -50,8 +51,11 @@ class HistoryView:
         filter_controls = [self._mode.control, self._status.control, self._coin.control, self._strategy.control, self._bar.control,
                            ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy]
         pager = [self._info, self._prev, self._next]
-        table = ft.Row([ft.Column([header, ft.Column([self._rows], scroll=ft.ScrollMode.AUTO, expand=True)], spacing=6, width=TABLE_W)],
-                       scroll=ft.ScrollMode.ADAPTIVE, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)  # одна горизонтально прокручиваемая область: заголовок и строки едут вместе
+        self._table = ft.Row([ft.Column([header, ft.Column([self._rows], scroll=ft.ScrollMode.AUTO, expand=True)], spacing=6, width=TABLE_W)],
+                             scroll=ft.ScrollMode.ADAPTIVE, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)  # одна горизонтально прокручиваемая область: заголовок и строки едут вместе
+        self._cards = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, expand=True, visible=False)  # телефон: вертикальные карточки, без горизонтального скролла
+        self._compact = False
+        table = ft.Column([self._table, self._cards], expand=True, spacing=0)  # видна одна из двух раскладок
         if tap:  # телефон: фильтры свёрнуты (иначе они занимают весь экран и строк не видно), «Фильтры» раскрывает; пагинация рядом с кнопкой
             self._filters_box = ft.Container(content=ft.Row(filter_controls, spacing=10, run_spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER), visible=False)
             self._filters_btn = ft.TextButton("Фильтры", icon=ft.Icons.FILTER_LIST, on_click=self._toggle_filters)
@@ -185,10 +189,58 @@ class HistoryView:
 
     # ------------------------------------------------------------------------------------------ строки
 
+    def is_compact(self) -> bool:
+        """Узкий экран (page.width < 768): история выводится карточками. Ширина неизвестна (0 / нет страницы) - обычная таблица."""
+        width = getattr(getattr(self.host, "page", None), "width", None)
+        return isinstance(width, (int, float)) and 0 < width < COMPACT_PX
+
+    def relayout(self) -> None:
+        """Экран сменил ширину (поворот телефона, окно): перестроить список в нужной раскладке, если она изменилась."""
+        if self.is_compact() != self._compact:
+            self._rebuild()
+            if w.attached(self.control):
+                self.control.update()
+
     def _rebuild(self) -> None:
         self._boxes.clear()
         empty = "В избранном пока ничего нет: откройте History и нажмите звёздочку у лучшей сделки" if self.favorites else "Сделок по этому фильтру нет"
-        self._rows.controls = [self._row(t) for t in self._items] or [w.label(empty, size=14)]
+        self._compact = self.is_compact()
+        self._table.visible, self._cards.visible = not self._compact, self._compact
+        if self._compact:
+            self._cards.controls = [self._card(t) for t in self._items] or [w.label(empty, size=14)]
+            self._rows.controls = []
+        else:
+            self._rows.controls = [self._row(t) for t in self._items] or [w.label(empty, size=14)]
+            self._cards.controls = []
+
+    def _card(self, t: dict) -> ft.Control:
+        """Компактная карточка сделки для телефона: этаж 1 - дата и статус, этаж 2 - монета, сторона, стратегия, этаж 3 - PnL и R, отдельный ряд кнопок (звёздочка, график)."""
+        r, pnl = t["r_multiple"], t["pnl"]
+        restart = t["exit_reason"] == "process_restart"
+        status = fmt.EXIT_RU.get(t["exit_reason"], t["exit_reason"]) if restart else fmt.STATUS_RU.get(t["status"], t["status"])
+        side_color = w.GREEN if t["side"] == "long" else w.RED
+        fav = bool(t.get("is_favorite"))
+        pnl_text = fmt.DASH if pnl is None else f"{pnl:+.2f} USDT".replace("-", "−")
+        head = ft.Row([ft.Text(fmt.fmt_local(t["signal_time"]), size=12, color=w.MUTED, expand=True),
+                       ft.Text(status, size=12, color=w.MUTED if t["status"] in ("cancelled", "aborted") else w.TEXT, text_align=ft.TextAlign.RIGHT)],
+                      vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        who = ft.Row([ft.Text(fmt.coin_short(t["coin"]), size=16, weight=ft.FontWeight.W_700), ft.Text(fmt.SIDE_RU[t["side"]], size=14, color=side_color, weight=ft.FontWeight.W_600),
+                      ft.Text(t["mode"].upper(), size=11, color=w.GREEN if t["mode"] == "live" else w.AMBER)], spacing=10, wrap=True, run_spacing=2)
+        result = ft.Row([ft.Text(pnl_text, size=16, weight=ft.FontWeight.W_700, color=fmt.r_color(pnl)),
+                         ft.Text(fmt.fmt_r(r), size=13, color=fmt.r_color(r))], spacing=12, wrap=True, run_spacing=2)
+        buttons = ft.Row([ft.IconButton(icon=ft.Icons.STAR if fav else ft.Icons.STAR_BORDER, icon_color=w.AMBER if fav else w.MUTED, icon_size=22,
+                                        tooltip="Убрать из избранного" if fav else "В избранное: идеальный сетап", on_click=lambda e, tr=t: self.host.run(self._toggle_favorite(tr))),
+                          ft.IconButton(icon=ft.Icons.CANDLESTICK_CHART, icon_size=22, tooltip="Открыть график" if t["has_snapshot"] else "У сделки нет снапшота",
+                                        disabled=not t["has_snapshot"], on_click=lambda e, tr=t: self.host.run(self.host.open_trade_chart(tr)))],
+                         spacing=4, alignment=ft.MainAxisAlignment.END)
+        body = ft.Column([head, who, ft.Text(fmt.STRATEGY_RU.get(t["strategy_name"], t["strategy_name"]), size=13, color=w.MUTED), result, buttons], spacing=4, tight=True)
+        box = w.card(body, padding=12, bgcolor=w.CARD_HI if t["id"] == self._selected else w.CARD)
+        if restart:
+            box.tooltip = fmt.RESTART_HINT
+        self._boxes[t["id"]] = box
+        if getattr(self.host, "tap_opens_chart", False):
+            return ft.GestureDetector(content=box, on_tap=lambda e, tr=t: (self._select(tr), self.host.run(self.host.open_trade_chart(tr))) if tr["has_snapshot"] else self._select(tr))
+        return ft.GestureDetector(content=box, on_tap=lambda e, tr=t: self._select(tr))
 
     def _row(self, t: dict) -> ft.Control:
         r, pnl = t["r_multiple"], t["pnl"]

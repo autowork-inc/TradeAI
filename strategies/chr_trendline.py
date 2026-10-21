@@ -5,7 +5,9 @@
 Лонг (шорт - зеркало: поддержка по минимумам, восходящая, поджатие lower highs, пробой вниз):
   * линия сопротивления - через два последних подтверждённых локальных максимума A2 (старше) -> A1, нисходящая (A1 < A2), наклон
     |цена за бар| >= min_slope_atr * ATR[j-1] (иначе это горизонтальный уровень); A2 не старше окна W;
-  * линия уважается: от A2 до бара j-1 ни один high не выше линии больше чем на touch_atr * ATR[j-1], прошлое закрытие - не выше линии;
+  * чистый воздух: от A2 до бара j-1 ни один high не выше линии больше чем на cross_atr * ATR[j-1], ни одно закрытие не за линией;
+  * актуальность: A1 не старше max_touch_age баров, глубина поиска не больше 80 баров (MAX_LOOKBACK);
+  * размах пробойной свечи <= max_break_range_atr * ATR[j-1], иначе вход MARKET запрещён (не покупаем на хаях);
   * касания: две опоры + более старые пивоты-максимумы цепочки (до touch_depth), лежащие на продолжении линии в пределах touch_atr * ATR[j-1]
     и в окне W; касаний >= min_touches;
   * поджатие: последние squeeze_points подтверждённых локальных минимумов строго повышаются (higher lows) и лежат в окне W;
@@ -28,16 +30,20 @@ from strategies.chr_common import SIDES, full_body, pivot_chain, squeeze, trend_
 from utils.errors import ConfigError, DataError
 
 # ------------------------------------------------------------------------------------------------ КАЛИБРОВКА (стартовые допущения 2026-10-19)
-CHR_T_WINDOW = 48  # баров до пробоя: в них лежат вторая опора линии, касания и поджатие
-CHR_T_PIVOT_K = 2  # окно локального экстремума (D2)
+CHR_T_WINDOW = 60  # баров до пробоя: в них лежат первая опора линии, касания и поджатие (жёсткий потолок - MAX_LOOKBACK)
+CHR_T_PIVOT_K = 3  # окно локального экстремума (D2): явный свинг, 3 бара слева и справа
 CHR_T_MIN_TOUCHES = 2  # правило CHR: минимум 2 подтверждённых касания (две опоры линии - уже два касания)
 CHR_T_TOUCH_DEPTH = 4  # сколько последних пивотов цепочки проверяется на касание линии (две опоры + более старые)
-CHR_T_TOUCH_ATR = 0.25  # допуск касания линии и «уважения» линии экстремумами, в ATR[j-1]
+CHR_T_TOUCH_ATR = 0.25  # допуск касания линии экстремумом пивота, в ATR[j-1]
+CHR_T_CROSS_ATR = 0.05  # «чистый воздух»: между опорами и до пробоя high/low не выходят за линию больше этого допуска, а закрытия - ни на тик
+CHR_T_MAX_TOUCH_AGE = 24  # вторая (свежая) опора линии не старше этого числа баров до пробойной свечи
+CHR_T_MAX_BREAK_RANGE_ATR = 1.5  # размах пробойной свечи больше этого числа ATR[j-1] - вход MARKET запрещён (не покупаем на хаях)
 CHR_T_MIN_SLOPE_ATR = 0.02  # наклон линии, ATR за бар: положе - это горизонтальный уровень (Horizontal_Breakout_CHR)
 CHR_T_SQUEEZE_POINTS = 3  # строго повышающихся минимумов (лонг) / понижающихся максимумов (шорт)
 CHR_T_MIN_BODY_FRAC = 0.6  # полнотелая свеча: тело >= этой доли размаха
 CHR_T_SL_BUFFER_ATR = D.SL_BUFFER_ATR  # запас стопа за последней точкой поджатия, в ATR
 
+MAX_LOOKBACK = 80  # глубина поиска структуры не больше 80 баров: только актуальная локальная структура
 _REQUIRED = ("open_time", "open", "high", "low", "close", "atr")
 _SIGNAL_FIELDS = ("signal", "level", "sl", "touches", "slope_atr", "anchor1_time", "anchor1_price", "anchor2_time", "anchor2_price",
                   "squeeze_1", "squeeze_2", "squeeze_3", "squeeze_start_t", "squeeze_last_t", "risk_atr", "body_frac")
@@ -51,6 +57,9 @@ class ChrTrendlineParams:
     min_touches: int = CHR_T_MIN_TOUCHES
     touch_depth: int = CHR_T_TOUCH_DEPTH
     touch_atr: float = CHR_T_TOUCH_ATR
+    cross_atr: float = CHR_T_CROSS_ATR
+    max_touch_age: int = CHR_T_MAX_TOUCH_AGE
+    max_break_range_atr: float = CHR_T_MAX_BREAK_RANGE_ATR
     min_slope_atr: float = CHR_T_MIN_SLOPE_ATR
     squeeze_points: int = CHR_T_SQUEEZE_POINTS
     min_body_frac: float = CHR_T_MIN_BODY_FRAC
@@ -68,6 +77,8 @@ class ChrTrendlineParams:
             raise ConfigError("ChrTrendlineParams: min_touches >= 2, squeeze_points >= 2, touch_depth >= 2 (правила CHR)")
         if self.window <= self.pivot_k * 2 or not 0 < self.min_body_frac <= 1 or self.min_slope_atr <= 0:
             raise ConfigError("ChrTrendlineParams: window > 2 * pivot_k, min_body_frac в (0, 1], min_slope_atr > 0")
+        if self.window > MAX_LOOKBACK or self.max_touch_age > MAX_LOOKBACK or self.max_break_range_atr <= 0:
+            raise ConfigError(f"ChrTrendlineParams: window и max_touch_age <= {MAX_LOOKBACK} (только локальная структура), max_break_range_atr > 0")
 
 
 def signal_columns(side: str) -> tuple[str, ...]:
@@ -115,13 +126,17 @@ def _stage_side(p: ChrTrendlineParams, side: str, iv: int) -> list[pl.Expr]:
     direction_ok = (slope < 0) if side == "long" else (slope > 0)  # сопротивление нисходящее, поддержка восходящая
     t2 = _c(f"{a}2_tj")
     line_ok = direction_ok & (slope.abs() >= p.min_slope_atr * atr0) & (t2 >= _c("t_start"))
-    # линия уважается от второй (старшей) опоры до бара j-1: экстремумы не дальше tol за линией
+    # «чистый воздух»: от первой (старшей) опоры до бара j-1 (между опорами и от второй опоры до пробоя) линия не проходит сквозь свечи:
+    # экстремумы не дальше cross_atr за линией, закрытия - не за линией вовсе
     extreme = _KIND[a]
+    cross = p.cross_atr * atr0
     respected = pl.lit(True)
     for s in range(1, p.window + 1):
         ts = col("open_time").shift(s)
-        ok = (ts < t2) | (sgn * (col(extreme).shift(s) - _line_at(side, ts, iv)) <= tol)
+        line_s = _line_at(side, ts, iv)
+        ok = (ts < t2) | ((sgn * (col(extreme).shift(s) - line_s) <= cross) & (sgn * (col("close").shift(s) - line_s) <= 0))
         respected = respected & ok.fill_null(False)
+    fresh = ((col("open_time") - _c(f"{a}1_tj")) <= p.max_touch_age * iv).fill_null(False)  # вторая опора - недавняя
     prev_inside = sgn * (col("close").shift(1) - _line_at(side, col("open_time").shift(1), iv)) <= 0
     extra = [((_c(f"{a}{n}_tj") >= _c("t_start")) & ((_c(f"{a}{n}_pj") - _line_at(side, _c(f"{a}{n}_tj"), iv)).abs() <= tol))
              .fill_null(False).cast(pl.Int32) for n in range(3, p.touch_depth + 1)]
@@ -134,7 +149,8 @@ def _stage_side(p: ChrTrendlineParams, side: str, iv: int) -> list[pl.Expr]:
     risk = sgn * (col("close") - sl)
     beyond = sgn * (col("close") - level) > 0
     rng = col("high") - col("low")
-    signal = (line_ok & respected & prev_inside & (touches >= p.min_touches) & squeezed & beyond & full_body(side, p.min_body_frac)
+    calm = (rng <= p.max_break_range_atr * atr0).fill_null(False)  # аномально большая пробойная свеча - не входим
+    signal = (line_ok & respected & fresh & calm & prev_inside & (touches >= p.min_touches) & squeezed & beyond & full_body(side, p.min_body_frac)
               & trend_strict(side) & (risk > 0) & (atr0 > 0))
     pre = f"{_T}{side}_"
     return [signal.fill_null(False).alias(pre + "signal"), level.alias(pre + "level"), sl.alias(pre + "sl"), touches.alias(pre + "touches"),

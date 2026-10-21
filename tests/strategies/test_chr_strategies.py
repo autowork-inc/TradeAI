@@ -22,6 +22,8 @@ from orchestrator.tracker import CLOSED, OPEN, VirtualTracker
 from orchestrator.types import Direction, FeatureContext, Kind
 from persistence.recorder import MemoryRecorder
 from strategies.chr_common import pivot_chain
+import strategies.chr_horizontal as H
+import strategies.chr_trendline as T
 from strategies.chr_horizontal import ChrHorizontalParams, detect_chr_horizontal
 from strategies.chr_horizontal import signal_columns as h_columns
 from strategies.chr_trendline import ChrTrendlineParams, detect_chr_trendline
@@ -59,10 +61,10 @@ def horizontal(n: int = 60, bias=1, **over) -> pl.DataFrame:
 
 def trendline(n: int = 60, bias=1, **over) -> pl.DataFrame:
     """Лонг: фон high 100.0 / low 99.4. Нисходящее сопротивление через пивоты 102.0 (бар 20) и 101.2 (бар 36): -0.05 за бар, на баре 54 - 100.3;
-    третье касание - 102.4 на баре 12 (на продолжении линии). Поджатие: 98.6 (40) < 98.9 (45) < 99.1 (50). Бар 54: 99.9 -> 100.9 (тело 83%)."""
+    третье касание - 102.4 на баре 12 (на продолжении линии). Поджатие: 98.6 (39) < 98.9 (43) < 99.1 (47). Бар 54: 99.9 -> 100.9 (тело 83%)."""
     o, c, h, lo = [99.7] * n, [99.7] * n, [100.0] * n, [99.4] * n
     h[12], h[20], h[36] = 102.4, 102.0, 101.2
-    for i, v in ((40, 98.6), (45, 98.9), (50, 99.1)):
+    for i, v in ((39, 98.6), (43, 98.9), (47, 99.1)):
         lo[i] = v
     o[J], h[J], lo[J], c[J] = 99.9, 101.0, 99.8, 100.9
     cols = {"open": o, "high": h, "low": lo, "close": c}
@@ -87,7 +89,8 @@ def hz(df, params=None):
 
 
 def tl(df, params=None):
-    return detect_chr_trendline(df, STEP, params)
+    # ручные сценарии короче окна по умолчанию (60): на 60 барах пробойная свеча J = 54 не имеет полного окна, поэтому окно сценариев - 50
+    return detect_chr_trendline(df, STEP, params or ChrTrendlineParams(window=50))
 
 
 # ------------------------------------------------------------------------------------------------ пивоты
@@ -208,7 +211,7 @@ def test_trendline_short_is_exact_mirror():
     ("сопротивление восходящее", {"high": {20: 100.8}}, None),
     ("линия почти горизонтальна", {"high": {36: 101.99}}, None),
     ("high вышел за линию после 2-й опоры", {"high": {28: 102.0}}, None),
-    ("минимумы не повышаются", {"low": {50: 98.7}}, None),
+    ("минимумы не повышаются", {"low": {47: 98.7}}, None),
     ("закрытие под линией", {"close": {J: 100.25}, "high": {J: 100.3}}, None),
     ("неполнотелая свеча", {"open": {J: 100.5}, "high": {J: 101.5}, "low": {J: 99.6}}, None),
     ("опора вне окна", {}, ChrTrendlineParams(window=30)),
@@ -225,6 +228,41 @@ def test_breakout_is_an_event_not_a_state():
     assert idx(hz(two), "chh_long_signal") == [J]
 
 
+# ------------------------------------------------------------------------------------- «глаза трейдера» (2026-10-21)
+
+
+def test_huge_breakout_candle_is_not_bought_market():
+    """Размах пробойной свечи > 1.5 ATR[j-1] - сигнала нет (обе стратегии, обе стороны); ровно 1.5 - ещё можно."""
+    big = dict(high={J: 103.0}, low={J: 99.8})  # размах 3.2 ATR; тело 1.2 из 3.2 < 60% - ловим именно размах, поэтому раздуваем и тело
+    h = horizontal(open={J: 99.8}, close={J: 102.9}, **big)
+    assert idx(hz(h), "chh_long_signal") == [] and idx(hz(mirror(h)), "chh_short_signal") == []
+    t = trendline(open={J: 99.7}, close={J: 102.5}, high={J: 102.6}, low={J: 99.4})
+    assert idx(tl(t), "cht_long_signal") == [] and idx(tl(mirror(t)), "cht_short_signal") == []
+    edge_h = horizontal(open={J: 100.3}, high={J: 101.8}, low={J: 100.3}, close={J: 101.75})  # размах 1.5
+    assert idx(hz(edge_h), "chh_long_signal") == [J]
+    assert idx(hz(horizontal(), ChrHorizontalParams(max_break_range_atr=1.2)), "chh_long_signal") == []  # размах 1.4 > 1.2
+
+
+def test_lookback_is_capped_to_the_local_structure_and_swings_are_3_bars_wide():
+    assert H.MAX_LOOKBACK == T.MAX_LOOKBACK == 80 and H.CHR_H_WINDOW <= 80 and T.CHR_T_WINDOW <= 80
+    assert H.CHR_H_PIVOT_K >= 3 and T.CHR_T_PIVOT_K >= 3
+
+
+def test_stale_second_touch_is_rejected():
+    """Последнее касание уровня / вторая опора линии слишком далеко от пробоя - не «свежая» структура."""
+    assert idx(hz(horizontal(), ChrHorizontalParams(max_touch_age=8)), "chh_long_signal") == []  # последнее касание на баре 44: 10 баров назад
+    assert idx(hz(horizontal(), ChrHorizontalParams(max_touch_age=10)), "chh_long_signal") == [J]
+    assert idx(tl(trendline(), ChrTrendlineParams(window=50, max_touch_age=10)), "cht_long_signal") == []  # A1 на баре 36: 18 баров назад
+    assert idx(tl(trendline(), ChrTrendlineParams(window=50, max_touch_age=18)), "cht_long_signal") == [J]
+
+
+def test_line_must_not_cut_through_candles_between_touches_and_before_breakout():
+    """Закрытие за линией между опорами и после - линия не чистая граница; даже мелкий прокол тенью свыше допуска блокирует."""
+    assert idx(tl(trendline(close={28: 101.9}, high={28: 102.0})), "cht_long_signal") == []  # закрытие выше линии (101.6) между опорами
+    assert idx(tl(trendline(high={39: 101.12, 40: 101.12})), "cht_long_signal") == []  # тень выше линии (линия на баре 40 = 101.0) - линия режет свечу
+    assert idx(tl(trendline(high={39: 101.07, 40: 101.04})), "cht_long_signal") == [J]  # касание в пределах 0.05 ATR допустимо
+
+
 # ------------------------------------------------------------------------------------- R4 / R8 на случайных данных
 
 
@@ -237,8 +275,9 @@ def _features(seed: int, n: int = 900) -> pl.DataFrame:
 def test_random_data_gives_signals_on_both_sides_and_stops_beyond_the_close():
     """На случайном блуждании с правилами по умолчанию сигналов единицы (3 строго повышающихся пивота + полнотелый пробой + тренд);
     для проверки инвариантов берём поджатие из 2 точек."""
-    df = _features(3, 8000)
-    out_h, out_t = hz(df, ChrHorizontalParams(squeeze_points=2)), tl(df, ChrTrendlineParams(squeeze_points=2))
+    df = _features(3, 20000)
+    out_h = hz(df, ChrHorizontalParams(squeeze_points=2, max_touch_age=40, max_break_range_atr=10.0))  # свежесть и размах ослаблены: проверяем инварианты
+    out_t = tl(df, ChrTrendlineParams(squeeze_points=2, max_touch_age=60, max_break_range_atr=10.0, cross_atr=0.25))
     for out, pre in ((out_h, "chh"), (out_t, "cht")):
         assert out[f"{pre}_long_signal"].sum() >= 3 and out[f"{pre}_short_signal"].sum() >= 3, pre
         lg, sh = out.filter(pl.col(f"{pre}_long_signal")), out.filter(pl.col(f"{pre}_short_signal"))
@@ -271,10 +310,10 @@ def test_input_contract_r1():
         tl(tl(trendline()))
     with pytest.raises(ConfigError):
         detect_chr_trendline(trendline(), 0)
-    for bad in (dict(window=4), dict(pivot_k=0), dict(squeeze_points=1), dict(min_body_frac=0.0), dict(min_body_frac=1.5), dict(window=24.0)):
+    for bad in (dict(window=4), dict(pivot_k=0), dict(squeeze_points=1), dict(min_body_frac=0.0), dict(min_body_frac=1.5), dict(window=24.0), dict(window=81), dict(max_touch_age=81), dict(max_break_range_atr=0)):
         with pytest.raises(ConfigError):
             ChrHorizontalParams(**bad)
-    for bad in (dict(min_slope_atr=0.0), dict(touch_depth=1), dict(min_touches=1)):
+    for bad in (dict(min_slope_atr=0.0), dict(touch_depth=1), dict(min_touches=1), dict(window=81), dict(max_touch_age=81), dict(max_break_range_atr=0)):
         with pytest.raises(ConfigError):
             ChrTrendlineParams(**bad)
 
@@ -296,7 +335,7 @@ def test_strategies_wrap_detectors_into_market_signals_with_squeeze_geometry():
     assert StrategyHorizontalBreakoutChr().detect(FeatureContext("BTCUSDT", "15m", STEP, df.head(J), J * STEP + 500)) == ()
 
     df = mirror(trendline(n=J + 1))
-    (sig,) = StrategyTrendlineBreakoutChr().detect(FeatureContext("BTCUSDT", "15m", STEP, df, J * STEP + STEP + 500))
+    (sig,) = StrategyTrendlineBreakoutChr(ChrTrendlineParams(window=50)).detect(FeatureContext("BTCUSDT", "15m", STEP, df, J * STEP + STEP + 500))
     assert sig.strategy == TRENDLINE_BREAKOUT_CHR and sig.direction == Direction.SHORT and sig.sl == pytest.approx(200 - 98.9)
     assert sig.meta["line_level"] == pytest.approx(99.7) and sig.meta["touches"] == 3 and sig.meta["htf_label"] == "Bearish"
     assert [g["label"] for g in sig.geometry] == ["наклонная линия", "2-я опора", "поджатие", "пробой линии", "SL"]
@@ -380,4 +419,4 @@ def test_calibration_constants_are_the_defaults_of_params_and_classes():
         T.CHR_T_WINDOW, T.CHR_T_PIVOT_K, T.CHR_T_MIN_TOUCHES, T.CHR_T_TOUCH_DEPTH, T.CHR_T_TOUCH_ATR, T.CHR_T_MIN_SLOPE_ATR, T.CHR_T_SQUEEZE_POINTS,
         T.CHR_T_MIN_BODY_FRAC, T.CHR_T_SL_BUFFER_ATR)
     assert StrategyHorizontalBreakoutChr().params == p and StrategyTrendlineBreakoutChr().params == q
-    assert (H.CHR_H_WINDOW, T.CHR_T_WINDOW, H.CHR_H_TOUCH_ATR, T.CHR_T_MIN_SLOPE_ATR) == (24, 48, 0.25, 0.02)  # согласованные стартовые значения
+    assert (H.CHR_H_WINDOW, T.CHR_T_WINDOW, H.CHR_H_TOUCH_ATR, T.CHR_T_MIN_SLOPE_ATR) == (30, 60, 0.25, 0.02)  # согласованные стартовые значения

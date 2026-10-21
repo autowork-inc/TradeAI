@@ -7,7 +7,8 @@
   * касания: подтверждённые локальные максимумы (пивоты с окном pivot_k, бары j-W .. j-1-pivot_k) с high >= L - touch_atr * ATR[j-1];
     их >= min_touches;
   * поджатие: последние squeeze_points подтверждённых локальных минимумов строго повышаются (higher lows) и все лежат в окне W;
-  * пробой: close[j] > L (строго за уровнем) полнотелой бычьей свечой (тело >= min_body_frac размаха); прошлое закрытие - под уровнем
+  * актуальность: последнее касание не старше max_touch_age баров; глубина поиска не больше 80 баров (MAX_LOOKBACK);
+  * пробой: размах свечи <= max_break_range_atr * ATR[j-1] (больше - вход MARKET запрещён); close[j] > L (строго за уровнем) полнотелой бычьей свечой (тело >= min_body_frac размаха); прошлое закрытие - под уровнем
     (L - максимум окна, в которое входит бар j-1, поэтому пробой - всегда событие, а не состояние);
   * тренд: htf_bias == Bullish (Neutral, Bearish и нет bias - запрет), без выключателя;
   * стоп: последний минимум поджатия - sl_buffer_atr * ATR[j-1] (D.SL_BUFFER_ATR, О5); стоп статичен. Размер позиции - фиксированные 5 USDT риска
@@ -27,14 +28,17 @@ from strategies.chr_common import SIDES, full_body, pivot_chain, squeeze, trend_
 from utils.errors import ConfigError, DataError
 
 # ------------------------------------------------------------------------------------------------ КАЛИБРОВКА (стартовые допущения 2026-10-19)
-CHR_H_WINDOW = 24  # баров до пробоя, в которых ищутся уровень, касания и поджатие
-CHR_H_PIVOT_K = 2  # окно локального экстремума (D2): бар выше / ниже k соседей с каждой стороны
+CHR_H_WINDOW = 30  # баров до пробоя, в которых ищутся уровень, касания и поджатие (жёсткий потолок - MAX_LOOKBACK)
+CHR_H_PIVOT_K = 3  # окно локального экстремума (D2): бар выше / ниже k соседей с каждой стороны (явный свинг, а не случайная тень)
 CHR_H_MIN_TOUCHES = 2  # правило CHR: минимум 2 подтверждённых касания
 CHR_H_TOUCH_ATR = 0.25  # касание - экстремум пивота не дальше этой доли ATR[j-1] от уровня
+CHR_H_MAX_TOUCH_AGE = 20  # последнее касание уровня не старше этого числа баров до пробойной свечи
+CHR_H_MAX_BREAK_RANGE_ATR = 1.5  # размах пробойной свечи больше этого числа ATR[j-1] - вход MARKET запрещён (не покупаем на хаях)
 CHR_H_SQUEEZE_POINTS = 3  # строго повышающихся минимумов (лонг) / понижающихся максимумов (шорт): 3 точки = 2 шага
 CHR_H_MIN_BODY_FRAC = 0.6  # полнотелая свеча: тело >= этой доли размаха
 CHR_H_SL_BUFFER_ATR = D.SL_BUFFER_ATR  # запас стопа за последней точкой поджатия, в ATR
 
+MAX_LOOKBACK = 80  # глубина поиска структуры не больше 80 баров: только актуальная локальная структура
 _REQUIRED = ("open_time", "open", "high", "low", "close", "atr")
 _SIGNAL_FIELDS = ("signal", "level", "sl", "touches", "squeeze_1", "squeeze_2", "squeeze_3", "squeeze_start_t", "squeeze_last_t", "risk_atr", "body_frac")
 _T = "_chh_"  # промежуточные колонки (материализация этапами)
@@ -46,6 +50,8 @@ class ChrHorizontalParams:
     pivot_k: int = CHR_H_PIVOT_K
     min_touches: int = CHR_H_MIN_TOUCHES
     touch_atr: float = CHR_H_TOUCH_ATR
+    max_touch_age: int = CHR_H_MAX_TOUCH_AGE
+    max_break_range_atr: float = CHR_H_MAX_BREAK_RANGE_ATR
     squeeze_points: int = CHR_H_SQUEEZE_POINTS
     min_body_frac: float = CHR_H_MIN_BODY_FRAC
     sl_buffer_atr: float = CHR_H_SL_BUFFER_ATR
@@ -62,6 +68,8 @@ class ChrHorizontalParams:
             raise ConfigError("ChrHorizontalParams: min_touches >= 2, squeeze_points >= 2 (правила CHR)")
         if self.window <= self.pivot_k * 2 or not 0 < self.min_body_frac <= 1:
             raise ConfigError("ChrHorizontalParams: window > 2 * pivot_k, min_body_frac в (0, 1]")
+        if self.window > MAX_LOOKBACK or self.max_touch_age > MAX_LOOKBACK or self.max_break_range_atr <= 0:
+            raise ConfigError(f"ChrHorizontalParams: window и max_touch_age <= {MAX_LOOKBACK} (только локальная структура), max_break_range_atr > 0")
 
 
 def signal_columns(side: str) -> tuple[str, ...]:
@@ -97,6 +105,7 @@ def _stage_side(p: ChrHorizontalParams, side: str) -> list[pl.Expr]:
     near = [(flag.shift(s) & ((col(level_kind).shift(s + k) >= level - tol) if side == "long" else (col(level_kind).shift(s + k) <= level + tol)))
             .fill_null(False).cast(pl.Int32) for s in range(1, p.window - k + 1)]
     touches = pl.sum_horizontal(near)
+    recent = pl.sum_horizontal(near[:max(0, p.max_touch_age - k)]) if p.max_touch_age > k else pl.lit(0)  # касание свежее: пивот не старше max_touch_age баров
     sq = _CHAIN[sq_kind]
     in_window = (_c(f"{sq}{p.squeeze_points}_tj") >= _c("t_start")).fill_null(False)
     squeezed = squeeze(side, f"{_T}{sq}", p.squeeze_points, suffix="_pj") & in_window
@@ -107,7 +116,8 @@ def _stage_side(p: ChrHorizontalParams, side: str) -> list[pl.Expr]:
         beyond, sl, risk = col("close") < level, last_sq + p.sl_buffer_atr * atr0, (last_sq + p.sl_buffer_atr * atr0) - col("close")
     rng = col("high") - col("low")
     body = (col("close") - col("open")).abs()
-    signal = (touches >= p.min_touches) & squeezed & beyond & full_body(side, p.min_body_frac) & trend_strict(side) & (risk > 0) & (atr0 > 0)
+    calm = (rng <= p.max_break_range_atr * atr0).fill_null(False)  # аномально большая пробойная свеча - не входим
+    signal = (touches >= p.min_touches) & (recent >= 1) & calm & squeezed & beyond & full_body(side, p.min_body_frac) & trend_strict(side) & (risk > 0) & (atr0 > 0)
     pre = f"{_T}{side}_"
     return [signal.fill_null(False).alias(pre + "signal"), level.alias(pre + "level"), sl.alias(pre + "sl"), touches.alias(pre + "touches"),
             *[_c(f"{sq}{n}_pj").alias(f"{pre}squeeze_{n}") for n in (1, 2, 3) if n <= p.squeeze_points],

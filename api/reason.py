@@ -264,9 +264,9 @@ def build_reason(trade: dict[str, Any], meta: dict[str, Any] | None, geometry: l
     elif name == "Trendline_Breakout":
         title, (summary, facts) = "Trendline Breakout", _trendline(trade, meta, interval)
     elif name == "Horizontal_Breakout_CHR":
-        title, (summary, facts) = "Horizontal Breakout (CHR)", _chr_horizontal(trade, meta, interval)
+        title, (summary, facts) = "Пробой уровня (CHR)", _chr_horizontal(trade, meta, interval)
     elif name == "Trendline_Breakout_CHR":
-        title, (summary, facts) = "Trendline Breakout (CHR)", _chr_trendline(trade, meta, interval)
+        title, (summary, facts) = "Наклонка (CHR)", _chr_trendline(trade, meta, interval)
     else:
         title = name
         summary = "Причина входа для этой стратегии не описана в API; ниже - все параметры сигнала из снапшота."

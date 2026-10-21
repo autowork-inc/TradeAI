@@ -619,7 +619,7 @@ def test_history_table_keeps_its_width_and_scrolls_horizontally_with_a_fixed_hea
     from tradeai_client.ui import history_view as hv
 
     v = HistoryView(Host())
-    scrollers = [c for c in v.control.controls if isinstance(c, ft.Row) and c.scroll is not None]
+    scrollers = [c for box in v.control.controls if isinstance(box, ft.Column) for c in box.controls if isinstance(c, ft.Row) and c.scroll is not None]  # таблица и карточки - в одной колонке-обёртке
     assert len(scrollers) == 1, "ровно одна горизонтально прокручиваемая область: заголовок и строки едут вместе"
     table = scrollers[0].controls[0]
     assert scrollers[0].expand and table.width == hv.TABLE_W and table.width >= sum(hv.WIDTHS)  # ширина = сумма колонок: на узком экране таблица уходит за край, а не сжимается

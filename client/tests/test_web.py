@@ -365,3 +365,28 @@ def test_phone_history_collapses_filters_so_rows_are_visible_and_the_button_expa
     desktop = web_app.HistoryView  # настольный вид (host без tap_opens_chart) фильтры не сворачивает
     from tradeai_client.ui.history_view import HistoryView
     assert not hasattr(HistoryView(MagicMock(tap_opens_chart=False)), "_filters_box")
+
+
+def _trade(i: int, **kw) -> dict:
+    return {"id": f"t{i}", "coin": "BTCUSDT", "strategy_id": "Trendline_Breakout_CHR", "strategy_name": "Trendline_Breakout_CHR", "side": "long", "mode": "shadow",
+            "status": "closed", "signal_time": f"2026-10-20T12:{i:02d}:00Z", "entry_price": 100.0, "exit_price": 104.0, "r_multiple": 4.0, "pnl": 5.0,
+            "exit_reason": "tp", "has_snapshot": True, "is_favorite": False, **kw}
+
+
+def test_history_is_cards_when_page_is_narrower_than_768_and_table_when_wider():
+    """Телефон (page.width < 768): вертикальные карточки с датой, монетой, стратегией, стороной, статусом, PnL и отдельным рядом кнопок; широкий экран - таблица."""
+    cfg = web_app.WebConfig.from_env(ENV)
+    page = MagicMock()
+    page.width = 390
+    shell = web_app.WebShell(page, cfg, on_logout=lambda: None)
+    h = shell.history
+    h._items = [_trade(1), _trade(2, side="short", pnl=-5.0, r_multiple=-1.0, status="cancelled")]
+    h._rebuild()
+    assert h.is_compact() and h._cards.visible and not h._table.visible and len(h._cards.controls) == 2 and h._rows.controls == []
+    texts = [x.value for x in walk(h._cards.controls[0]) if isinstance(x, ft.Text)]
+    assert "Наклонка (CHR)" in texts and "BTC" in " ".join(texts) and any("+5.00" in t for t in texts) and "Лонг" in texts
+    buttons = [x for x in walk(h._cards.controls[0]) if isinstance(x, ft.IconButton)]
+    assert len(buttons) == 2  # звёздочка и график - отдельным рядом внутри карточки
+    page.width = 1024
+    h.relayout()
+    assert not h.is_compact() and h._table.visible and not h._cards.visible and len(h._rows.controls) == 2 and h._cards.controls == []

@@ -50,6 +50,7 @@ class Shell:
         self._chr_pnl: float | None = None  # баланс профиля CHR: накопленный PnL его сделок от нуля
         self.dashboard, self.stats, self.history, self.analysis = DashboardView(self), StatsView(self), HistoryView(self), AnalysisView(self)
         self.favorites = HistoryView(self, favorites=True)
+        page.on_resize = lambda e: [v.relayout() for v in (self.history, self.favorites)]  # узкое окно - карточки вместо таблицы
         self._profile_btn = ft.TextButton(f"Пользователь: {self.settings.profile}", icon=ft.Icons.PERSON, tooltip="Сменить пользователя (SANTA / CHR)", on_click=lambda e: self.show_profile_dialog())
         self._dot = w.dot(w.MUTED, 12)
         self._status_text = ft.Text("Не подключено", size=13, color=w.MUTED)
@@ -401,7 +402,7 @@ class Shell:
             self.run(self.set_profile(name))
 
         about = {profiles.SANTA: "Все стратегии и монеты, баланс боевого счёта.",
-                 profiles.CHR: "Только Trendline Breakout (CHR) и Horizontal Breakout (CHR); монеты EUR, GBP, JPY, XAU, BTC, ETH (+ ваши); баланс и PnL с нуля."}
+                 profiles.CHR: "Только Наклонка (CHR) и Пробой уровня (CHR); монеты EUR, GBP, JPY, XAU, BTC, ETH (+ ваши); баланс и PnL с нуля."}
         buttons = [ft.Container(content=ft.Column([ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE if self.profile == name else ft.Icons.PERSON, color=w.GREEN if self.profile == name else w.MUTED),
                                                           ft.Text(name, size=16, weight=ft.FontWeight.W_700)], spacing=8), ft.Text(about[name], size=12, color=w.MUTED)], spacing=4),
                                    padding=12, border_radius=10, bgcolor=w.CARD_HI if self.profile == name else w.CARD, border=ft.Border.all(1, w.ACCENT if self.profile == name else w.BORDER),

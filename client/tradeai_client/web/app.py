@@ -320,6 +320,9 @@ class WebApp:
     def _adapt(self) -> None:
         """Мобильная раскладка: при узком экране отступы страницы минимальны (всё остальное - wrap/ResponsiveRow/горизонтальный скролл таблицы)."""
         self.page.padding = 8 if (self.page.width or 0) < NARROW_PX else 16
+        if self.shell is not None:  # поворот телефона: History/Favorites переключаются между таблицей и карточками
+            for view in (self.shell.history, self.shell.favorites):
+                view.relayout()
         if w.attached(self.page.controls[0]) if self.page.controls else False:
             self.page.update()
 

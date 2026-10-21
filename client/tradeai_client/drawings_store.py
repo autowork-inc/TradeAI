@@ -1,5 +1,5 @@
 """Рисунки пользователя на графике: локальный JSON `drawings.json` рядом с .exe (как settings.json), ключ - тикер. Переживают перезапуск и смену таймфрейма:
-координаты - время (секунды UTC) и цена, не пиксели и не номера свечей. Файл правит и человек: битые записи отбрасываются, а не роняют график."""
+координаты - время (целые секунды Unix UTC) и цена, не пиксели, не номера свечей и не строки; при чтении миллисекунды переводятся в секунды, номера свечей отбрасываются. Файл правит и человек: битые записи отбрасываются, а не роняют график."""
 
 import json
 import logging
@@ -13,6 +13,7 @@ log = logging.getLogger("tradeai_client.drawings")
 FILE_NAME = "drawings.json"
 TYPES = ("trend", "hline", "ray", "rect")
 MAX_PER_SYMBOL = 500
+MIN_UNIX_SEC = 1e8  # 1973 год: всё, что меньше, - не метка времени (например, номер свечи)
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
@@ -27,9 +28,13 @@ def _point(v: Any) -> dict[str, float] | None:
     t, p = v.get("t"), v.get("p")
     if isinstance(t, bool) or isinstance(p, bool) or not isinstance(t, (int, float)) or not isinstance(p, (int, float)):
         return None
-    if not (math.isfinite(t) and math.isfinite(p)) or t <= 0:
+    if not (math.isfinite(t) and math.isfinite(p)):
         return None
-    return {"t": float(t), "p": float(p)}
+    if t > 1e11:  # миллисекунды (старые записи / чужой формат) -> секунды
+        t = t / 1000
+    if t < MIN_UNIX_SEC:  # индекс свечи или мусор, а не время: привязать к оси времени нельзя - запись отбрасывается
+        return None
+    return {"t": int(round(t)), "p": float(p)}  # строго Unix timestamp в секундах UTC, целое
 
 
 def clean(items: Any) -> list[dict[str, Any]]:

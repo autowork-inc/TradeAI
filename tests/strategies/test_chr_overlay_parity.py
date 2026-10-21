@@ -8,6 +8,7 @@ import pytest
 
 from orchestrator.multi_strategies import HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR, StrategyHorizontalBreakoutChr, StrategyTrendlineBreakoutChr
 from orchestrator.types import FeatureContext
+from strategies.chr_trendline import ChrTrendlineParams
 from tests.strategies.test_chr_strategies import J, STEP, horizontal, mirror, trendline
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "client"))
@@ -22,7 +23,8 @@ def snapshot(df, signal, strategy):
 
 
 def run(strategy_cls, df):
-    (sig,) = strategy_cls().detect(FeatureContext("BTCUSDT", "15m", STEP, df, J * STEP + STEP + 500))
+    strategy = strategy_cls(ChrTrendlineParams(window=50)) if strategy_cls is StrategyTrendlineBreakoutChr else strategy_cls()  # сценарии короче окна по умолчанию
+    (sig,) = strategy.detect(FeatureContext("BTCUSDT", "15m", STEP, df, J * STEP + STEP + 500))
     return sig
 
 

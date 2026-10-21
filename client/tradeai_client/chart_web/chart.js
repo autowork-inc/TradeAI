@@ -13,7 +13,7 @@
   const pad = (n) => String(n).padStart(2, '0');
   const S = {
     interval: CFG.interval, bars: [], gen: 0, ws: null, wsTimer: null, pollTimer: null, lastMsg: 0, loadingOlder: false, oldestReached: false,
-    tool: 'cursor', style: { color: '#ffb300', width: 2, opacity: 0.9 }, drawings: CFG.drawings || [], selected: null, draft: null, drag: null,
+    tool: 'cursor', style: { color: '#ffb300', width: 2, opacity: 0.9 }, drawings: [], selected: null, draft: null, drag: null,
     showBot: true, fav: !!(CFG.favorite && CFG.favorite.is_favorite), saveTimer: null, raf: 0, markers: [], priceLines: [],
   };
   let chart, series, vol, ready = null;
@@ -48,6 +48,7 @@
   const ivSec = () => IV[S.interval] || 900;
   /* Время <-> логический индекс свечи. Свеча занимает интервал [open, open + iv), её тело нарисовано в центре (open + iv/2), поэтому индекс считается от СЕРЕДИНЫ свечи:
      иначе точка рисунка, привязанная к абсолютному времени, при смене таймфрейма сдвигалась бы на полсвечи нового таймфрейма. Рисунки хранят только (время UTC, цена). */
+  // <time-mapping>
   const barIv = () => S.barsIv || ivSec();
   const specIv = () => IV[CFG.interval] || ivSec();  // длина свечи таймфрейма СДЕЛКИ: правый край зон/линий сигнала не зависит от выбранного сейчас таймфрейма
   function rawToLogical(t) {
@@ -69,6 +70,20 @@
   }
   const timeToLogical = (t) => rawToLogical(t - barIv() / 2);
   const logicalToTime = (L) => { const r = rawToTime(L); return r == null ? null : r + barIv() / 2; };
+  // </time-mapping>
+  /* Координата времени рисунка - СТРОГИЙ Unix-timestamp в секундах UTC (целое число): не индекс свечи, не строка, не миллисекунды.
+     Индексы свечей живут только внутри одного вызова отрисовки (logical <-> пиксели) и никогда не сохраняются. */
+  const tsec = (t) => (t == null || !isFinite(t) ? null : Math.round(Math.abs(t) > 1e11 ? t / 1000 : t));
+  const normPoint = (p) => (p && isFinite(p.p) && tsec(p.t) > 1e8 ? { t: tsec(p.t), p: +p.p } : null);
+  function normDrawings(list) { // загруженные рисунки -> секунды UTC; записи без валидных точек (старые «индексы свечей» < 1e8) отбрасываются
+    const out = [];
+    for (const d of list || []) {
+      const p1 = normPoint(d.p1), p2 = d.p2 ? normPoint(d.p2) : null;
+      if (!p1 || (d.type !== 'hline' && !p2)) continue;
+      out.push(d.type === 'hline' ? { ...d, p1 } : { ...d, p1, p2 });
+    }
+    return out;
+  }
   const X = (sec) => { const L = timeToLogical(sec); return L == null ? null : chart.timeScale().logicalToCoordinate(L); };
   const Y = (price) => series.priceToCoordinate(price);
   const xToTime = (x) => { const L = chart.timeScale().coordinateToLogical(x); return L == null ? null : logicalToTime(L); };
@@ -438,30 +453,30 @@
     e.stopPropagation(); e.preventDefault();
     const base = { id: newId(), type: S.tool, color: S.style.color, width: S.style.width, opacity: S.style.opacity };
     if (S.tool === 'hline') {
-      S.drawings.push({ ...base, p1: { t: m.t, p: m.p } }); persist(); setTool('cursor'); return;
+      S.drawings.push({ ...base, p1: { t: tsec(m.t), p: m.p } }); persist(); setTool('cursor'); return;
     }
-    if (!S.draft) { S.draft = { d: { ...base, p1: { t: m.t, p: m.p }, p2: { t: m.t, p: m.p } }, down: { x: m.x, y: m.y }, moved: false }; }
+    if (!S.draft) { S.draft = { d: { ...base, p1: { t: tsec(m.t), p: m.p }, p2: { t: tsec(m.t), p: m.p } }, down: { x: m.x, y: m.y }, moved: false }; }
     else { finishDraft(m); }
     scheduleDraw();
   }
   function finishDraft(m) {
-    const d = S.draft.d; d.p2 = { t: m.t, p: m.p };
+    const d = S.draft.d; d.p2 = { t: tsec(m.t), p: m.p };
     S.drawings.push(d); S.draft = null; persist(); setTool('cursor'); select(d.id);
   }
   function onMove(e) {
     const m = mouse(e);
-    if (S.draft && m.t != null && m.p != null) { S.draft.d.p2 = { t: m.t, p: m.p }; if (Math.hypot(m.x - S.draft.down.x, m.y - S.draft.down.y) > 5) S.draft.moved = true; scheduleDraw(); return; }
+    if (S.draft && m.t != null && m.p != null) { S.draft.d.p2 = { t: tsec(m.t), p: m.p }; if (Math.hypot(m.x - S.draft.down.x, m.y - S.draft.down.y) > 5) S.draft.moved = true; scheduleDraw(); return; }
     if (!S.drag) return;
     const d = byId(S.drag.id); if (!d || m.t == null || m.p == null) return;
     e.preventDefault();
     if (S.drag.mode === 'move') {
       const dL = chart.timeScale().coordinateToLogical(m.x) - S.drag.L0, dP = m.p - S.drag.P0;
-      const shift = (p) => ({ t: logicalToTime(timeToLogical(p.t) + dL), p: p.p + dP });
+      const shift = (p) => ({ t: tsec(logicalToTime(timeToLogical(p.t) + dL)), p: p.p + dP });
       d.p1 = shift(S.drag.p1); if (S.drag.p2) d.p2 = shift(S.drag.p2);
-    } else if (S.drag.mode === 'p1') { d.p1 = { t: m.t, p: m.p }; }
-    else if (S.drag.mode === 'p2') { d.p2 = { t: m.t, p: m.p }; }
-    else if (S.drag.mode === 'c1') { d.p1 = { t: d.p1.t, p: d.p1.p }; d.p2 = { t: d.p2.t, p: d.p2.p }; d.p1.t = m.t; d.p2.p = m.p; }
-    else if (S.drag.mode === 'c2') { d.p2 = { t: m.t, p: d.p2.p }; d.p1 = { t: d.p1.t, p: m.p }; }
+    } else if (S.drag.mode === 'p1') { d.p1 = { t: tsec(m.t), p: m.p }; }
+    else if (S.drag.mode === 'p2') { d.p2 = { t: tsec(m.t), p: m.p }; }
+    else if (S.drag.mode === 'c1') { d.p1 = { t: d.p1.t, p: d.p1.p }; d.p2 = { t: d.p2.t, p: d.p2.p }; d.p1.t = tsec(m.t); d.p2.p = m.p; }
+    else if (S.drag.mode === 'c2') { d.p2 = { t: tsec(m.t), p: d.p2.p }; d.p1 = { t: d.p1.t, p: m.p }; }
     scheduleDraw();
   }
   function onUp(e) {
@@ -512,6 +527,7 @@
 
   /* ------------------------------------------------------------------ запуск */
   function init() {
+    S.drawings = normDrawings(CFG.drawings);
     $('title').textContent = spec.title;
     const tfs = $('tfs');
     (CFG.timeframes || ['5m', '15m', '1h', '4h']).forEach((tf) => {
