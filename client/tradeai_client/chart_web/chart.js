@@ -248,6 +248,14 @@
       if (i < 0) continue;
       mk.push({ time: S.bars[i].time, position: m.position === 'above' ? 'aboveBar' : 'belowBar', color: m.color, shape: shape[m.shape] || 'circle', text: m.text || '' });
     }
+    /* Подпись вертикальной линии сигнала («С»): раньше рисовалась на холсте на фиксированной высоте (y = 12) и «улетала» в верхний угол, когда линия
+       выходила за край или менялся масштаб. Теперь это нативный маркер lightweight-charts: время = свеча сигнала, позиция = над её максимумом - библиотека сама
+       держит подпись у свечи при любом зуме, прокрутке и таймфрейме. */
+    for (const v of spec.vlines || []) {
+      if (!v.text) continue;
+      const i = snapIndex(v.t / 1000);
+      if (i >= 0) mk.push({ time: S.bars[i].time, position: 'aboveBar', color: v.color, shape: 'circle', text: v.text });
+    }
     mk.sort((a, b) => a.time - b.time);
     series.setMarkers(mk);
   }
@@ -301,7 +309,7 @@
     for (const v of spec.vlines || []) {
       const x = X(v.t / 1000); if (x == null) continue;
       lineBetween(ctx, { x, y: 0 }, { x, y: P.h }, v.color, 1, [4, 4]);
-      if (v.text) label(ctx, v.text, x + 3, 12, v.color);
+      // текст «С» - нативный маркер свечи (applyMarkers), а не подпись на холсте у верхнего края
     }
   }
   function drawBot(ctx) {

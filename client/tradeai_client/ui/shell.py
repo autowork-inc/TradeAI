@@ -402,7 +402,7 @@ class Shell:
             self.run(self.set_profile(name))
 
         about = {profiles.SANTA: "Все стратегии и монеты, баланс боевого счёта.",
-                 profiles.CHR: "Только Наклонка (CHR) и Пробой уровня (CHR); монеты EUR, GBP, JPY, XAU, BTC, ETH (+ ваши); баланс и PnL с нуля."}
+                 profiles.CHR: "Только Наклонка (Trendline) и Пробой уровня (Horizontal); монеты EUR, GBP, JPY, XAU, BTC, ETH (+ ваши); баланс и PnL с нуля."}
         buttons = [ft.Container(content=ft.Column([ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE if self.profile == name else ft.Icons.PERSON, color=w.GREEN if self.profile == name else w.MUTED),
                                                           ft.Text(name, size=16, weight=ft.FontWeight.W_700)], spacing=8), ft.Text(about[name], size=12, color=w.MUTED)], spacing=4),
                                    padding=12, border_radius=10, bgcolor=w.CARD_HI if self.profile == name else w.CARD, border=ft.Border.all(1, w.ACCENT if self.profile == name else w.BORDER),

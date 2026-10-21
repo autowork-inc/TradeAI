@@ -36,7 +36,7 @@ ICT_KILLZONES = "ICT_Killzones"
 VWAP_REVERSION = "VWAP_Reversion"
 HORIZONTAL_BREAKOUT = "Horizontal_Breakout"  # 2026-10-18, только Shadow (config.SHADOW_ONLY_STRATEGIES)
 TRENDLINE_BREAKOUT = "Trendline_Breakout"  # 2026-10-18, только Shadow (config.SHADOW_ONLY_STRATEGIES)
-# CHR (2026-10-19, только Shadow). В клиенте - «Пробой уровня (CHR)» / «Наклонка (CHR)» (с 2026-10-21): strategy_id без пробелов и скобок,
+# CHR (2026-10-19, только Shadow). В клиенте - «Пробой уровня (Horizontal)» / «Наклонка (Trendline)» (с 2026-10-21): strategy_id без пробелов и скобок,
 # потому что он входит в id сделки (`<strategy_id>:<символ>:...`), а id сделки в API ограничен [A-Za-z0-9:._-] (api/main.py TradeId).
 HORIZONTAL_BREAKOUT_CHR = "Horizontal_Breakout_CHR"
 TRENDLINE_BREAKOUT_CHR = "Trendline_Breakout_CHR"
