@@ -84,7 +84,17 @@
     }
     return out;
   }
-  const X = (sec) => { const L = timeToLogical(sec); return L == null ? null : chart.timeScale().logicalToCoordinate(L); };
+  // <coord>
+  /* ВАЖНО: lightweight-charts 4.1 `timeScale().logicalToCoordinate(L)` возвращает 0 для ДРОБНОГО L (проверено: 975.5 -> 0, 976 -> 259), поэтому всё, что рисуется на холсте
+     по времени (зоны, наклонные линии, вертикальная линия сигнала, точки CHR), «уезжало» к левому краю графика. Дробную позицию считаем сами - линейно между двумя целыми. */
+  function logicalX(ts, L) {
+    const a = Math.floor(L);
+    if (a === L) return ts.logicalToCoordinate(L);
+    const xa = ts.logicalToCoordinate(a), xb = ts.logicalToCoordinate(a + 1);
+    return xa == null || xb == null ? null : xa + (xb - xa) * (L - a);
+  }
+  // </coord>
+  const X = (sec) => { const L = timeToLogical(sec); return L == null ? null : logicalX(chart.timeScale(), L); };
   const Y = (price) => series.priceToCoordinate(price);
   const xToTime = (x) => { const L = chart.timeScale().coordinateToLogical(x); return L == null ? null : logicalToTime(L); };
   const yToPrice = (y) => series.coordinateToPrice(y);

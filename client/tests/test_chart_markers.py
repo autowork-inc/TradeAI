@@ -55,3 +55,17 @@ def test_vline_text_is_no_longer_painted_at_a_fixed_canvas_height():
     draw = src[src.index("function drawSpecLayer"):src.index("function drawBot")]
     assert "v.text" not in draw.replace("// текст «С»", "") and "x + 3, 12" not in src  # подписи на холсте у верхнего края больше нет
     assert "position: 'aboveBar', color: v.color" in src
+
+
+# ======================================================================================== canvas-координаты: дробный логический индекс
+
+@pytest.mark.skipif(NODE is None, reason="node не установлен")
+def test_canvas_x_works_for_fractional_logical_positions_unlike_the_library_call():
+    """lightweight-charts 4.1: `logicalToCoordinate(дробное)` -> 0 (всё на холсте уезжало к левому краю: «трендовая линия», зоны, вертикаль сигнала). `logicalX` считает сама."""
+    src = JS.read_text(encoding="utf-8")
+    block = re.search(r"// <coord>(.*?)// </coord>", src, re.S).group(1)
+    script = ("const ts={logicalToCoordinate:(L)=>Number.isInteger(L)?10*(L-950):0};" + block +  # имитация библиотеки: целые - координата, дробные - 0
+              "console.log(JSON.stringify({lib:ts.logicalToCoordinate(975.5),ours:logicalX(ts,975.5),whole:logicalX(ts,976),q:logicalX(ts,975.25)}));")
+    out = json.loads(subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=30, check=True).stdout)
+    assert out["lib"] == 0 and out["ours"] == pytest.approx(255.0) and out["whole"] == 260 and out["q"] == pytest.approx(252.5)
+    assert "logicalX(chart.timeScale(), L)" in src and "chart.timeScale().logicalToCoordinate(L)" not in src.replace("ts.logicalToCoordinate(L)", "")  # X() идёт через logicalX
