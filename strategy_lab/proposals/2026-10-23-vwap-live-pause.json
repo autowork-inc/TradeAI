@@ -29,5 +29,8 @@
   ],
   "risks": "Если новая версия хороша, упустим её боевую прибыль, пока копится Shadow.",
   "how_to_apply": "На сервере в ~/trading/.env.shadow: APPROVED_STRATEGIES=SMC_Pro_Trend, затем ./deploy/shadow.sh up-live --yes",
-  "status": "manual"
+  "status": "applied",
+  "applied_at": "2026-10-23T21:03:16Z",
+  "snapshot_before": "strategy_lab/history/VWAP_Reversion/2026-10-23_210316_096546__before_2026-10-23-vwap-live-pause.json",
+  "applied_how": "~/trading/.env.shadow: APPROVED_STRATEGIES=SMC_Pro_Trend (копия .env.shadow.bak_20261023_210306); вступает в силу при перезапуске live-контура (выкатка)"
 }

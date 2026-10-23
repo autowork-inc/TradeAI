@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "strategies": {
+    "ICT_Killzones": {
+      "params": {
+        "require_htf_trend": false,
+        "sl_buffer_atr": 0.75
+      },
+      "tp_r": null,
+      "proposal_id": "2026-10-23-ict-sl-buffer-0.75",
+      "applied_at": "2026-10-23T21:02:59Z"
+    },
+    "Horizontal_Breakout": {
+      "params": {
+        "max_extension_atr": 0.4
+      },
+      "tp_r": null,
+      "proposal_id": "2026-10-23-hb-max-extension-0.4",
+      "applied_at": "2026-10-23T20:59:06Z"
+    }
+  }
+}

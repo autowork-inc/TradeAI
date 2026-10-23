@@ -58,5 +58,7 @@
   ],
   "risks": "n=6 - это гипотеза, не доказательство. ICT сейчас только в Shadow (нет в APPROVED_STRATEGIES): реальных денег изменение не касается.",
   "how_to_apply": "python -X utf8 -m scripts.strategy_proposals apply 2026-10-23-ict-htf-trend-off, затем выкатка",
-  "status": "pending"
+  "status": "applied",
+  "applied_at": "2026-10-23T20:59:06Z",
+  "snapshot_before": "strategy_lab\\history\\ICT_Killzones\\2026-10-23_205906_452881__before_2026-10-23-ict-htf-trend-off.json"
 }

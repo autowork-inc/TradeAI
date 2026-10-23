@@ -1,0 +1,31 @@
+{
+  "strategy": "ICT_Killzones",
+  "saved_at": "2026-10-23T21:03:00Z",
+  "why": "before_2026-10-23-ict-sl-buffer-0.75",
+  "git_commit": "7bcea92",
+  "override_entry": {
+    "params": {
+      "require_htf_trend": false
+    },
+    "tp_r": null,
+    "proposal_id": "2026-10-23-ict-htf-trend-off",
+    "applied_at": "2026-10-23T20:59:06Z"
+  },
+  "effective_params": {
+    "asia_start_h": 0,
+    "asia_end_h": 7,
+    "london": [
+      7,
+      10
+    ],
+    "new_york": [
+      12,
+      15
+    ],
+    "sl_buffer_atr": 0.2,
+    "require_htf_trend": false,
+    "min_asia_range_atr": 2.0,
+    "min_sweep_depth_atr": 0.15,
+    "min_wick_frac": 0.55
+  }
+}

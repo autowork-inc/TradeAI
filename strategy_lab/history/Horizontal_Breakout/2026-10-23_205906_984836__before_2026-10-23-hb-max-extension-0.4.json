@@ -1,0 +1,28 @@
+{
+  "strategy": "Horizontal_Breakout",
+  "saved_at": "2026-10-23T20:59:06Z",
+  "why": "before_2026-10-23-hb-max-extension-0.4",
+  "git_commit": "7bcea92",
+  "override_entry": null,
+  "effective_params": {
+    "window": 24,
+    "min_box_atr": 1.5,
+    "max_box_atr": 5.0,
+    "max_efficiency": 0.4,
+    "touch_atr": 0.25,
+    "min_touches": 3,
+    "min_touch_span": 6,
+    "min_break_atr": 0.05,
+    "max_extension_atr": 1.2,
+    "min_body_atr": 0.5,
+    "max_body_atr": 2.5,
+    "min_clv": 0.6,
+    "volume_mult": 1.8,
+    "htf_filter": true,
+    "stop_lookback": 6,
+    "sl_buffer_atr": 0.2,
+    "min_risk_atr": 0.5,
+    "max_risk_atr": 3.0,
+    "min_quality": 0.0
+  }
+}

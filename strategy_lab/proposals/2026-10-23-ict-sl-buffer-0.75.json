@@ -1,0 +1,72 @@
+{
+  "id": "2026-10-23-ict-sl-buffer-0.75",
+  "created_at": "2026-10-23T21:15:00Z",
+  "source": "scripts.analyze_tp + 1m Binance, сделки ICT с 2026-10-20 (6)",
+  "strategy": "ICT_Killzones",
+  "kind": "params",
+  "title": "Логический стоп ICT: за экстремумом свипа с запасом 0.75 ATR вместо 0.2 (sl_buffer_atr 0.2 -> 0.75)",
+  "change": {
+    "params": {
+      "sl_buffer_atr": 0.75
+    }
+  },
+  "rationale": [
+    "Стоп ICT стоит за тенью свипа всего на 0.2 ATR - ровно там, где цену «добирают»: HYPE и TAO выбило за 5-12 минут (тень зашла за стоп на 0.17-0.22 ATR), после чего цена ушла на +9.75R и +17R в нашу сторону.",
+    "С запасом 0.75 ATR (риск тот же $5, объём меньше) на тех же 6 сделках по 1m-свечам: TAO вместо -1.31R -> +3.86R; итог TP 1:4 +1.36R/сделку против +0.46R сейчас.",
+    "Результат устойчив к порогу: 0.75 ATR -> +1.36R, 1.0 ATR -> +1.38R (0.5 ATR - ещё мало: +0.51R). Это плато, а не случайная точка.",
+    "Тейк 1:4 оставить: при любом стопе он лучший (1:2 даёт +0.36R, 1:3 +0.86R)."
+  ],
+  "evidence": {
+    "n": 6,
+    "tp4_mean_r": {
+      "buffer_0.2_now": 0.46,
+      "buffer_0.5": 0.51,
+      "buffer_0.75": 1.36,
+      "buffer_1.0": 1.38
+    },
+    "note": "пессимистичная симуляция по 1m (стоп раньше тейка внутри минуты); сделки версии ДО фильтров 20.10"
+  },
+  "examples": [
+    {
+      "trade": "ICT_Killzones:TAOUSDT 10-20 08:45 long",
+      "now_r": -1.31,
+      "with_0.75_r": 3.86,
+      "note": "стоп-хант 0.22 ATR, затем +17R"
+    },
+    {
+      "trade": "ICT_Killzones:HYPEUSDT 10-20 08:45 long",
+      "now_r": -1.24,
+      "with_0.75_r": -1.14,
+      "note": "даже с запасом выбило"
+    },
+    {
+      "trade": "ICT_Killzones:ADAUSDT 10-20 10:00 long",
+      "now_r": 3.86,
+      "with_0.75_r": 3.9
+    }
+  ],
+  "risks": "n=6. Стоп шире -> объём меньше при том же $5 риска. ICT только в Shadow - денег не касается.",
+  "how_to_apply": "python -X utf8 -m scripts.strategy_proposals apply 2026-10-23-ict-sl-buffer-0.75, затем выкатка",
+  "status": "applied",
+  "applied_at": "2026-10-23T21:02:59Z",
+  "snapshot_before": "strategy_lab\\history\\ICT_Killzones\\2026-10-23_210300_356069__before_2026-10-23-ict-sl-buffer-0.75.json",
+  "path_check": {
+    "tp_1_4_works": true,
+    "winners_mfe_before_stop_r": {
+      "TAO": 11.4,
+      "ADA": 7.67,
+      "ENA": 18.8
+    },
+    "minutes_to_4r": {
+      "TAO": 315,
+      "ADA": 248,
+      "ENA": 240
+    },
+    "losers_mfe_before_stop_r": {
+      "AGT": 0.0,
+      "HYPE": 0.21,
+      "BNB": 0.85
+    },
+    "note": "проверено по запросу пользователя: тейк 1:4 оставлен"
+  }
+}

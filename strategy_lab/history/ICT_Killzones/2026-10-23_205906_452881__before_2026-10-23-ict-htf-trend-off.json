@@ -1,0 +1,24 @@
+{
+  "strategy": "ICT_Killzones",
+  "saved_at": "2026-10-23T20:59:06Z",
+  "why": "before_2026-10-23-ict-htf-trend-off",
+  "git_commit": "7bcea92",
+  "override_entry": null,
+  "effective_params": {
+    "asia_start_h": 0,
+    "asia_end_h": 7,
+    "london": [
+      7,
+      10
+    ],
+    "new_york": [
+      12,
+      15
+    ],
+    "sl_buffer_atr": 0.2,
+    "require_htf_trend": true,
+    "min_asia_range_atr": 2.0,
+    "min_sweep_depth_atr": 0.15,
+    "min_wick_frac": 0.55
+  }
+}
