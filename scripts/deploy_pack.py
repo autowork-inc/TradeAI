@@ -24,13 +24,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN_FILES = ("docker-compose.yml", "Dockerfile", ".dockerignore", "requirements.txt", ".env.shadow.example", ".env.example",
-             "README.md", "deploy/shadow.sh", "deploy/apply.sh", "web/nginx.conf")
+             "README.md", "deploy/shadow.sh", "deploy/apply.sh", "deploy/init-ssl.sh", "deploy/caddy-tradeai.caddy", "web/nginx.conf", "web/nginx-ssl.conf", "web/nginx-locations.inc")
 FULL_ONLY = (".env",)
 EXCLUDED_PARTS = {"__pycache__", ".venv", ".git", "tests", ".pytest_cache", "data", "logs", "backups", "node_modules", "algo_live", "client", "mcp_server"}
 EXTRA_DOCKERFILES = ("api/Dockerfile", "analyzer/Dockerfile", "web/Dockerfile")  # образы дополнительных сервисов; контекст сборки у всех - корень проекта
 FORBIDDEN_NAMES = {".env", ".env.shadow"}  # в shadow-архиве недопустимы
 FORBIDDEN_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
-EXECUTABLE = {"deploy/shadow.sh", "deploy/apply.sh"}
+EXECUTABLE = {"deploy/shadow.sh", "deploy/apply.sh", "deploy/init-ssl.sh"}
 ARCHIVE_DEFAULT = "trading_docker.tar.gz"
 
 

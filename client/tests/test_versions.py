@@ -41,9 +41,9 @@ def entry(version, *changes, date="2026-10-20", title=""):
 
 
 def test_current_version_is_1_2_1_and_the_changelog_starts_from_the_1_0_base():
-    assert __version__ == "1.4.2"
+    assert __version__ == "1.4.3"
     releases = changelog.load()
-    assert releases[0].version == "1.4.2" and releases[-1].version == "1.0" and releases[-1].date and releases[-1].changes
+    assert releases[0].version == "1.4.3" and releases[-1].version == "1.0" and releases[-1].date and releases[-1].changes
     assert changelog.release_for(releases, __version__) is not None and changelog.release_for(releases, "1.0.0") is not None  # 1.0 == 1.0.0
     assert {c.type for r in releases for c in r.changes} <= set(changelog.TYPES)
 
@@ -255,3 +255,15 @@ def test_startup_asks_for_the_user_only_when_none_was_chosen_yet(monkeypatch):
     old.page.run_task = lambda *a: None
     old.show_login = lambda cb: pytest.fail("экран выбора не должен показываться повторно")
     asyncio.run(old.start())
+
+
+def test_legacy_http_url_switches_to_https_only_when_the_https_address_answers():
+    from tradeai_client.settings import HTTPS_URL, LEGACY_HTTP_URL, ClientSettings, upgrade_to_https
+
+    s = ClientSettings(base_url=LEGACY_HTTP_URL)
+    assert upgrade_to_https(s, probe=lambda url: False) is False and s.base_url == LEGACY_HTTP_URL  # сертификата ещё нет - всё по-старому
+    asked = []
+    assert upgrade_to_https(s, probe=lambda url: asked.append(url) or True) is True and s.base_url == HTTPS_URL and asked == [HTTPS_URL]
+    assert s.cleartext_remote is False and s.ws_url == "wss://193.233.75.254.nip.io/ws/live_state"
+    other = ClientSettings(base_url="http://127.0.0.1:8001")
+    assert upgrade_to_https(other, probe=lambda url: True) is False and other.base_url == "http://127.0.0.1:8001"  # свой адрес/туннель не трогаем

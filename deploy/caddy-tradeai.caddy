@@ -1,0 +1,11 @@
+# Блок для Caddy, если порты 80/443 сервера уже заняты им (на нашем VPS Caddy обслуживает elonmars.net). Caddy сам получает и продлевает
+# сертификат Let's Encrypt для адреса ниже и проксирует: API (REST + WebSocket) -> порт 8001, всё остальное (веб-версия Flet) -> порт 8080 контейнера nginx.
+193.233.75.254.nip.io {
+	@api path /api/* /ws/live_state
+	handle @api {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8080
+	}
+}

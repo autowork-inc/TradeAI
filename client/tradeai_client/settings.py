@@ -76,6 +76,32 @@ class ClientSettings:
         return parts.scheme == "http" and (parts.hostname or "") not in LOCAL_HOSTS
 
 
+LEGACY_HTTP_URL = "http://193.233.75.254:8001"  # прежний адрес API (без TLS)
+HTTPS_URL = "https://193.233.75.254.nip.io"  # новый: Let's Encrypt (deploy/init-ssl.sh); API и WebSocket - на том же адресе (/api/..., wss://.../ws/live_state)
+
+
+def upgrade_to_https(s: ClientSettings, probe=None) -> bool:
+    """Если сохранён прежний адрес http://193.233.75.254:8001 и https-адрес УЖЕ отвечает (/api/health, сертификат проверяется), переключает настройки на https (True) -
+    ключ API перестаёт ходить открытым текстом. Не отвечает (сертификат ещё не выпущен / нет сети) - ничего не меняет (False): клиент работает по-старому.
+    probe(url) -> bool подменяется в тестах."""
+    if s.normalized_url != LEGACY_HTTP_URL:
+        return False
+    if (probe or _https_alive)(HTTPS_URL):
+        s.base_url = HTTPS_URL
+        return True
+    return False
+
+
+def _https_alive(url: str, timeout: float = 3.0) -> bool:
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{url}/api/health", timeout=timeout) as resp:  # сертификат проверяется обычным способом: самоподписанный/просроченный - отказ
+            return resp.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
 def app_dir() -> Path:
     """Папка с .exe (PyInstaller) или с client/ при запуске из исходников."""
     if getattr(sys, "frozen", False):

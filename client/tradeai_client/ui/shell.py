@@ -13,7 +13,7 @@ from tradeai_client.binance import BinanceError, BinanceNoData, fetch_klines_fil
 from tradeai_client.chart_spec import ChartDataError, build_chart_spec, interval_to_ms
 from tradeai_client.chart_window import open_chart
 from tradeai_client.golden_image import render_png
-from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings, settings_exist
+from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings, settings_exist, upgrade_to_https
 from tradeai_client.ui import widgets as w
 from tradeai_client.ui.analysis_view import AnalysisView
 from tradeai_client.ui.changelog_view import change_row, release_card, releases_list
@@ -41,6 +41,11 @@ class Shell:
             self._settings_error = None
         except SettingsError as exc:
             self.settings, self._settings_error = ClientSettings(), str(exc)
+        if self._settings_error is None and upgrade_to_https(self.settings):  # https-адрес уже работает: сохранённый http://IP:8001 заменяется (ключ не идёт открытым текстом)
+            try:
+                save_settings(self.settings)
+            except OSError as exc:
+                log.warning("Не удалось сохранить адрес https: %s", exc)
         if first_run:
             self.settings.last_seen_version = __version__
         self.saved_mode = self.settings.mode_filter if self.settings.mode_filter in fmt.MODE_KEYS else ""  # выбор пользователя (Statistics/History) переживает перезапуск

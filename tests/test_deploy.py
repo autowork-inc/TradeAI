@@ -34,6 +34,11 @@ def mini_project(tmp_path: Path, **extra: str) -> Path:
     (tmp_path / "deploy").mkdir()
     (tmp_path / "deploy" / "shadow.sh").write_bytes(b"#!/bin/sh\r\necho hi\r\n")  # CRLF, как после правки на Windows
     (tmp_path / "deploy" / "apply.sh").write_bytes(b"#!/bin/sh\r\necho apply\r\n")
+    (tmp_path / "deploy" / "init-ssl.sh").write_bytes(b"#!/bin/sh\r\necho ssl\r\n")
+    (tmp_path / "deploy" / "caddy-tradeai.caddy").write_text("x\n", encoding="utf-8")
+    (tmp_path / "web").mkdir()
+    for name in ("nginx-ssl.conf", "nginx-locations.inc"):
+        (tmp_path / "web" / name).write_text("x\n", encoding="utf-8")
     for name, text in extra.items():
         p = tmp_path / name
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -326,7 +331,7 @@ def test_web_client_is_deployed_isolated_from_the_bot_and_checked_by_the_pipelin
     fn = apply[apply.index("deploy_web() {"):apply.index("unpack() {")]
     assert "return 0" in fn and "exit" not in fn and "die " not in fn and "APPLY_WEB" in fn
     assert apply.index('ГОТОВО: версия') < apply.index("        deploy_web") < apply.index("ПРОВАЛ применения")
-    nginx = (ROOT / "web" / "nginx.conf").read_text(encoding="utf-8")
+    nginx = (ROOT / "web" / "nginx.conf").read_text(encoding="utf-8") + (ROOT / "web" / "nginx-locations.inc").read_text(encoding="utf-8")  # маршруты - в общем include (HTTP и HTTPS)
     assert "$connection_upgrade" in nginx and "proxy_set_header Upgrade" in nginx and "web:8550" in nginx  # WebSocket проксируется
     assert "location /chart/" in nginx and "web:8551" in nginx  # графики сделок: aiohttp-сервер внутри контейнера web
     ad = (ROOT / "scripts" / "auto_deploy.py").read_text(encoding="utf-8")
