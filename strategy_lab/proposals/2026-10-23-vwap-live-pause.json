@@ -1,0 +1,33 @@
+{
+  "created_at": "2026-10-23T21:00:00Z",
+  "source": "scripts.analyze_tp, сделки с 2026-10-20, Shadow, без CHR (30 закрытых)",
+  "id": "2026-10-23-vwap-live-pause",
+  "strategy": "VWAP_Reversion",
+  "kind": "manual",
+  "title": "Убрать VWAP_Reversion из боевой торговли, пока новая версия не докажет себя в Shadow",
+  "change": {
+    "server_env": {
+      "APPROVED_STRATEGIES": "SMC_Pro_Trend"
+    }
+  },
+  "rationale": [
+    "Старая версия на 1:4 потеряла в среднем 1.135R на сделку (8 из 8 в минус).",
+    "Новая версия (фильтры 20.10 + Tolerance Zone 23.10) не дала ещё ни одной сделки: её результат неизвестен, а торгует она на реальные деньги.",
+    "В Shadow стратегия продолжит писать виртуальные сделки - статистика копится без риска."
+  ],
+  "evidence": {
+    "n": 8,
+    "fact_mean_r": -1.135,
+    "new_version_trades": 0
+  },
+  "examples": [
+    {
+      "trade": "VWAP_Reversion:1000PEPEUSDT 10-20 13:00 short",
+      "r": -1.05,
+      "mfe": 0.34
+    }
+  ],
+  "risks": "Если новая версия хороша, упустим её боевую прибыль, пока копится Shadow.",
+  "how_to_apply": "На сервере в ~/trading/.env.shadow: APPROVED_STRATEGIES=SMC_Pro_Trend, затем ./deploy/shadow.sh up-live --yes",
+  "status": "manual"
+}

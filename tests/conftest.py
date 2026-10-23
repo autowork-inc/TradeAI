@@ -1,4 +1,5 @@
 import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -8,6 +9,10 @@ from aiohttp import web
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
+
+# Одобренные пользователем переопределения стратегий (orchestrator/strategy_overrides.json) не должны менять поведение тестов:
+# по умолчанию тесты видят «файла нет»; тесты самих переопределений задают путь явно.
+os.environ["STRATEGY_OVERRIDES_PATH"] = str(Path(__file__).resolve().parent / "__no_strategy_overrides__.json")
 
 
 @contextlib.asynccontextmanager

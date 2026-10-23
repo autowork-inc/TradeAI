@@ -1,0 +1,62 @@
+{
+  "created_at": "2026-10-23T21:00:00Z",
+  "source": "scripts.analyze_tp, сделки с 2026-10-20, Shadow, без CHR (30 закрытых)",
+  "id": "2026-10-23-ict-htf-trend-off",
+  "strategy": "ICT_Killzones",
+  "kind": "params",
+  "title": "Снять жёсткий фильтр тренда H4 (require_htf_trend=false)",
+  "change": {
+    "params": {
+      "require_htf_trend": false
+    }
+  },
+  "rationale": [
+    "Оба прибыльных входа ICT (+3.86R и +3.88R) были ПРОТИВ тренда H4 (лонг при Bearish) - текущий фильтр их бы запретил.",
+    "Оба входа ПО тренду (AGT лонг при Bullish, BNB шорт при Bearish) закрылись в минус.",
+    "После включения фильтров 20.10 стратегия за 3 дня не дала ни одной сделки: фильтр, похоже, душит её целиком.",
+    "Остальные фильтры 20.10 (ширина Азии, глубина прокола, тень) остаются - снимается только тренд."
+  ],
+  "evidence": {
+    "n": 6,
+    "fact_mean_r": 0.465,
+    "against_h4": {
+      "n": 4,
+      "sum_r": 5.19
+    },
+    "with_h4": {
+      "n": 2,
+      "sum_r": -2.41
+    },
+    "note": "все 6 сделок сделаны версией ДО фильтров 20.10 (в meta нет asia_range_atr/sweep_depth_atr/wick_frac)"
+  },
+  "examples": [
+    {
+      "trade": "ICT_Killzones:ADAUSDT 10-20 10:00 long",
+      "h4": "Bearish",
+      "r": 3.86,
+      "mfe": 4.02
+    },
+    {
+      "trade": "ICT_Killzones:ENAUSDT 10-20 10:00 long",
+      "h4": "Bearish",
+      "r": 3.88,
+      "mfe": 4.01
+    },
+    {
+      "trade": "ICT_Killzones:HYPEUSDT 10-20 08:45 long",
+      "h4": "Bearish",
+      "r": -1.24,
+      "mfe": 0.0,
+      "note": "выбило за 12 мин, после стопа цена прошла +9.75R"
+    },
+    {
+      "trade": "ICT_Killzones:BNBUSDT 10-20 13:00 short",
+      "h4": "Bearish",
+      "r": -1.39,
+      "mfe": 1.21
+    }
+  ],
+  "risks": "n=6 - это гипотеза, не доказательство. ICT сейчас только в Shadow (нет в APPROVED_STRATEGIES): реальных денег изменение не касается.",
+  "how_to_apply": "python -X utf8 -m scripts.strategy_proposals apply 2026-10-23-ict-htf-trend-off, затем выкатка",
+  "status": "pending"
+}

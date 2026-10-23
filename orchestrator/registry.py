@@ -10,6 +10,7 @@ strategy_id - то, что пишется в колонку `strategy_id` все
 фиксаций, безубытка, остатка-runner и трейлинга нет. Риск сделки - фиксированные 5 USDT (orchestrator/risk.py, live_risk.py, mt5_risk.py).
 """
 
+import logging
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 
@@ -33,11 +34,14 @@ from orchestrator.multi_strategies import (
     StrategyTrendlineBreakoutChr,
     StrategyVwapReversion,
 )
+from orchestrator import overrides
 from orchestrator.strategies import SMC_PRO_TREND, Strategy, StrategySMC
 from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan
 from strategies.smc_setups import SmcSetupParams
 from strategies.vwap_reversion import VwapParams, min_history_bars
 from utils.errors import ConfigError
+
+log = logging.getLogger("orchestrator.registry")
 
 SHADOW_STRATEGIES = (SMC_PRO_TREND, SMC_COUNTER_TREND, OBI_BREAKOUT, ICT_KILLZONES, VWAP_REVERSION, HORIZONTAL_BREAKOUT, TRENDLINE_BREAKOUT,
                      HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR)
@@ -68,8 +72,18 @@ STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_PRO_TREND: SMC_PRO_PLAN, SMC_COUN
 
 
 def plans_for(names: Sequence[str]) -> Mapping[str, ScaleOutPlan]:
-    """План на каждую стратегию набора (общий DEFAULT_PLAN - там, где особого нет)."""
-    return {n: STRATEGY_PLANS.get(n, DEFAULT_PLAN) for n in names}
+    """План на каждую стратегию набора (общий DEFAULT_PLAN - там, где особого нет). Одобренный тейк `tp_r` из strategy_overrides.json
+    (orchestrator/overrides.py) заменяет единственный уровень: один тейк на весь объём, как DEFAULT_PLAN. Одна функция для Shadow и live (R8)."""
+    table = overrides.load()
+    out: dict[str, ScaleOutPlan] = {}
+    for n in names:
+        plan = STRATEGY_PLANS.get(n, DEFAULT_PLAN)
+        tp_r = (table.get(n) or {}).get("tp_r")
+        if tp_r is not None:
+            plan = ScaleOutPlan(((tp_r, 1.0),), plan.tp_anchor)
+            log.warning("Стратегия %s: одобренный тейк 1:%g (предложение %s)", n, tp_r, table[n].get("proposal_id"))
+        out[n] = plan
+    return out
 
 
 def smc_pro_trend_mtf() -> StrategySMC:
@@ -127,6 +141,7 @@ def build_strategies(names: Sequence[str] = SHADOW_STRATEGIES, *, mtf: bool = Fa
     if unknown:
         raise ConfigError(f"Неизвестные стратегии {unknown}; известны: {list(factories)}")
     built = [factories[n]() for n in names]
+    overrides.apply_to_strategies(built, overrides.load())  # одобренные пользователем параметры (scripts/strategy_proposals.py)
     if interval is not None:
         for s in built:
             if getattr(s, "interval", None) is None:  # у 5m-стратегий (mtf) таймфрейм уже задан
