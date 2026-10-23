@@ -124,3 +124,10 @@ def test_web_credentials_are_validated_together_and_never_echoed(capsys):
     assert "Cheshir" not in capsys.readouterr().err
     assert "WEB_PASSWORD" in ad.CTRADER_KEYS and "WEB_LOGIN" in ad.merge_env_command("~/trading")  # вписываются в .env.shadow тем же безопасным способом
     assert "web" in ad.REQUIRED_SERVICES and "nginx" in ad.LIVE_REQUIRED_SERVICES
+
+
+def test_apply_is_forced_by_default_and_respects_positions_only_on_request():
+    assert ad.get_params(["--host", "h", "--key", "k"]).respect_positions is False
+    assert ad.get_params(["--host", "h", "--key", "k", "--respect-positions"]).respect_positions is True
+    src = (ad.ROOT / "scripts" / "auto_deploy.py").read_text(encoding="utf-8")
+    assert '" --force"' in src and "a.respect_positions" in src

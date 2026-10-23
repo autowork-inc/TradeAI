@@ -180,6 +180,7 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--remote-dir", default="trading", help="каталог на сервере относительно домашнего (по умолчанию trading)")
     ap.add_argument("--health-wait", type=int, default=15, help="секунд ожидания перед глубокой проверкой (по умолчанию 15)")
     ap.add_argument("--keep-archive", action="store_true", help="не удалять локальный архив после деплоя")
+    ap.add_argument("--respect-positions", action="store_true", help="не форсировать: при открытых боевых позициях обновление ждёт их закрытия (cron, до 12 ч); по умолчанию применяется сразу (--force)")
     ap.add_argument("--skip-client-build", action="store_true", help="не собирать и не публиковать клиент (только бэкенд)")
     a = ap.parse_args(argv)
     if not a.host:
@@ -308,7 +309,8 @@ def main(argv: list[str] | None = None) -> int:
             step(6, "Остановка старых контейнеров не нужна: deploy/apply.sh сам перезапускает действующий контур")
             ok("пропущено")
             step(7, "Применение обновления (deploy/apply.sh --from)")
-            code, _ = run(cli, f"cd {d} && ./deploy/apply.sh --install-cron && ./deploy/apply.sh --from ~/{INCOMING}/{ARCHIVE}", "применение обновления", check=False)
+            force = "" if a.respect_positions else " --force"  # с 2026-10-23 по умолчанию БЕЗ отсрочки: открытые боевые позиции живут на стопах/тейках биржи, бот подхватывает их при старте
+            code, _ = run(cli, f"cd {d} && ./deploy/apply.sh --install-cron && ./deploy/apply.sh --from ~/{INCOMING}/{ARCHIVE}{force}", "применение обновления", check=False)
             if code == EX_DEFERRED:
                 deferred = True
                 print(_c("33", "  Обновление ОТЛОЖЕНО: в боевом контуре есть открытые позиции. Архив ждёт на сервере, cron применит его, когда позиции закроются "
