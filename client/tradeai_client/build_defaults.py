@@ -6,5 +6,5 @@ TRADEAI_BUILD_API_KEY) подставляет его только на врем�
 а введённые значения сохранятся в settings.json рядом с .exe.
 """
 
-SERVER_URL = "http://193.233.75.254:8001"  # API на VPS: порт 8001 (на сервере 8000 занят другой программой)
+SERVER_URL = "https://193.233.75.254.nip.io"  # API на VPS за HTTPS (Caddy + Let's Encrypt, с 2026-10-23); прежний http://193.233.75.254:8001 клиент заменяет сам (settings.upgrade_to_https)
 API_KEY = ""

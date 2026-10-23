@@ -92,7 +92,7 @@ def test_defaults_come_from_build_config_when_no_file(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(tmp_path / "app.exe"))
     s = load_settings(env={"APPDATA": str(tmp_path / "nowhere")})
-    assert s.base_url == build_defaults.SERVER_URL == "http://193.233.75.254:8001" and s.api_key == build_defaults.API_KEY
+    assert s.base_url == build_defaults.SERVER_URL == "https://193.233.75.254.nip.io" and s.api_key == build_defaults.API_KEY
 
 
 def test_first_run_saves_next_to_exe_and_second_run_loads_it(monkeypatch, tmp_path):

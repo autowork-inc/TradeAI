@@ -54,6 +54,7 @@ LIVE_REQUIRED_SERVICES = ("postgres", "shadow-live", "api", "analyzer", "web", "
 INCOMING = "trading_incoming"  # каталог на сервере для присланных архивов (его же читает cron: deploy/apply.sh --pending)
 EX_DEFERRED = 75  # deploy/apply.sh: обновление отложено до закрытия боевых позиций
 ENV_FILE = ".env.shadow"
+HTTPS_HEALTH_URL = "https://193.233.75.254.nip.io/api/health"
 CTRADER_TMP = ".ctrader.tmp"
 CTRADER_KEYS = ("CTRADER_CLIENT_ID", "CTRADER_CLIENT_SECRET", "CTRADER_ACCOUNT_ID", "CTRADER_ACCESS_TOKEN", "CTRADER_REFRESH_TOKEN", "WEB_LOGIN", "WEB_PASSWORD")  # значения, которые auto_deploy вписывает в .env.shadow
 
@@ -379,6 +380,12 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join("    " + x for x in errors[:10]), file=sys.stderr)
             fail("в логах сервисов за последние " + LOG_WINDOW + " есть ошибки (Traceback/CRITICAL/FATAL/ConfigError)")
         ok(f"{', '.join(required)} running, блокировки IP и ошибок в логах нет")
+        # HTTPS (init-ssl.sh) деплой не трогает: Caddy/сертификаты и WEB_BIND в .env.shadow лежат вне архива. Мягкая проверка с сервера: пропал - предупреждение, не провал деплоя
+        code, out = run(cli, f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 10 {HTTPS_HEALTH_URL}", "проверка HTTPS", check=False, quiet=True)
+        if out.strip() == "200":
+            ok(f"HTTPS работает: {HTTPS_HEALTH_URL}")
+        else:
+            print(_c("33", f"  ВНИМАНИЕ: {HTTPS_HEALTH_URL} не ответил 200 (ответ: {out.strip() or code}). Если HTTPS уже включали - проверьте Caddy (systemctl status caddy); если нет - ./deploy/init-ssl.sh, см. CLAUDE.md разд. 3.25"))
     except (TimeoutError, socket.timeout):
         fail("таймаут во время выполнения команды на сервере")
     except paramiko.SSHException as e:
