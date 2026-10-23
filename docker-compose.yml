@@ -115,10 +115,14 @@ services:
       TRADING_LOG_DIR: /app/logs/shadow
       # Этап 5: сделки пишутся в PostgreSQL (внутренняя сеть compose, имя хоста = имя сервиса). Пароль - только из .env.shadow.
       DATABASE_URL: postgresql://tradeai:${POSTGRES_PASSWORD:-}@postgres:5432/tradeai
-      # Данные Forex/металлов (EURUSD, XAUUSD, XAGUSD) идут из MetaApi, а не с Binance. Ключи задаются ТОЛЬКО в .env.shadow на сервере (в образ/архив/git не попадают);
+      # Данные Forex/металлов (EURUSD, XAUUSD, XAGUSD) идут из cTrader, а не с Binance. Ключи задаются ТОЛЬКО в .env.shadow на сервере (в образ/архив/git не попадают);
       # пусто - MT5-символы пропускаются, процесс работает по крипте. Для Shadow достаточно токена только на чтение рыночных данных (торговые права не нужны).
-      METAAPI_TOKEN: ${METAAPI_TOKEN:-}
-      METAAPI_ACCOUNT_ID: ${METAAPI_ACCOUNT_ID:-}
+      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+      CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-}
+      CTRADER_ACCESS_TOKEN: ${CTRADER_ACCESS_TOKEN:-}
+      CTRADER_REFRESH_TOKEN: ${CTRADER_REFRESH_TOKEN:-}
+      CTRADER_ENV: ${CTRADER_ENV:-auto}
       MT5_SYMBOL_MAP: ${MT5_SYMBOL_MAP:-}
     volumes:
       - ./data/shadow:/app/data/shadow
@@ -171,8 +175,12 @@ services:
       LIVE_LEVERAGE: ${LIVE_LEVERAGE:-10}
       LIVE_DAILY_LOSS_LIMIT_USDT: ${LIVE_DAILY_LOSS_LIMIT_USDT:-50}
       LIVE_MAX_OPEN_POSITIONS: ${LIVE_MAX_OPEN_POSITIONS:-4}
-      METAAPI_TOKEN: ${METAAPI_TOKEN:-}
-      METAAPI_ACCOUNT_ID: ${METAAPI_ACCOUNT_ID:-}
+      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+      CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-}
+      CTRADER_ACCESS_TOKEN: ${CTRADER_ACCESS_TOKEN:-}
+      CTRADER_REFRESH_TOKEN: ${CTRADER_REFRESH_TOKEN:-}
+      CTRADER_ENV: ${CTRADER_ENV:-auto}
       MT5_SYMBOL_MAP: ${MT5_SYMBOL_MAP:-}
     volumes:
       - ./data/live:/app/data/live

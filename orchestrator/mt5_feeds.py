@@ -1,9 +1,9 @@
-"""Данные Forex/металлов для Shadow Mode (EURUSD, XAUUSD, XAGUSD): свечи M5 + производные 15m / 1h / 4h / 1d и тики из котировок MetaApi.
+"""Данные Forex/металлов для Shadow Mode (EURUSD, XAUUSD, XAGUSD): свечи M5 + производные 15m / 1h / 4h / 1d и тики из котировок cTrader.
 
 Binance WebSocket этих символов не отдаёт (`kline_*` и `aggTrade` - только крипта), поэтому для MT5-символов пул Shadow питают отдельные фиды с тем же
 контрактом, что у `SmcKlineFeed` / `TickFeed` (R5: только закрытые свечи; Оркестратору - по одному `FeatureContext` на свечу, без пропусков):
 
-  * ЕДИНСТВЕННЫЙ источник - M5 из REST рыночных данных MetaApi (`get_candles(..., "5m", ...)`): история при старте и новые закрытые свечи раз в `poll_s`.
+  * ЕДИНСТВЕННЫЙ источник - M5 из REST рыночных данных cTrader (`get_candles(..., "5m", ...)`): история при старте и новые закрытые свечи раз в `poll_s`.
     Других таймфреймов у брокера НЕ запрашивается (2026-10-14: «никаких новых REST-запросов»): число запросов растёт только за счёт глубины истории M5 при
     старте (страницы по 1000 свечей, тот же цикл, что был у M15). Свеча закрыта, когда `open_time + interval + settle <= сейчас` (формирующуюся не берём).
   * Все старшие таймфреймы ПРОИЗВОДНЫЕ (`derive_tf`): 15m (рабочий для четырёх стратегий), 1h (структура и свип SMC_Pro_Trend), 4h (HTF Bias для 15m-стратегий),
@@ -24,9 +24,9 @@ Binance WebSocket этих символов не отдаёт (`kline_*` и `agg
     этим символам сигналов не даёт: нет стакана/ленты - значения `ms_*` = null, fail-closed).
 
 Сбои связи. С `link` (Mt5Link, orchestrator/mt5_link.py; так работает shadow_run с 2026-10-18) все запросы идут через менеджер подключения: сбой
-MetaApi -> пауза 5 минут -> переподключение, бесконечно; процесс (и крипта в нём) не падает, MT5-символы на время простоя молчат. После простоя
+cTrader -> пауза 5 минут -> переподключение, бесконечно; процесс (и крипта в нём) не падает, MT5-символы на время простоя молчат. После простоя
 `refresh` догружает ВСЕ пропущенные M5 (а не последние 8): иначе реальные свечи времени простоя были бы приняты за закрытый рынок (плоские).
-Без `link` (прежний режим, тесты): временные сбои MetaApi повторяются до `max_failures` подряд, дальше - исключение.
+Без `link` (прежний режим, тесты): временные сбои cTrader повторяются до `max_failures` подряд, дальше - исключение.
 Fail-Fast (R1) в обоих режимах: ошибка данных (кривая свеча, свеча из будущего) и конфигурации - сразу исключение.
 """
 
@@ -39,7 +39,7 @@ from typing import Any, Protocol
 
 import polars as pl
 
-from exchange.mt5_metaapi import MetaApiError
+from exchange.ctrader import CTraderError
 from features import defaults as D
 from orchestrator.feature_engine import FeatureEngine
 from orchestrator.kline_feed import MultiFeed  # noqa: F401  (прежнее место класса; чисто крипто-запуск этот модуль не импортирует)
@@ -57,7 +57,7 @@ H4_MS = 4 * 3_600_000
 D1_MS = 86_400_000
 STALE_AFTER_MS = 3_600_000  # на сколько «опоздавшим» объявляется контекст, по которому торговать нельзя
 CANDLES_PAGE = 1000
-BASE_TIMEFRAME = "5m"  # единственный таймфрейм, который запрашивается у MetaApi
+BASE_TIMEFRAME = "5m"  # единственный таймфрейм, который запрашивается у cTrader
 
 Row = tuple  # строка KLINE_SCHEMA
 
@@ -237,11 +237,11 @@ class _Group:
                 await op()
                 self.failures = 0
                 return
-            except MetaApiError as exc:
+            except CTraderError as exc:
                 self.failures += 1
                 if self.failures >= self.max_failures:
                     raise
-                log.warning("MetaApi: сбой данных (%d/%d): %s", self.failures, self.max_failures, exc)
+                log.warning("cTrader: сбой данных (%d/%d): %s", self.failures, self.max_failures, exc)
                 await asyncio.sleep(self.poll_s)
 
 
@@ -506,31 +506,30 @@ class Mt5TickFeed:
             try:
                 await self.poll_once()
                 failures = 0
-            except MetaApiError as exc:
+            except CTraderError as exc:
                 failures += 1
                 if failures >= self._max:
                     raise
-                log.warning("MetaApi: сбой котировок (%d/%d): %s", failures, self._max, exc)
+                log.warning("cTrader: сбой котировок (%d/%d): %s", failures, self._max, exc)
                 self._on_gap(self._clock())  # тики за сбой потеряны: активные сделки помечаются gap_affected
             await asyncio.sleep(self._poll_s)
 
 
 async def connect_mt5_data(symbols: tuple[str, ...]):
-    """Менеджер подключения MetaApi для ДАННЫХ MT5-символов (`Mt5Link`) или None, если ключей MetaApi в окружении нет (тогда MT5-символы пропускаются).
+    """Менеджер подключения cTrader для ДАННЫХ MT5-символов (`Mt5Link`) или None, если ключей cTrader в окружении нет (тогда MT5-символы пропускаются).
 
-    Подключения здесь НЕТ (2026-10-18): его делает `Mt5Link` в фоновых задачах фидов MT5, поэтому недоступный MetaApi не задерживает и не роняет
-    старт процесса с криптой; сбой связи - пауза 5 минут и переподключение. Ошибки конфигурации (нет ключей - выше, 401/403, символ не найден у брокера) -
-    по-прежнему исключение (R1). Список символов брокера кешируется на 24 часа в DATA_DIR."""
-    import config
-    from exchange.mt5_metaapi import MetaApiCredentials, MetaApiLiveClient
+    Подключения здесь НЕТ (2026-10-18): его делает `Mt5Link` в фоновых задачах фидов MT5, поэтому недоступный cTrader не задерживает и не роняет
+    старт процесса с криптой; сбой связи - пауза 5 минут и переподключение. Ошибки конфигурации (нет ключей - выше, отказ в доступе, символ не найден у брокера) -
+    по-прежнему исключение (R1)."""
+    from exchange.ctrader import CTraderCredentials, CTraderConnector
     from exchange.symbol_mapper import SymbolMapper
     from orchestrator.mt5_link import Mt5Link
 
     try:
-        MetaApiCredentials.from_env()
+        CTraderCredentials.from_env()
     except ConfigError as exc:
-        log.warning("MT5-символы %s пропущены: нет ключей MetaApi (%s). Задайте METAAPI_TOKEN и METAAPI_ACCOUNT_ID в .env.shadow на сервере", symbols, exc)
+        log.warning("MT5-символы %s пропущены: нет ключей cTrader (%s). Задайте CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_ACCOUNT_ID и CTRADER_ACCESS_TOKEN в .env.shadow на сервере (токен: scripts/get_ctrader_token.py)", symbols, exc)
         return None
-    client = MetaApiLiveClient(symbols_cache=config.DATA_DIR / config.METAAPI_SYMBOLS_CACHE_NAME)
+    client = CTraderConnector()
     mapper = SymbolMapper(client, allow_disabled=True)  # закрытый рынок при старте не должен ронять сбор данных
     return Mt5Link(client, mapper, symbols)

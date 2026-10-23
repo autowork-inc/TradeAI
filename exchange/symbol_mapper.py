@@ -1,4 +1,4 @@
-"""Маппинг внутренних символов системы на символы брокера MT5 и кеш спецификаций (для `MetaApiLiveClient`).
+"""Маппинг внутренних символов системы на символы брокера MT5 и кеш спецификаций (для `CTraderConnector`).
 
 Зачем. Внутри системы актив называется одинаково (`EURUSD`, `XAUUSD`, `US500`), а у брокера точное имя своё: `EURUSDm`, `EURUSD.ecn`,
 `XAUUSD#`, `GOLD`, `UKOIL`. Ордер на неточное имя брокер отклонит, а ордер на «похожий» символ (другой контракт) опасен: поэтому
@@ -21,9 +21,9 @@ Barnwell Industries, `GOLD` - акция Barrick Gold, `WTI` - акция W&T Of
 кандидат; никого не осталось - `ConfigError` со списком отвергнутых. Явное переопределение (`MT5_SYMBOL_MAP`) проверку не проходит:
 это осознанное решение человека.
 
-Спецификации. После разрешения имени запрашивается `get_symbol_specification` (MetaApi SDK) и кешируется в `Mt5SymbolSpec`:
+Спецификации. После разрешения имени запрашивается `get_symbol_specification` (cTrader SDK) и кешируется в `Mt5SymbolSpec`:
 `contractSize`, `minVolume`, `maxVolume`, `volumeStep`, `tickSize`, `digits`, `point`, `stopsLevel`, `freezeLevel`, `fillingModes`,
-`tradeMode`, валюты. ВАЖНО: в спецификации MetaApi нет полей `tradeTickSize` / `tradeTickValue` (это поля MT5 API терминала); размер
+`tradeMode`, валюты. ВАЖНО: в спецификации cTrader нет полей `tradeTickSize` / `tradeTickValue` (это поля MT5 API терминала); размер
 тика - `tickSize`, а стоимость тика в валюте счёта приходит вместе с котировкой (`lossTickValue` / `profitTickValue` у `get_price`),
 её использует `exchange.mt5_risk`. Символ с `tradeMode = SYMBOL_TRADE_MODE_DISABLED` отклоняется при загрузке (`ConfigError`), кроме режима `allow_disabled=True` боевого контура: там такой символ
 загружается, а новые входы получают отказ `market_closed` (режим торговли проверяется на каждом сигнале).
@@ -78,7 +78,7 @@ def asset_class_mismatch(internal: str, raw: Mapping[str, Any], hints: Mapping[s
 
 
 class SpecClient(Protocol):
-    """Что маппер требует от клиента (его реализует `MetaApiLiveClient`)."""
+    """Что маппер требует от клиента (его реализует `CTraderConnector`)."""
 
     async def get_symbols(self) -> list[str]: ...
 
@@ -123,7 +123,7 @@ def _num(raw: Mapping[str, Any], key: str, symbol: str, *, positive: bool = True
 
 
 def parse_spec(internal: str, broker: str, raw: Mapping[str, Any], *, allow_disabled: bool = False) -> Mt5SymbolSpec:
-    """Строгий разбор сырой спецификации MetaApi; любое нарушение - `ConfigError` (торговать по догадке нельзя)."""
+    """Строгий разбор сырой спецификации cTrader; любое нарушение - `ConfigError` (торговать по догадке нельзя)."""
     trade_mode = str(raw.get("tradeMode") or "")
     if trade_mode == "SYMBOL_TRADE_MODE_DISABLED" and not allow_disabled:
         raise ConfigError(f"{broker}: торговля символом запрещена брокером (tradeMode {trade_mode})")

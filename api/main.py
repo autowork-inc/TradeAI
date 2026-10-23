@@ -208,7 +208,7 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
     @app.get("/api/candles", dependencies=[Depends(auth)])
     async def candles_endpoint(coin: Token, interval: Literal["5m", "15m", "1h", "4h"] = "15m", limit: Annotated[int, Query(ge=1, le=candles.MAX_LIMIT)] = 1000,
                                end: Annotated[int | None, Query(ge=0)] = None) -> dict[str, Any]:
-        """Свечи Forex/металлов (кэш бота из MetaApi) для графика клиента; крипту клиент берёт у Binance сам. end - open_time последней нужной свечи, мс (прокрутка истории)."""
+        """Свечи Forex/металлов (кэш бота из cTrader) для графика клиента; крипту клиент берёт у Binance сам. end - open_time последней нужной свечи, мс (прокрутка истории)."""
         dirs = [settings.shadow_data_dir] + ([settings.live_data_dir] if settings.live_data_dir else [])
         try:
             return await asyncio.to_thread(candles.build, dirs, coin, interval, limit, end)

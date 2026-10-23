@@ -1,17 +1,15 @@
-"""Изоляция MetaApi от крипты (2026-10-18): менеджер подключения `Mt5Link` (пауза ровно 5 минут и переподключение), фиды MT5 через него,
-догрузка свечей после простоя, кеш списка символов брокера на 24 часа, автозапуск API мониторинга."""
+"""Изоляция cTrader от крипты (2026-10-18): менеджер подключения `Mt5Link` (пауза ровно 5 минут и переподключение), фиды MT5 через него,
+догрузка свечей после простоя, автозапуск API мониторинга."""
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
 
 import config
-from exchange.mt5_metaapi import MetaApiError, MetaApiLiveClient, MetaApiTradeError
+from exchange.ctrader import CTraderError, CTraderTradeError
 from orchestrator.mt5_feeds import M5_MS, Mt5TickFeed
 from orchestrator.mt5_link import Mt5Link
-from tests.exchange.test_mt5_metaapi import OK, FakeRpc
 from tests.orchestrator.test_mt5_feeds import AFTER, SYM, Clock, FakeSource, make_bars, make_feed
 from utils.errors import ConfigError, DataError
 
@@ -27,7 +25,7 @@ class FakeClient:
         self.connects += 1
         if self.fail_connect > 0:
             self.fail_connect -= 1
-            raise MetaApiError("нет сети")
+            raise CTraderError("нет сети")
 
     async def close(self):
         self.closes += 1
@@ -57,7 +55,7 @@ def link(client=None, sleeps=None, **kw):
 
 
 def test_default_pause_is_exactly_five_minutes():
-    assert config.METAAPI_RECONNECT_PAUSE_S == 300.0 and link().pause_s == 300.0
+    assert config.CTRADER_RECONNECT_PAUSE_S == 300.0 and link().pause_s == 300.0
 
 
 def test_first_call_connects_and_resolves_symbols_without_pause():
@@ -75,7 +73,7 @@ def test_network_failure_marks_down_pauses_five_minutes_reconnects_and_retries()
     sleeps, downs = Sleeps(), []
     lk = link(sleeps=sleeps)
     lk.on_down(downs.append)
-    results = [MetaApiError("таймаут"), "ok"]
+    results = [CTraderError("таймаут"), "ok"]
 
     async def op():
         r = results.pop(0)
@@ -95,11 +93,11 @@ def test_failed_reconnects_wait_five_minutes_each_and_never_raise():
     async def op():
         return 1
 
-    assert asyncio.run(lk.call("x", op)) == 1  # старт при недоступном MetaApi: попытки до успеха, процесс не падает
+    assert asyncio.run(lk.call("x", op)) == 1  # старт при недоступном cTrader: попытки до успеха, процесс не падает
     assert sleeps.calls == [300.0] * 4 and lk.attempts == 5
 
 
-@pytest.mark.parametrize("exc", [ConfigError("401"), DataError("кривая свеча"), MetaApiTradeError("отказ")])
+@pytest.mark.parametrize("exc", [ConfigError("401"), DataError("кривая свеча"), CTraderTradeError("отказ")])
 def test_non_network_errors_stay_fail_fast(exc):
     lk = link()
 
@@ -120,7 +118,7 @@ def test_tick_feed_over_link_survives_outage_and_marks_gap_once():
         async def get_price(self, symbol):
             Flaky.n += 1
             if Flaky.n in (2, 3):
-                raise MetaApiError("обрыв")
+                raise CTraderError("обрыв")
             return await super().get_price(symbol)
 
     async def scenario():
@@ -128,7 +126,7 @@ def test_tick_feed_over_link_survives_outage_and_marks_gap_once():
                         max_failures=1, link=lk)
         f.start()
         await asyncio.sleep(0.1)
-        f.check()  # задача жива: сбой MetaApi процесс не роняет
+        f.check()  # задача жива: сбой cTrader процесс не роняет
         await f.aclose()
 
     asyncio.run(scenario())
@@ -144,7 +142,7 @@ def test_kline_group_over_link_waits_instead_of_crashing():
         async def get_candles(self, *a, **kw):
             if Down.fails:
                 Down.fails -= 1
-                raise MetaApiError("таймаут")
+                raise CTraderError("таймаут")
             return await super().get_candles(*a, **kw)
 
     lk = link()
@@ -168,36 +166,6 @@ def test_refresh_after_outage_backfills_every_missed_candle_instead_of_flat_ones
     real = {b[0] for b in bars[:gap_to - 1] if b[0] > last}
     assert real <= set(g.store[SYM])
     assert not any(g.stale_until[SYM].get(t) for t in real)  # реальные свечи простоя не объявлены «закрытым рынком»
-
-
-# ---------------------------------------------------------------------------------------- кеш символов
-
-
-def cached_client(tmp_path, now=1000.0):
-    c = MetaApiLiveClient(OK, symbols_cache=tmp_path / "sym.json", wall_clock=lambda: now)
-    c._connection = FakeRpc()
-    return c
-
-
-def test_get_symbols_is_cached_on_disk_for_24_hours(tmp_path):
-    c = cached_client(tmp_path)
-    assert asyncio.run(c.get_symbols()) == ["EURUSD", "BTCUSDm"]
-    data = json.loads((tmp_path / "sym.json").read_text(encoding="utf-8"))
-    assert data == {"account_id": "acc-123", "saved_at": 1000.0, "symbols": ["EURUSD", "BTCUSDm"]}
-    c2 = MetaApiLiveClient(OK, symbols_cache=tmp_path / "sym.json", wall_clock=lambda: 1000.0 + 86_399)
-    assert asyncio.run(c2.get_symbols()) == ["EURUSD", "BTCUSDm"]  # без соединения: ответ из кеша (иначе MetaApiError «не подключён»)
-
-
-@pytest.mark.parametrize("content", [
-    {"account_id": "acc-123", "saved_at": 0.0, "symbols": ["OLD"]},  # старше 24 ч
-    {"account_id": "other", "saved_at": 1000.0, "symbols": ["OLD"]},  # чужой аккаунт
-    "{битый json",
-])
-def test_stale_foreign_or_broken_cache_is_a_miss(tmp_path, content):
-    (tmp_path / "sym.json").write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
-    c = cached_client(tmp_path, now=1000.0 + 86_400 if isinstance(content, dict) and content["account_id"] == "acc-123" else 1000.0)
-    assert asyncio.run(c.get_symbols()) == ["EURUSD", "BTCUSDm"]
-    assert json.loads((tmp_path / "sym.json").read_text(encoding="utf-8"))["symbols"] == ["EURUSD", "BTCUSDm"]
 
 
 # --------------------------------------------------------------------------------------------- деплой

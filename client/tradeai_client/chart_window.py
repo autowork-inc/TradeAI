@@ -143,8 +143,16 @@ def run_chart_window(spec: dict[str, Any]) -> None:
     import webview
 
     api, html = _window_args(spec)
-    webview.create_window(f"TradeAI · {spec['title']}", html=html, js_api=api, width=1500, height=900, background_color="#0e1117")
-    webview.start()
+    # 2026-10-23: окно сразу развёрнуто на весь экран, поверх остальных окон и в фокусе (раньше открывалось маленьким, и его приходилось искать и разворачивать).
+    window = webview.create_window(f"TradeAI · {spec['title']}", html=html, js_api=api, width=1500, height=900, background_color="#0e1117",
+                                   maximized=True, on_top=True, focus=True)
+    webview.start(_bring_to_front, window)
+
+
+def _bring_to_front(window: Any) -> None:
+    """Вызывается pywebview уже после показа окна: повторно поднимает его поверх главного дашборда (Windows может отказать в фокусе новому процессу, `on_top` это обходит)."""
+    window.on_top = True
+    window.show()
 
 
 _PROCESSES: list["multiprocessing.process.BaseProcess"] = []

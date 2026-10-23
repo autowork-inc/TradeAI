@@ -308,7 +308,7 @@ def test_orchestrator_runs_the_real_vwap_strategy_on_15m_only_while_pro_trend_wa
 
     strategies = build_strategies((SMC_PRO_TREND, VWAP_REVERSION), mtf=True, interval="15m")
     # фикстура закрывается в 2.4 ATR от хая свечи: порог близости к экстремуму (по умолчанию 1.0) для неё ослаблен, остальные фильтры - боевые
-    strategies = [StrategyVwapReversion(VwapParams(max_entry_to_ext_atr=2.5), interval="15m") if x.name == VWAP_REVERSION else x for x in strategies]
+    strategies = [StrategyVwapReversion(VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), max_entry_to_ext_atr=2.5), interval="15m") if x.name == VWAP_REVERSION else x for x in strategies]
     log = MemoryEventLog()
     tracker = VirtualTracker(log, equity=10_000.0)
     orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, tracker) for s in strategies}, log, max_signal_age_ms=10**12)

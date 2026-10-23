@@ -18,6 +18,9 @@ min_day_bars свечей суток (4 часа: 16 баров M15): на пе�
      ничего», а рядом с хвостом свечи, т.е. рядом с зоной риска; закрылась далеко от хвоста - сигнал бракуется;
   5. (2026-10-20) тренд H4 жёсткий (features.htf.side_allowed, require_htf_trend): шорт только при Bearish, лонг только при Bullish;
      Neutral, встречный тренд и нет bias - запрет.
+  6. (2026-10-23) «Tolerance Zone» против позднего входа: close[j] обязан лежать внутри пробитой полосы НЕ дальше от неё, чем min(max_band_dist_atr * ATR[j-1],
+     max_band_dist_vwap_frac * расстояние полоса-VWAP) (по умолчанию 0.2 ATR и 15% дистанции до VWAP - действует более жёсткое из двух). Свеча закрылась дальше -
+     импульс упущен (как MAGMA: вход на 4% выше -3σ), сигнал ИГНОРИРУЕТСЯ; вход MARKET допускается только у самой полосы.
 Вход MARKET, SL структурный: экстремум high (лонг - low) за последние swing_lookback свечей (включая j и окно касания) + 0.2*ATR, а не только
 хвост сигнальной свечи. Размер позиции - 5 USDT риска, выход - один тейк 1:4 без безубытка (orchestrator/risk.py, registry.VWAP_PLAN);
 значения vwap, sd и диагностика входа (близость к экстремуму, размер стопа, расстояния до полосы и VWAP, в ATR[j-1]) пишутся в meta сигнала.
@@ -61,6 +64,8 @@ class VwapParams:
     max_entry_to_ext_atr: float = 1.0  # вход (close) не дальше этой доли ATR[j-1] от хвоста свечи j (high для шорта, low для лонга)
     swing_lookback: int = 12  # структурный стоп: экстремум за последние N свечей (12 на M15 = 3 часа)
     require_htf_trend: bool = True  # жёсткий тренд H4 (колонка htf_bias); False - только для калибровки
+    max_band_dist_atr: float = 0.2  # Tolerance Zone (2026-10-23): close не дальше этой доли ATR[j-1] от пробитой полосы (внутрь)
+    max_band_dist_vwap_frac: float = 0.15  # ... и не дальше этой доли расстояния от полосы до VWAP; действует более жёсткое из двух
 
     @classmethod
     def for_interval(cls, interval_ms: int, **overrides: float) -> "VwapParams":
@@ -74,7 +79,7 @@ class VwapParams:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ConfigError(f"VwapParams.{name} должен быть целым >= 1, получено {value!r}")
-        for name in ("sd_mult", "star_wick_frac", "star_body_frac", "sl_buffer_atr", "max_entry_to_ext_atr"):
+        for name in ("sd_mult", "star_wick_frac", "star_body_frac", "sl_buffer_atr", "max_entry_to_ext_atr", "max_band_dist_atr", "max_band_dist_vwap_frac"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
                 raise ConfigError(f"VwapParams.{name} должен быть положительным числом, получено {value!r}")
@@ -148,8 +153,11 @@ def detect_vwap_reversion(df: pl.DataFrame, params: VwapParams | None = None) ->
     near_long = (ext_long <= p.max_entry_to_ext_atr).fill_null(False)
     trend_short = side_allowed("short") if p.require_htf_trend else pl.lit(True)
     trend_long = side_allowed("long") if p.require_htf_trend else pl.lit(True)
-    short = (usable & col("_touch_up") & (bear_engulf | star) & (col("close") < col("vw_upper")) & near_short & trend_short).fill_null(False)
-    long = (usable & col("_touch_dn") & (bull_engulf | hammer) & (col("close") > col("vw_lower")) & near_long & trend_long).fill_null(False)
+    # Tolerance Zone: close внутри полосы и не дальше допуска от неё (поздний вход после того, как цена ушла к середине канала, отбрасывается)
+    zone_short = (col("vw_upper") - col("close")) <= pl.min_horizontal(p.max_band_dist_atr * atr_prev, p.max_band_dist_vwap_frac * (col("vw_upper") - col("vw_vwap")))
+    zone_long = (col("close") - col("vw_lower")) <= pl.min_horizontal(p.max_band_dist_atr * atr_prev, p.max_band_dist_vwap_frac * (col("vw_vwap") - col("vw_lower")))
+    short = (usable & col("_touch_up") & (bear_engulf | star) & (col("close") < col("vw_upper")) & zone_short.fill_null(False) & near_short & trend_short).fill_null(False)
+    long = (usable & col("_touch_dn") & (bull_engulf | hammer) & (col("close") > col("vw_lower")) & zone_long.fill_null(False) & near_long & trend_long).fill_null(False)
     sl_short = col("_swing_hi") + p.sl_buffer_atr * col("atr")
     sl_long = col("_swing_lo") - p.sl_buffer_atr * col("atr")
     w = w.with_columns(

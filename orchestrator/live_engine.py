@@ -1250,7 +1250,7 @@ async def build_live_engine(
     client = BinanceLiveClient.from_env(session)
     await client.rest.sync_time()
     await client.load_filters(symbols)
-    router = await build_router(client, with_mt5=config.LIVE_ENABLE_MT5, plans=plans,  # MT5 - только по LIVE_ENABLE_MT5=true (ключи MetaApi обязательны)
+    router = await build_router(client, with_mt5=config.LIVE_ENABLE_MT5, plans=plans,  # MT5 - только по LIVE_ENABLE_MT5=true (ключи cTrader обязательны)
                                 state_path=config.DATA_DIR / config.LIVE_MT5_STATE_NAME)
     risk = LiveRiskManager(
         {s: client.filters(s) for s in symbols}, approved_strategies=config.APPROVED_STRATEGIES, margin_usdt=config.LIVE_MARGIN_USDT,

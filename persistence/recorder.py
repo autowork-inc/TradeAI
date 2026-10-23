@@ -30,6 +30,19 @@ class DbOpenTrade:
     closes: tuple[Row, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class DbShadowTrade:
+    """Незавершённая теневая сделка из БД (status 'pending_limit' | 'open') для продолжения после рестарта (`VirtualTracker.restore`).
+
+    `row` - строка trades (сырые типы, ключи TRADE_COLUMNS); `closes` - записанные закрытия {seq, ts, reason, frac, qty, price, gross_r, fees_r, net_r, ...};
+    `meta` - meta снапшота (entry, sl, tp, inval, interval + meta стратегии); `geometry` - геометрия снапшота. Нет снапшота -> meta пуст -> восстановить нельзя."""
+
+    row: Row
+    closes: tuple[Row, ...] = field(default_factory=tuple)
+    meta: Row = field(default_factory=dict)
+    geometry: tuple[Row, ...] = field(default_factory=tuple)
+
+
 class TradeRecorder(Protocol):
     def trade(self, row: Row) -> None: ...
     def close_leg(self, row: Row) -> None: ...

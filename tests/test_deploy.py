@@ -260,7 +260,7 @@ def test_apply_script_ships_in_the_archive_and_keeps_contour_without_interactive
     assert "--install-cron" in text and "APPLY_MAX_DEFER_H" in text
     workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
     assert "scripts.deploy_pack --target shadow" in workflow and "StrictHostKeyChecking=yes" in workflow and "needs: test" in workflow
-    assert "BINANCE_API" not in workflow and "METAAPI" not in workflow  # ключи биржи в CI не попадают
+    assert "BINANCE_API" not in workflow and "CTRADER" not in workflow  # ключи биржи в CI не попадают
 
 
 # ================================================================================== Strategy Quant Analyzer (изоляция от бота)

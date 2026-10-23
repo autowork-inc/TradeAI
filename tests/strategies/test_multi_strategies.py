@@ -228,7 +228,7 @@ def vwap_frame(n: int = 40, at: int = 30, offset: int = 0, bias: int | None = -1
 
 
 # прежнее поведение (до 2026-10-20): без проверки близости к экстремуму и тренда, стоп по окну касания (3 бара)
-LOOSE = VwapParams(max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)
+LOOSE = VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)
 
 
 def test_vwap_matches_manual_cumulative_calculation():
@@ -276,13 +276,13 @@ def test_vwap_touch_may_precede_the_reversal_pattern_within_the_lookback_window(
     out = detect_vwap_reversion(df, LOOSE)
     assert idx(out, "vw_short_signal") == [32] and out["high"][32] < out["vw_upper"][32]  # на самом баре 32 касания полосы нет
     assert out["vw_short_sl"][32] == pytest.approx(103.0 + 0.2)  # SL берёт экстремум окна, а не только свечи паттерна
-    assert idx(detect_vwap_reversion(df, VwapParams(touch_lookback=2, max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)), "vw_short_signal") == []
+    assert idx(detect_vwap_reversion(df, VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), touch_lookback=2, max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)), "vw_short_signal") == []
 
 
 def test_vwap_needs_the_day_anchor_and_enough_bars():
     full = vwap_frame()
     assert idx(detect_vwap_reversion(full.slice(5), LOOSE), "vw_short_signal") == []  # кадр начинается не с начала суток: VWAP был бы другим
-    assert idx(detect_vwap_reversion(full, VwapParams(min_day_bars=40, max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)), "vw_short_signal") == []  # на бар 31 суток накоплено меньше 40 свечей
+    assert idx(detect_vwap_reversion(full, VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), min_day_bars=40, max_entry_to_ext_atr=99.0, swing_lookback=3, require_htf_trend=False)), "vw_short_signal") == []  # на бар 31 суток накоплено меньше 40 свечей
     with pytest.raises(ConfigError):
         VwapParams(touch_lookback=0)
     with pytest.raises(DataError, match="volume"):
@@ -301,14 +301,14 @@ def test_vwap_defaults_are_the_original_m15_windows_and_for_interval_keeps_the_c
 
 # --- фильтры 2026-10-20: близость к экстремуму, структурный стоп, тренд H4, диагностика
 
-NEAR = VwapParams(max_entry_to_ext_atr=2.5)  # на фикстуре вход (100.3) в 2.4 ATR от хая сигнальной свечи (102.7): порог 2.5 пропускает, 1.0 - нет
+NEAR = VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), max_entry_to_ext_atr=2.5)  # на фикстуре вход (100.3) в 2.4 ATR от хая сигнальной свечи (102.7): порог 2.5 пропускает, 1.0 - нет
 
 
 def test_vwap_entry_too_far_from_the_extreme_is_rejected():
     df = vwap_frame()
     assert idx(detect_vwap_reversion(df, NEAR), "vw_short_signal") == [31]
     assert idx(detect_vwap_reversion(df), "vw_short_signal") == []  # по умолчанию 1.0 ATR: закрытие в 2.4 ATR от хая - «середина ничего»
-    assert idx(detect_vwap_reversion(df, VwapParams(max_entry_to_ext_atr=2.3)), "vw_short_signal") == []
+    assert idx(detect_vwap_reversion(df, VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), max_entry_to_ext_atr=2.3)), "vw_short_signal") == []
     out = detect_vwap_reversion(df)
     assert out["vw_short_ext_atr"][31] == pytest.approx(2.4)  # диагностика считается и на отброшенных свечах
 
@@ -323,8 +323,8 @@ def test_vwap_long_proximity_is_measured_to_the_low_of_the_wick():
 
 def test_vwap_stop_is_the_structural_swing_not_just_the_signal_wick():
     df = vwap_frame(high={26: 103.4})  # более высокий хай за 5 баров до сигнала, вне окна касания (3 бара), но внутри swing_lookback = 12
-    short_sl = detect_vwap_reversion(df, VwapParams(max_entry_to_ext_atr=99.0, swing_lookback=3))
-    wide_sl = detect_vwap_reversion(df, VwapParams(max_entry_to_ext_atr=99.0, swing_lookback=12))
+    short_sl = detect_vwap_reversion(df, VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), max_entry_to_ext_atr=99.0, swing_lookback=3))
+    wide_sl = detect_vwap_reversion(df, VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), max_entry_to_ext_atr=99.0, swing_lookback=12))
     assert 31 in idx(wide_sl, "vw_short_signal") and 31 in idx(short_sl, "vw_short_signal")  # сам всплеск на баре 26 тоже даёт сигнал - он не предмет теста
     assert short_sl["vw_short_sl"][31] == pytest.approx(103.0 + 0.2)  # прежняя логика: только окно касания
     assert wide_sl["vw_short_sl"][31] == pytest.approx(103.4 + 0.2)  # структурный хай + 0.2 ATR
@@ -334,7 +334,7 @@ def test_vwap_stop_is_the_structural_swing_not_just_the_signal_wick():
 def test_vwap_long_stop_uses_the_swing_low():
     df = vwap_frame(high={26: 103.4}, bias=1)
     m = df.with_columns((200.0 - pl.col("low")).alias("high"), (200.0 - pl.col("high")).alias("low"), (200.0 - pl.col("open")).alias("open"), (200.0 - pl.col("close")).alias("close"))
-    out = detect_vwap_reversion(m, VwapParams(max_entry_to_ext_atr=99.0))
+    out = detect_vwap_reversion(m, VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), max_entry_to_ext_atr=99.0))
     assert 31 in idx(out, "vw_long_signal") and out["vw_long_sl"][31] == pytest.approx(200.0 - 103.4 - 0.2)
 
 
@@ -467,7 +467,7 @@ def with_micro(f: pl.DataFrame) -> pl.DataFrame:
 SOFT_CT = CounterTrendParams(min_sweep_atr=0.05, volume_mult=0.5)  # мягкие пороги: на случайных данных глубоких свипов почти нет
 SOFT_OBI = ObiParams(impulse_atr_mult=0.3, obi_min=0.2, delta_min=0.2, delta_volume_mult=0.5)
 SOFT_KZ = KillzoneParams(min_asia_range_atr=0, min_sweep_depth_atr=0, min_wick_frac=0)  # на случайных данных строгие пороги сигналов почти не дают
-SOFT_VW = VwapParams(sd_mult=1.5, min_day_bars=8, max_entry_to_ext_atr=99.0)
+SOFT_VW = VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), sd_mult=1.5, min_day_bars=8, max_entry_to_ext_atr=99.0)
 
 CASES = {  # имя -> (функция кадр свечей -> кадр с сигналами, колонки сигналов, число баров случайного ряда: сигналы редкие - нужен длинный)
     "counter_trend": (lambda d: detect_counter_trend(with_bias(pipeline_features(d)), SOFT_CT), ("ct_short_signal", "ct_long_signal"), 6000),
@@ -511,3 +511,50 @@ def test_no_row_iteration_in_new_detectors_r2():
         src = (Path(__file__).resolve().parents[2] / "strategies" / f"{module}.py").read_text(encoding="utf-8")
         code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
         assert re.search(banned, code) is None, f"{module}: итерация по строкам запрещена (R2)"
+
+
+# ---------------------------------------------------------------------- VWAP: Tolerance Zone (2026-10-23)
+
+_NO_EXT = dict(max_entry_to_ext_atr=99.0)
+
+
+def zone_frame(gap: float, atr: float = 1.0, bias: int = -1) -> pl.DataFrame:
+    """Шорт «падающая звезда» на баре 31 (хай 103 пробил верхнюю полосу, закрытие внутри): close ровно на `gap` ниже верхней полосы (подбор неподвижной точки:
+    close входит в типичную цену и сдвигает саму полосу)."""
+    close = 101.2
+    for _ in range(8):
+        df = vwap_frame(bias=bias, open={31: close + 0.1}, close={31: close}, high={31: 103.0}, low={31: close - 0.1}).with_columns(pl.lit(atr).alias("atr"))
+        close = detect_vwap_reversion(df, VwapParams(**_NO_EXT))["vw_upper"][31] - gap
+    return vwap_frame(bias=bias, open={31: close + 0.1}, close={31: close}, high={31: 103.0}, low={31: close - 0.1}).with_columns(pl.lit(atr).alias("atr"))
+
+
+def test_vwap_tolerance_zone_lets_a_close_next_to_the_band_in_and_drops_a_late_entry():
+    near, late = zone_frame(0.1), zone_frame(0.45)
+    out = detect_vwap_reversion(near, VwapParams(**_NO_EXT))
+    assert idx(out, "vw_short_signal") == [31] and out["vw_short_band_atr"][31] == pytest.approx(0.1, abs=0.01)  # 0.1 ATR от полосы <= 0.2 ATR
+    assert idx(detect_vwap_reversion(late, VwapParams(**_NO_EXT)), "vw_short_signal") == []  # 0.45 ATR от полосы: импульс упущен, вход «в пустоте» запрещён
+    off = VwapParams(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0, **_NO_EXT)
+    assert idx(detect_vwap_reversion(late, off), "vw_short_signal") == [31]  # без зоны старое поведение вошло бы, значит отсекает именно она
+
+
+def test_vwap_tolerance_is_the_stricter_of_0_2_atr_and_15_percent_of_the_way_to_vwap():
+    # ATR = 10: 0.2 ATR = 2.0 пункта, но 15% пути от полосы до VWAP (~1.5 пункта * 0.15 = ~0.22) жёстче
+    near, mid = zone_frame(0.1, atr=10.0), zone_frame(0.6, atr=10.0)
+    assert idx(detect_vwap_reversion(near, VwapParams(**_NO_EXT)), "vw_short_signal") == [31]
+    assert idx(detect_vwap_reversion(mid, VwapParams(**_NO_EXT)), "vw_short_signal") == []
+    assert idx(detect_vwap_reversion(mid, VwapParams(max_band_dist_vwap_frac=99.0, **_NO_EXT)), "vw_short_signal") == [31]  # 0.6 < 0.2 * 10: без доли пути вошло бы
+
+
+def test_vwap_tolerance_zone_long_mirror_and_param_validation():
+    df = zone_frame(0.1)
+    m = df.with_columns((200.0 - pl.col("low")).alias("high"), (200.0 - pl.col("high")).alias("low"), (200.0 - pl.col("open")).alias("open"),
+                        (200.0 - pl.col("close")).alias("close"), (-pl.col("htf_bias")).cast(pl.Int8).alias("htf_bias"))
+    assert idx(detect_vwap_reversion(m, VwapParams(**_NO_EXT)), "vw_long_signal") == [31]
+    mf = zone_frame(0.45).with_columns((200.0 - pl.col("low")).alias("high"), (200.0 - pl.col("high")).alias("low"), (200.0 - pl.col("open")).alias("open"),
+                                      (200.0 - pl.col("close")).alias("close"), (-pl.col("htf_bias")).cast(pl.Int8).alias("htf_bias"))
+    assert idx(detect_vwap_reversion(mf, VwapParams(**_NO_EXT)), "vw_long_signal") == []
+    for bad in (dict(max_band_dist_atr=0.0), dict(max_band_dist_vwap_frac=-0.1)):
+        with pytest.raises(ConfigError):
+            VwapParams(**bad)
+    p = VwapParams()
+    assert (p.max_band_dist_atr, p.max_band_dist_vwap_frac) == (0.2, 0.15)

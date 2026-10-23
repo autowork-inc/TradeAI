@@ -36,7 +36,7 @@ ICT_KILLZONES = "ICT_Killzones"
 VWAP_REVERSION = "VWAP_Reversion"
 HORIZONTAL_BREAKOUT = "Horizontal_Breakout"  # 2026-10-18, только Shadow (config.SHADOW_ONLY_STRATEGIES)
 TRENDLINE_BREAKOUT = "Trendline_Breakout"  # 2026-10-18, только Shadow (config.SHADOW_ONLY_STRATEGIES)
-# CHR (2026-10-19, только Shadow). В клиенте - «Пробой уровня (Horizontal)» / «Наклонка (Trendline)» (с 2026-10-21): strategy_id без пробелов и скобок,
+# CHR (2026-10-19, только Shadow). В клиенте - «Пробой (CHR)» / «Наклонка (CHR)» (с 2026-10-23): strategy_id без пробелов и скобок,
 # потому что он входит в id сделки (`<strategy_id>:<символ>:...`), а id сделки в API ограничен [A-Za-z0-9:._-] (api/main.py TradeId).
 HORIZONTAL_BREAKOUT_CHR = "Horizontal_Breakout_CHR"
 TRENDLINE_BREAKOUT_CHR = "Trendline_Breakout_CHR"
@@ -251,11 +251,13 @@ def _chr_meta(last: dict[str, Any], pre: str) -> dict[str, Any]:
     """Поля CHR, общие для уровня и наклонки: касания, точки поджатия, риск в ATR, полнотелость пробойной свечи."""
     squeeze = [_f(last[f"{pre}squeeze_{n}"]) for n in (1, 2, 3)]
     return {"touches": int(last[f"{pre}touches"]), "squeeze_points": [v for v in reversed(squeeze) if v is not None],
-            "risk_atr": _f(last[f"{pre}risk_atr"]), "body_frac": _f(last[f"{pre}body_frac"]), "stop": "static", "atr": last["atr"]}
+            "risk_atr": _f(last[f"{pre}risk_atr"]), "body_frac": _f(last[f"{pre}body_frac"]), "stop": "static", "atr": last["atr"],
+            "comp_decay": _f(last[f"{pre}comp_decay"]), "comp_rub_atr": _f(last[f"{pre}comp_rub_atr"]), "comp_height_atr": _f(last[f"{pre}comp_height_atr"]),
+            "sl_extreme": _f(last[f"{pre}sl_extreme"])}
 
 
 def _squeeze_geo(last: dict[str, Any], pre: str) -> dict[str, Any]:
-    """Линия поджатия: от самой старой точки (higher low / lower high) до самой свежей."""
+    """Линия базы (локальной компрессии): от нижней точки старой половины окна до нижней точки свежей (лонг; шорт - верхние)."""
     first = next(v for v in (last[f"{pre}squeeze_3"], last[f"{pre}squeeze_2"]) if v is not None)
     return geometry("line", last[f"{pre}squeeze_start_t"], last[f"{pre}squeeze_last_t"], first, last[f"{pre}squeeze_1"], "поджатие")
 
@@ -288,7 +290,7 @@ class StrategyHorizontalBreakoutChr:
                 _sl_line(ctx, sl),
             )
             out.append(_market_signal(self.name, ctx, Direction(side), sl, geo, {
-                "level": level, "window": self.params.window, **_chr_meta(last, pre), **_htf_meta(last)}))
+                "level": level, "window": self.params.window, "comp_bars": self.params.comp_bars, **_chr_meta(last, pre), **_htf_meta(last)}))
         return tuple(out)
 
 
@@ -321,5 +323,5 @@ class StrategyTrendlineBreakoutChr:
             )
             out.append(_market_signal(self.name, ctx, Direction(side), g["sl"], geo, {
                 "line_level": g["level"], "slope_atr": _f(last[pre + "slope_atr"]), "anchor1_price": g["anchor1_price"],
-                "anchor2_price": g["anchor2_price"], "window": self.params.window, **_chr_meta(last, pre), **_htf_meta(last)}))
+                "anchor2_price": g["anchor2_price"], "window": self.params.window, "comp_bars": self.params.comp_bars, **_chr_meta(last, pre), **_htf_meta(last)}))
         return tuple(out)

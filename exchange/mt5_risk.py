@@ -6,7 +6,7 @@
     loss_per_lot = d * contractSize * rate         (если стоимость тика неизвестна; rate - курс валюты котировки к валюте счёта)
     lots         = risk_usdt / loss_per_lot,   затем ВНИЗ до volumeStep
 
-Источник стоимости тика - `lossTickValue` котировки MetaApi (`MetaApiLiveClient.get_price` -> `Quote.loss_tick_value`): брокер уже
+Источник стоимости тика - `lossTickValue` котировки cTrader (`CTraderConnector.get_price` -> `Quote.loss_tick_value`): брокер уже
 пересчитал её в валюту счёта (для USDJPY при счёте в USD это не 100 000 * 0.001 = 100 иен, а доллары). Второй путь (`rate`) годится, когда
 валюта прибыли символа совпадает с валютой счёта (`rate = 1`) или курс известен вызывающему. Нет ни того, ни другого - `ConfigError`.
 
@@ -22,7 +22,7 @@
   * SL не по ту сторону входа / нулевое расстояние / нет эквити -> `bad_risk` / `equity_unavailable`;
   * SL ближе `stopsLevel` брокера -> `stop_too_close` (брокер ответил бы 10016 уже после отправки).
 
-Маржа. Точный источник - `MetaApiLiveClient.calculate_margin` (терминал брокера считает по своему режиму и плечу) - передаётся как
+Маржа. Точный источник - `CTraderConnector.calculate_margin` (терминал брокера считает по своему режиму и плечу) - передаётся как
 `margin_per_lot`. Запасной грубый расчёт `approx_margin_per_lot` (контракт * цена / плечо) верен для Forex и неверен для CFD на индексы
 и сырьё с иным режимом расчёта (❓), поэтому для не-Forex символов нужна `calculate_margin`.
 """

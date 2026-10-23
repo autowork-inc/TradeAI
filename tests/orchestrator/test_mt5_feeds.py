@@ -1,4 +1,4 @@
-"""Данные MT5-символов для Shadow: свечи M5 (единственный запрос к MetaApi) + производные 15m / 1h / 4h / 1d, заполнение выходных плоскими свечами, тики из котировок.
+"""Данные MT5-символов для Shadow: свечи M5 (единственный запрос к cTrader) + производные 15m / 1h / 4h / 1d, заполнение выходных плоскими свечами, тики из котировок.
 
 Источник - поддельный (`FakeSource`): отдаёт историю и «открывает» новые закрытые свечи по команде теста; настоящих запросов нет, а любой таймфрейм кроме "5m"
 - ошибка теста. Сквозной прогон: фиды -> MtfState -> микроструктура -> Оркестратор с ПЯТЬЮ настоящими стратегиями (SMC_Pro_Trend на 5m с 1h/1d, остальные на 15m) через
@@ -307,8 +307,8 @@ def test_forming_candle_is_never_used_and_off_grid_candle_is_an_error():
         g.merge(SYM, [(bars[AFTER - 1][0] + 1, 1.0, 1.0, 1.0, 1.0, 1.0)])
 
 
-def test_transient_metaapi_failures_are_retried_then_fail_fast():
-    from exchange.mt5_metaapi import MetaApiError
+def test_transient_ctrader_failures_are_retried_then_fail_fast():
+    from exchange.ctrader import CTraderError
 
     class Flaky(FakeSource):
         def __init__(self, *a, fail=0):
@@ -318,7 +318,7 @@ def test_transient_metaapi_failures_are_retried_then_fail_fast():
         async def get_candles(self, *a, **kw):
             if self.fail > 0:
                 self.fail -= 1
-                raise MetaApiError("таймаут")
+                raise CTraderError("таймаут")
             return await super().get_candles(*a, **kw)
 
     bars = make_bars(110)
@@ -329,12 +329,12 @@ def test_transient_metaapi_failures_are_retried_then_fail_fast():
     assert feed._g.store[SYM]
     bad = Flaky(bars, AFTER, fail=99)
     feed2 = make_feed(bad, Clock(bars[AFTER - 2][0] + M5_MS + 5_000), poll_s=0.001, max_failures=3)
-    with pytest.raises(MetaApiError):
+    with pytest.raises(CTraderError):
         asyncio.run(feed2._g._guarded(feed2._g.bootstrap))
 
 
 def test_tick_feed_emits_mid_price_as_trade_and_mark_and_marks_gaps():
-    from exchange.mt5_metaapi import MetaApiError
+    from exchange.ctrader import CTraderError
 
     ticks, gaps = [], []
     src = FakeSource([], 0)
@@ -344,13 +344,13 @@ def test_tick_feed_emits_mid_price_as_trade_and_mark_and_marks_gaps():
 
     class Down(FakeSource):
         async def get_price(self, symbol):
-            raise MetaApiError("нет связи")
+            raise CTraderError("нет связи")
 
     async def run_down():
         f = Mt5TickFeed(Down([], 0), ticks.append, gaps.append, broker_name=lambda s: s, symbols=(SYM,), clock_ms=lambda: 9, poll_s=0.001, max_failures=3)
         f.start()
         await asyncio.sleep(0.2)
-        with pytest.raises(MetaApiError):
+        with pytest.raises(CTraderError):
             f.check()
 
     asyncio.run(run_down())
@@ -389,7 +389,7 @@ def test_multi_feed_is_importable_from_the_old_place():
 
 
 def test_shadow_data_path_never_calls_trade_methods():
-    """Shadow берёт у MetaApi только данные: торговых вызовов нет ни в фидах, ни в точке входа (даже если токен случайно с торговыми правами)."""
+    """Shadow берёт у cTrader только данные: торговых вызовов нет ни в фидах, ни в точке входа (даже если токен случайно с торговыми правами)."""
     import re
     from pathlib import Path
 
@@ -400,7 +400,7 @@ def test_shadow_data_path_never_calls_trade_methods():
 
 
 def test_only_the_five_minute_timeframe_is_ever_requested_from_the_broker():
-    """«Никаких новых REST-запросов»: в коде фидов единственный таймфрейм у MetaApi - BASE_TIMEFRAME ("5m"); 15m/1h/4h/1d нигде не запрашиваются."""
+    """«Никаких новых REST-запросов»: в коде фидов единственный таймфрейм у cTrader - BASE_TIMEFRAME ("5m"); 15m/1h/4h/1d нигде не запрашиваются."""
     import re
     from pathlib import Path
 

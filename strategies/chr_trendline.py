@@ -1,4 +1,4 @@
-"""Стратегия `Trendline_Breakout_CHR` (в клиенте - «Trendline Breakout (CHR)»): пробой наклонной линии после поджатия по жёсткому
+"""Стратегия `Trendline_Breakout_CHR` (в клиенте - «Наклонка (CHR)»): пробой наклонной линии после поджатия по жёсткому
 тренду H4 (2026-10-19, только Shadow). Общие правила CHR - strategies/chr_common.py.
 
 Векторный Polars (R2), без заглядывания в будущее (R3/R4): опоры линии, касания и поджатие - пивоты, подтверждённые до пробойной свечи j.
@@ -10,10 +10,12 @@
   * размах пробойной свечи <= max_break_range_atr * ATR[j-1], иначе вход MARKET запрещён (не покупаем на хаях);
   * касания: две опоры + более старые пивоты-максимумы цепочки (до touch_depth), лежащие на продолжении линии в пределах touch_atr * ATR[j-1]
     и в окне W; касаний >= min_touches;
-  * поджатие: последние squeeze_points подтверждённых локальных минимумов строго повышаются (higher lows) и лежат в окне W;
+  * поджатие (с 2026-10-23): локальная компрессия `chr_common.compression` на comp_bars (5-10) барах НЕПОСРЕДСТВЕННО перед пробоем - волатильность затухает, минимумы
+    подтягиваются к линии, high "трутся" об неё (расстояние считается до значения линии на каждом баре), база узкая; higher lows на всём окне поджатием не считаются;
   * пробой: close[j] > линия в момент j (строго за линией) полнотелой бычьей свечой (тело >= min_body_frac размаха);
   * тренд: htf_bias == Bullish (Neutral, Bearish и нет bias - запрет), без выключателя;
-  * стоп: последний минимум поджатия - sl_buffer_atr * ATR[j-1] (D.SL_BUFFER_ATR, О5); стоп статичен. Размер позиции - фиксированные 5 USDT риска
+  * стоп (с 2026-10-23, `chr_common.local_stop`): ближайший локальный свинг среди последних 3-8 баров перед пробоем - sl_buffer_atr * ATR[j-1] (0.2 ATR), без глобального
+    минимума окна; риск не больше max_risk_atr * ATR[j-1], иначе сигнала нет; стоп статичен. Размер позиции - фиксированные 5 USDT риска
     (orchestrator/risk.py), выход - единственный тейк на весь объём строго 1:4 (D.TP_R, registry.CHR_PLAN); частичных фиксаций, безубытка и трейлинга нет.
 Вход MARKET по первому тику после закрытия свечи j.
 
@@ -26,7 +28,8 @@ import polars as pl
 
 from features import defaults as D
 from features.htf import BIAS_COLUMN
-from strategies.chr_common import SIDES, full_body, pivot_chain, squeeze, trend_strict
+from strategies import chr_common as K
+from strategies.chr_common import SIDES, compression, full_body, local_stop, pivot_chain, trend_strict
 from utils.errors import ConfigError, DataError
 
 # ------------------------------------------------------------------------------------------------ КАЛИБРОВКА (стартовые допущения 2026-10-19)
@@ -39,14 +42,21 @@ CHR_T_CROSS_ATR = 0.05  # «чистый воздух»: между опорам
 CHR_T_MAX_TOUCH_AGE = 24  # вторая (свежая) опора линии не старше этого числа баров до пробойной свечи
 CHR_T_MAX_BREAK_RANGE_ATR = 1.5  # размах пробойной свечи больше этого числа ATR[j-1] - вход MARKET запрещён (не покупаем на хаях)
 CHR_T_MIN_SLOPE_ATR = 0.02  # наклон линии, ATR за бар: положе - это горизонтальный уровень (Horizontal_Breakout_CHR)
-CHR_T_SQUEEZE_POINTS = 3  # строго повышающихся минимумов (лонг) / понижающихся максимумов (шорт)
+CHR_T_COMP_BARS = K.COMP_BARS  # окно локальной компрессии перед пробоем (5-10 баров)
+CHR_T_COMP_DECAY = K.COMP_DECAY  # свежая половина базы по размаху <= этой доли старой (волатильность затухает)
+CHR_T_COMP_MAX_RANGE_ATR = K.COMP_MAX_RANGE_ATR  # свежая половина базы в среднем уже этого числа ATR
+CHR_T_COMP_HEIGHT_ATR = K.COMP_HEIGHT_ATR  # высота всей базы не больше этого числа ATR
+CHR_T_COMP_RUB_ATR = K.COMP_RUB_ATR  # high в среднем не дальше этого числа ATR от линии ("трутся" об неё)
+CHR_T_SL_SWING_BARS = K.SL_SWING_BARS  # стоп ищется за свингом среди последних 3-8 баров
+CHR_T_MAX_RISK_ATR = K.SL_MAX_RISK_ATR  # стоп дальше этого числа ATR от входа - сигнала нет
 CHR_T_MIN_BODY_FRAC = 0.6  # полнотелая свеча: тело >= этой доли размаха
-CHR_T_SL_BUFFER_ATR = D.SL_BUFFER_ATR  # запас стопа за последней точкой поджатия, в ATR
+CHR_T_SL_BUFFER_ATR = D.SL_BUFFER_ATR  # отступ стопа за локальным свингом, в ATR (0.2)
 
 MAX_LOOKBACK = 80  # глубина поиска структуры не больше 80 баров: только актуальная локальная структура
 _REQUIRED = ("open_time", "open", "high", "low", "close", "atr")
 _SIGNAL_FIELDS = ("signal", "level", "sl", "touches", "slope_atr", "anchor1_time", "anchor1_price", "anchor2_time", "anchor2_price",
-                  "squeeze_1", "squeeze_2", "squeeze_3", "squeeze_start_t", "squeeze_last_t", "risk_atr", "body_frac")
+                  "squeeze_1", "squeeze_2", "squeeze_3", "squeeze_start_t", "squeeze_last_t", "risk_atr", "body_frac",
+                  "comp_decay", "comp_rub_atr", "comp_height_atr", "sl_extreme")
 _T = "_cht_"
 
 
@@ -61,7 +71,13 @@ class ChrTrendlineParams:
     max_touch_age: int = CHR_T_MAX_TOUCH_AGE
     max_break_range_atr: float = CHR_T_MAX_BREAK_RANGE_ATR
     min_slope_atr: float = CHR_T_MIN_SLOPE_ATR
-    squeeze_points: int = CHR_T_SQUEEZE_POINTS
+    comp_bars: int = CHR_T_COMP_BARS
+    comp_decay: float = CHR_T_COMP_DECAY
+    comp_max_range_atr: float = CHR_T_COMP_MAX_RANGE_ATR
+    comp_height_atr: float = CHR_T_COMP_HEIGHT_ATR
+    comp_rub_atr: float = CHR_T_COMP_RUB_ATR
+    sl_swing_bars: int = CHR_T_SL_SWING_BARS
+    max_risk_atr: float = CHR_T_MAX_RISK_ATR
     min_body_frac: float = CHR_T_MIN_BODY_FRAC
     sl_buffer_atr: float = CHR_T_SL_BUFFER_ATR
 
@@ -73,8 +89,10 @@ class ChrTrendlineParams:
                     raise ConfigError(f"ChrTrendlineParams.{f.name} должен быть целым >= 1, получено {v!r}")
             elif isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
                 raise ConfigError(f"ChrTrendlineParams.{f.name} должен быть числом >= 0, получено {v!r}")
-        if self.min_touches < 2 or self.squeeze_points < 2 or self.touch_depth < 2:
-            raise ConfigError("ChrTrendlineParams: min_touches >= 2, squeeze_points >= 2, touch_depth >= 2 (правила CHR)")
+        if self.min_touches < 2 or self.touch_depth < 2 or not 5 <= self.comp_bars <= 10 or not 3 <= self.sl_swing_bars <= 8:
+            raise ConfigError("ChrTrendlineParams: min_touches >= 2, touch_depth >= 2, comp_bars 5-10, sl_swing_bars 3-8 (правила CHR)")
+        if self.comp_bars >= self.window:
+            raise ConfigError("ChrTrendlineParams: окно компрессии должно быть короче окна линии (comp_bars < window)")
         if self.window <= self.pivot_k * 2 or not 0 < self.min_body_frac <= 1 or self.min_slope_atr <= 0:
             raise ConfigError("ChrTrendlineParams: window > 2 * pivot_k, min_body_frac в (0, 1], min_slope_atr > 0")
         if self.window > MAX_LOOKBACK or self.max_touch_age > MAX_LOOKBACK or self.max_break_range_atr <= 0:
@@ -96,7 +114,7 @@ _KIND = {"hi": "high", "lo": "low"}
 
 def _stage_known(p: ChrTrendlineParams) -> list[pl.Expr]:
     """Цепочки пивотов, известные до бара j (строка j-1)."""
-    depth = max(p.touch_depth, p.squeeze_points)
+    depth = p.touch_depth
     out = [pl.col("atr").shift(1).alias(_T + "atr0"), pl.col("open_time").shift(p.window).alias(_T + "t_start")]
     for chain in _KIND:
         for n in range(1, depth + 1):
@@ -119,7 +137,7 @@ def _line_at(side: str, t: pl.Expr, iv: int) -> pl.Expr:
 
 def _stage_side(p: ChrTrendlineParams, side: str, iv: int) -> list[pl.Expr]:
     col, atr0 = pl.col, _c("atr0")
-    a, sq = _SIDE[side]
+    a, _ = _SIDE[side]
     tol = p.touch_atr * atr0
     sgn = 1.0 if side == "long" else -1.0  # «за линией» для лонга - выше
     slope = _c(f"{side}_slope")
@@ -141,24 +159,23 @@ def _stage_side(p: ChrTrendlineParams, side: str, iv: int) -> list[pl.Expr]:
     extra = [((_c(f"{a}{n}_tj") >= _c("t_start")) & ((_c(f"{a}{n}_pj") - _line_at(side, _c(f"{a}{n}_tj"), iv)).abs() <= tol))
              .fill_null(False).cast(pl.Int32) for n in range(3, p.touch_depth + 1)]
     touches = pl.lit(2, dtype=pl.Int32) + (pl.sum_horizontal(extra) if extra else pl.lit(0, dtype=pl.Int32))
-    in_window = (_c(f"{sq}{p.squeeze_points}_tj") >= _c("t_start")).fill_null(False)
-    squeezed = squeeze(side, f"{_T}{sq}", p.squeeze_points, suffix="_pj") & in_window
     level = _line_at(side, col("open_time"), iv)
-    last_sq = _c(f"{sq}1_pj")
-    sl = last_sq - sgn * p.sl_buffer_atr * atr0
+    comp = compression(side, lambda s: _line_at(side, col("open_time").shift(s), iv), atr0, p.comp_bars, p.comp_decay, p.comp_max_range_atr, p.comp_height_atr, p.comp_rub_atr)
+    sl, extreme = local_stop(side, atr0, p.sl_swing_bars, p.sl_buffer_atr)
     risk = sgn * (col("close") - sl)
     beyond = sgn * (col("close") - level) > 0
     rng = col("high") - col("low")
     calm = (rng <= p.max_break_range_atr * atr0).fill_null(False)  # аномально большая пробойная свеча - не входим
-    signal = (line_ok & respected & fresh & calm & prev_inside & (touches >= p.min_touches) & squeezed & beyond & full_body(side, p.min_body_frac)
-              & trend_strict(side) & (risk > 0) & (atr0 > 0))
+    signal = (line_ok & respected & fresh & calm & prev_inside & (touches >= p.min_touches) & comp["ok"] & beyond & full_body(side, p.min_body_frac)
+              & trend_strict(side) & (risk > 0) & (risk <= p.max_risk_atr * atr0) & (atr0 > 0))
     pre = f"{_T}{side}_"
     return [signal.fill_null(False).alias(pre + "signal"), level.alias(pre + "level"), sl.alias(pre + "sl"), touches.alias(pre + "touches"),
             (slope / atr0).alias(pre + "slope_atr"), t2.alias(pre + "anchor1_time"), _c(f"{a}2_pj").alias(pre + "anchor1_price"),
             _c(f"{a}1_tj").alias(pre + "anchor2_time"), _c(f"{a}1_pj").alias(pre + "anchor2_price"),
-            *[_c(f"{sq}{n}_pj").alias(f"{pre}squeeze_{n}") for n in (1, 2, 3) if n <= p.squeeze_points],
-            _c(f"{sq}{p.squeeze_points}_tj").alias(pre + "squeeze_start_t"), _c(f"{sq}1_tj").alias(pre + "squeeze_last_t"), (risk / atr0).alias(pre + "risk_atr"),
-            pl.when(rng > 0).then((col("close") - col("open")).abs() / rng).alias(pre + "body_frac")]
+            comp["floor_new"].alias(pre + "squeeze_1"), comp["floor_old"].alias(pre + "squeeze_2"), pl.lit(None, dtype=pl.Float64).alias(pre + "squeeze_3"),
+            col("open_time").shift(p.comp_bars).alias(pre + "squeeze_start_t"), col("open_time").shift(1).alias(pre + "squeeze_last_t"), (risk / atr0).alias(pre + "risk_atr"),
+            pl.when(rng > 0).then((col("close") - col("open")).abs() / rng).alias(pre + "body_frac"), comp["decay_ratio"].alias(pre + "comp_decay"),
+            comp["rub_atr"].alias(pre + "comp_rub_atr"), comp["height_atr"].alias(pre + "comp_height_atr"), extreme.alias(pre + "sl_extreme")]
 
 
 def detect_chr_trendline(df: pl.DataFrame, interval_ms: int, params: ChrTrendlineParams | None = None) -> pl.DataFrame:
@@ -173,7 +190,7 @@ def detect_chr_trendline(df: pl.DataFrame, interval_ms: int, params: ChrTrendlin
     if clash:
         raise DataError(f"Колонки стратегии уже есть в кадре: {clash}")
     work = df
-    depth = max(p.touch_depth, p.squeeze_points)
+    depth = p.touch_depth
     for chain, kind in _KIND.items():
         for stage in pivot_chain(kind, p.pivot_k, depth, f"{_T}{chain}"):
             work = work.with_columns(stage)
@@ -184,6 +201,6 @@ def detect_chr_trendline(df: pl.DataFrame, interval_ms: int, params: ChrTrendlin
     for side in SIDES:
         signal = _c(f"{side}_signal")
         for name in _SIGNAL_FIELDS:
-            src = pl.lit(None, dtype=pl.Float64) if name == "squeeze_3" and p.squeeze_points < 3 else _c(f"{side}_{name}")
+            src = _c(f"{side}_{name}")
             exprs.append((signal if name == "signal" else pl.when(signal).then(src)).alias(f"cht_{side}_{name}"))
     return work.with_columns(exprs).drop([c for c in work.columns if c.startswith(_T)])

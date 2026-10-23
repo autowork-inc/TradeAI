@@ -201,3 +201,36 @@ def test_drawings_map_by_absolute_time_from_the_candle_centre():
     assert "rawToLogical(t - barIv() / 2)" in js and "rawToTime(L)" in js and "S.barsIv = ivSec()" in js
     assert "specIv()" in js  # правый край зон сигнала - по таймфрейму сделки, а не выбранному
 
+
+
+def test_chart_window_opens_maximized_on_top_and_focused(monkeypatch):
+    """2026-10-23: окно графика - на весь экран, поверх остальных, в фокусе; после старта поднимается ещё раз (Windows не любит фокус у нового процесса)."""
+    import sys
+    import types
+
+    calls = {}
+    fake = types.ModuleType("webview")
+
+    class Win:
+        on_top = False
+        shown = 0
+
+        def show(self):
+            self.shown += 1
+
+    win = Win()
+
+    def create_window(title, **kw):
+        calls["create"] = (title, kw)
+        return win
+
+    fake.create_window = create_window
+    fake.start = lambda func=None, *args: (calls.setdefault("started", True), func(*args))
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    from tradeai_client import chart_window
+
+    monkeypatch.setattr(chart_window, "_window_args", lambda spec: (object(), "<html></html>"))
+    chart_window.run_chart_window({"title": "BTC"})
+    title, kw = calls["create"]
+    assert kw["maximized"] is True and kw["on_top"] is True and kw["focus"] is True and title.endswith("BTC")
+    assert win.on_top is True and win.shown == 1 and calls["started"]

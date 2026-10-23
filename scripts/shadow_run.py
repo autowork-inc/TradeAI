@@ -11,15 +11,17 @@
 (orchestrator/mtf.py): за один цикл сначала обрабатываются ВСЕ закрытия старших таймфреймов, потом рабочие свечи, поэтому 5m видит свежий 1h-свип.
 Что делает: свечи 15m (SmcKlineFeed) -> FeatureEngine -> Orchestrator -> VirtualTracker; тики (TickFeed: aggTrade и
 markPrice@1s) двигают виртуальные заявки и позиции. Монеты - config.SHADOW_SYMBOLS (с 2026-10-13: BTC, ETH, EURUSD, XAUUSD, XAGUSD).
-MT5-символы (EURUSD, XAUUSD, XAGUSD): Binance их не отдаёт, поэтому свечи M5 (из них производные 15m / 1h / 4h / 1d) и тики идут из MetaApi (orchestrator/mt5_feeds.py) и
-включаются, только если в окружении есть METAAPI_TOKEN и METAAPI_ACCOUNT_ID (без них - предупреждение в лог, процесс работает по крипте).
+MT5-символы (EURUSD, XAUUSD, XAGUSD): Binance их не отдаёт, поэтому свечи M5 (из них производные 15m / 1h / 4h / 1d) и тики идут из cTrader (orchestrator/mt5_feeds.py) и
+включаются, только если в окружении есть CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_ACCOUNT_ID и CTRADER_ACCESS_TOKEN (без них - предупреждение в лог, процесс работает по крипте).
 HTF Bias (2026-10-11): вторым фидом идут свечи H4 (kline_4h + история REST); структура H4 (features/htf.py) присоединяется
 к контексту M15, и автомат SMC не начинает сетап против тренда H4 (шорт при Bullish, лонг при Bearish). Управление
 позицией - один тейк 1:4 на весь объём, стоп статичен; см. orchestrator/tracker.py.
 Все решения и сделки пишутся в журнал JSONL (<DATA_DIR>/shadow_events.jsonl) и, если задан DATABASE_URL, в PostgreSQL
 (trades, trade_closes, trade_snapshots, state_events; схема - persistence/schema.py). Сводка - в лог раз в час и при выходе.
-Состояние сделок живёт в памяти: при перезапуске открытые виртуальные позиции теряются; в БД они помечаются aborted
-(`process_restart`) и в статистику не входят.
+Состояние виртуальных сделок живёт в памяти, но при перезапуске (деплой, падение) ждущие лимитки и открытые позиции ВОССТАНАВЛИВАЮТСЯ из БД до поиска новых
+сигналов (2026-10-23): цена входа, SL, тейк, остаток и закрытия берутся из trades/trade_closes/trade_snapshots, сопровождение возобновляется, а сделка получает
+gap_affected (тики за простой не видны: сделка доводится до конца, но в статистику не входит). Aborted/`process_restart` остаётся только для записей, которые
+восстановить нельзя (рыночная заявка без исполнения, нет снапшота).
 
 Изоляция от боевого контура (live_run):
   * отдельный процесс/контейнер, отдельный каталог данных (TRADING_DATA_DIR): свои замки .instance_lock, .ban_lock;
@@ -177,11 +179,11 @@ async def shadow_main(opts: Options) -> None:
         try:
             if config.DATABASE_URL:
                 db = await Database.connect(config.DATABASE_URL)
-                recorder = PgRecorder(db)
-                # миграции + пометка висящих ТЕНЕВЫХ сделок прошлого запуска: виртуальная позиция не видела цену за время простоя (тиков нет) -
-                # её исход неизвестен, поэтому она не восстанавливается, а уходит в aborted (О17). Боевые строки не трогаются: их сверяет с биржей движок.
+                recorder = PgRecorder(db, restore_open=True)
+                # миграции + теневые сделки прошлого запуска: ждущие лимитки и открытые позиции остаются активными и поднимаются в трекер (ниже, до поиска сигналов);
+                # aborted получают только записи, которые продолжить нельзя. Боевые строки не трогаются: их сверяет с биржей движок.
                 aborted = await recorder.start()
-                log.info("PostgreSQL готов, схема актуальна; сделок прошлого запуска помечено aborted: %d", len(aborted))
+                log.info("PostgreSQL готов, схема актуальна; теневых сделок к восстановлению: %d, помечено aborted: %d", len(recorder.restorable), len(aborted))
             else:
                 log.warning("DATABASE_URL не задан: сделки пишутся только в JSONL-журнал (для сбора статистики на сервере БД обязательна)")
             events = RecordingEventLog(journal, recorder) if recorder is not None else journal
@@ -193,12 +195,12 @@ async def shadow_main(opts: Options) -> None:
                     from orchestrator.mt5_feeds import Mt5KlineFeed, Mt5TickFeed, connect_mt5_data
                     from orchestrator.ws import wall_clock_ms
 
-                    # Менеджер подключения MetaApi (orchestrator/mt5_link.py): подключается в фоне, сбой связи - пауза 5 минут и переподключение;
-                    # Forex/металлы изолированы от крипты - простой MetaApi не останавливает Binance-часть процесса.
+                    # Менеджер подключения cTrader (orchestrator/mt5_link.py): подключается в фоне, сбой связи - пауза 5 минут и переподключение;
+                    # Forex/металлы изолированы от крипты - простой cTrader не останавливает Binance-часть процесса.
                     mt5_link = await connect_mt5_data(mt5_wanted)
                 mt5_client = mt5_link.client if mt5_link is not None else None
                 crypto = tuple(s for s in symbols if s not in mt5_wanted)  # статичная основа: закреплённые BTC/ETH; остальные Binance-монеты подключает автоселектор
-                all_symbols = crypto if mt5_client is None else symbols  # без ключей MetaApi MT5-символы в этом запуске не участвуют
+                all_symbols = crypto if mt5_client is None else symbols  # без ключей cTrader MT5-символы в этом запуске не участвуют
                 symbols = all_symbols
                 signal_symbols = frozenset(all_symbols)  # новые сигналы - только по ним; монеты, подписанные ради сопровождения боевой позиции, - Close-Only
                 names = SHADOW_STRATEGIES
@@ -208,6 +210,10 @@ async def shadow_main(opts: Options) -> None:
                 strategies = build_strategies(names, mtf=mtf, interval=opts.interval)
                 ensure_history_depth(strategies, opts.history, opts.interval)  # до сети: VWAP_Reversion без целых суток в кадре молча не торгует
                 tracker = VirtualTracker(events, equity=opts.equity, recorder=recorder, plans=plans_for(names))
+                restored: list = []
+                if recorder is not None:  # State Recovery теневых сделок: до потоков, до первого тика и до поиска новых сигналов
+                    restored, unreadable = tracker.restore(recorder.restorable, int(time.time() * 1000))
+                    log.info("State Recovery (shadow): восстановлено %d сделок %s, нечитаемых (aborted) %d", len(restored), [t.trade_id for t in restored], len(unreadable))
                 universe = Universe(state_path=config.DATA_DIR / config.UNIVERSE_STATE_NAME) if config.UNIVERSE_AUTO else None
                 subscribed = universe.subscribed if universe is not None else set(crypto)  # монеты с запущенными потоками (в т.ч. подключённые на лету)
                 live = None
@@ -232,6 +238,15 @@ async def shadow_main(opts: Options) -> None:
                         log.warning("State Recovery: подписка на потоки монет с открытыми боевыми позициями %s", list(held))
                         crypto = (*crypto, *held)
                         subscribed.update(held)
+                shadow_held = tuple(sorted({t.signal.symbol for t in restored} - set(crypto) - set(mt5_wanted)))
+                if shadow_held:  # теневая сделка по монете вне стартового набора: потоки свечей и тиков нужны сразу (сопровождение), новых сигналов по ней нет
+                    log.warning("State Recovery (shadow): подписка на потоки монет с восстановленными сделками %s", list(shadow_held))
+                    crypto = (*crypto, *shadow_held)
+                    subscribed.update(shadow_held)
+                if mt5_client is None:
+                    for t in restored:
+                        if t.signal.symbol in mt5_wanted:
+                            log.warning("Восстановленная сделка %s по %s ждёт подключения cTrader (ключей нет): сопровождения пока нет", t.trade_id, t.signal.symbol)
                 minutes = MinuteBars()  # 1m-свечи из тиков сделок: фильтр MARKET-входа во время импульса (orchestrator/minute_bars.py)
                 gates: list = [MarketEntryGuard(minutes)]
                 weekend = weekend_gate(config.TRADE_MODE, config.WEEKEND_FILTER_ENABLED)  # только TRADE_MODE=live; в Shadow выходные не блокируются
@@ -246,6 +261,9 @@ async def shadow_main(opts: Options) -> None:
                 orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder, signal_gates=gates,
                                   symbol_filter=(lambda n, s: universe.tracked(s) and strategy_allowed(n, s)) if universe is not None
                                   else (lambda n, s: s in signal_symbols and strategy_allowed(n, s)))
+
+                for t in restored:
+                    orch.adopt_held(t.signal.strategy, t.signal.symbol, t.trade_id)  # блокировка монеты возвращается восстановленной сделке (D4)
 
                 def make_feeds(syms: tuple[str, ...]) -> tuple[list[SmcKlineFeed], list[SmcKlineFeed]]:
                     """Фиды свечей Binance для набора монет: (рабочие 15m/5m, состояния 4h/1h/1d). Для новых монет - отдельные соединения (старые не трогаются)."""
@@ -294,7 +312,7 @@ async def shadow_main(opts: Options) -> None:
                         micro.aggregator.mark_gap("trade")
 
                 ticks = MultiFeed([TickFeed(session, on_tick, on_gap, symbols=crypto)])
-                if mt5_client is not None:  # MT5-символы: свечи M5 (единственный запрос к MetaApi), из них производные 15m / 1h / 4h / 1d, и тики
+                if mt5_client is not None:  # MT5-символы: свечи M5 (единственный запрос к cTrader), из них производные 15m / 1h / 4h / 1d, и тики
                     mt5_feed = Mt5KlineFeed(mt5_client, FeatureEngine(SmcParams()), broker_name=mt5_link.broker_name, symbols=mt5_wanted,
                                             history_bars=opts.history, emit=mtf, link=mt5_link)
                     if htf_feed is not None:
@@ -332,6 +350,7 @@ async def shadow_main(opts: Options) -> None:
                                                                    open_symbols=live.open_symbols if live is not None else None))
                 runner = ShadowRun(feed, orch, tracker, ticks, heartbeat=config.DATA_DIR / HEARTBEAT_NAME, recorder=recorder,
                                  htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live, universe=manager, news=news)
+                log.info("Версия бота %s", config.BOT_VERSION)
                 log.info("Shadow Mode: %s %s%s, стратегии %s, HTF-фильтр %s, микроструктура %s, эквити %.0f, журнал %s, БД %s, TRADE_MODE=%s, автоселектор монет %s",
                          all_symbols, opts.interval, f" + SMC_Pro_Trend {D.MTF_BIAS_INTERVAL}->{D.MTF_STRUCT_INTERVAL}->{D.MTF_BASE_INTERVAL}" if mtf else "",
                          list(names), D.HTF_INTERVAL if htf is not None else "выключен",

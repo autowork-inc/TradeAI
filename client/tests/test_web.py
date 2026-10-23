@@ -384,7 +384,7 @@ def test_history_is_cards_when_page_is_narrower_than_768_and_table_when_wider():
     h._rebuild()
     assert h.is_compact() and h._cards.visible and not h._table.visible and len(h._cards.controls) == 2 and h._rows.controls == []
     texts = [x.value for x in walk(h._cards.controls[0]) if isinstance(x, ft.Text)]
-    assert "Наклонка (Trendline)" in texts and "BTC" in " ".join(texts) and any("+5.00" in t for t in texts) and "Лонг" in texts
+    assert "Наклонка (CHR)" in texts and "BTC" in " ".join(texts) and any("+5.00" in t for t in texts) and "Лонг" in texts
     buttons = [x for x in walk(h._cards.controls[0]) if isinstance(x, ft.IconButton)]
     assert len(buttons) == 2  # звёздочка и график - отдельным рядом внутри карточки
     page.width = 1024

@@ -55,6 +55,8 @@ claude.md
 # локальное, не для репозитория
 .metaapi/
 check_metaapi.py
+.ctrader_tokens.json
+ctrader_token*.json
 *.docx
 CLAUDE.md
 

@@ -66,7 +66,7 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT")
 # по публичному exchangeInfo (проверено 2026-10-11). Незакрытые виртуальные сделки по прежним монетам при перезапуске помечаются
 # aborted/process_restart (persistence.pg.PgRecorder.start не смотрит на список монет).
 # 2026-10-13 (решение пользователя): переход на макро-крипту, только высоколиквидные контракты; альткоины убраны. Позже в тот же день добавлены Forex/металлы
-# (EURUSD, XAUUSD, XAGUSD): их данные - не с Binance, а из MetaApi (orchestrator/mt5_feeds.py; нужны METAAPI_TOKEN/METAAPI_ACCOUNT_ID, иначе пропускаются).
+# (EURUSD, XAUUSD, XAGUSD): их данные - не с Binance, а из cTrader Open API (orchestrator/mt5_feeds.py; нужны CTRADER_CLIENT_ID/CTRADER_CLIENT_SECRET/CTRADER_ACCOUNT_ID/CTRADER_ACCESS_TOKEN, иначе пропускаются).
 # 2026-10-14 (решение пользователя): пул расширен ликвидными альткоинами Binance Futures (SOL, BNB, XRP, ADA, AVAX, LINK).
 # 2026-10-18 (решение пользователя): состав Binance-крипты определяет АВТОСЕЛЕКТОР по суточному объёму (orchestrator/universe.py, обновление раз в 6 ч);
 # жёстко закреплены только BTC и ETH. Здесь - статичная основа процесса: закреплённые монеты и MT5-символы (Forex/металлы).
@@ -186,9 +186,10 @@ LIVE_MAX_HOLD_BARS = 192  # тайм-аут позиции (как у VirtualTra
 LIVE_MAX_ENTRY_DEVIATION = 0.01  # MARKET-вход отклоняется, если mark price биржи ушла от цены сигнала больше чем на эту долю
 LIVE_STATE_NAME = "live_engine_state.json"  # состояние боевых сделок (переживает рестарт; сверяется с биржей при старте)
 LIVE_MT5_STATE_NAME = "live_mt5_state.json"  # состояние сопровождения MT5-позиций (Scale Out / безубыток / трейлинг); источник правды по объёму - брокер
-METAAPI_RECONNECT_PAUSE_S = _env_float("METAAPI_RECONNECT_PAUSE_S", 300.0)  # пауза перед переподключением к MetaApi после сбоя связи (orchestrator/mt5_link.py): 5 минут
-METAAPI_SYMBOLS_CACHE_NAME = ".metaapi_symbols.json"  # кеш списка символов брокера (get_symbols) в DATA_DIR
-METAAPI_SYMBOLS_CACHE_TTL_S = 86_400.0  # время жизни кеша списка символов: 24 часа
+BOT_VERSION = "1.4.1"  # версия сервера (бота): пишется в лог при старте; клиент и сервер выпускаются с одним номером
+CTRADER_RECONNECT_PAUSE_S = _env_float("CTRADER_RECONNECT_PAUSE_S", 300.0)  # пауза перед переподключением к cTrader после сбоя связи (orchestrator/mt5_link.py): 5 минут
+CTRADER_ENV = os.environ.get("CTRADER_ENV", "auto")  # auto: хост (demo/live) определяется по списку счетов токена; demo | live - принудительно
+CTRADER_TOKEN_FILE_NAME = ".ctrader_tokens.json"  # пара токенов, обновлённая по Refresh Token (СЕКРЕТ: лежит в DATA_DIR, в git и архивы деплоя не попадает)
 
 # Фильтры НОВЫХ сигналов (Блок 4, 2026-10-18; orchestrator/news_calendar.py). Сопровождение открытых сделок они не трогают.
 NEWS_FILTER_ENABLED = os.environ.get("NEWS_FILTER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
@@ -210,12 +211,12 @@ LIVE_PNL_MAX_AGE_S = 120.0  # PnL за сутки старше этого воз
 LIVE_ACCOUNT_NAME = ".live_account.json"  # снимок баланса/эквити счетов для API и клиента (пишет боевой движок, API читает)
 LIVE_RISK_STATE_NAME = ".live_risk_state.json"  # защёлка блокировки по суточному лимиту (переживает рестарт)
 # Мульти-биржевой боевой контур (решение пользователя 2026-10-13, вариант А): какой символ исполняется на какой площадке. Любой другой символ
-# получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - MetaApiLiveClient (MT5).
+# получает отказ `unsupported_symbol` (exchange/router.py). Крипта - BinanceLiveClient; Forex и металлы - CTraderConnector (cTrader; в коде площадка по-прежнему называется MT5).
 LIVE_BINANCE_SYMBOLS = SymbolSet(UNIVERSE_PINNED)  # 2026-10-18: live-уровень = BTC, ETH + монеты с объёмом >= UNIVERSE_LIVE_MIN_USDT (автоселектор дополняет набор на месте); TRADE_MODE по умолчанию shadow
 LIVE_MT5_SYMBOLS = ("EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "XAGUSD")
 # Стратегии, которым разрешены только перечисленные символы (остальные - на любых). OBI_Breakout читает L2-стакан и ленту: они есть только у Binance Futures.
 STRATEGY_SYMBOLS = {"OBI_Breakout": LIVE_BINANCE_SYMBOLS}  # OBI_Breakout читает стакан и ленту: только ликвидный live-уровень (>= 400M); Binance Test и MT5 исключены
-LIVE_ENABLE_MT5 = _env_bool("LIVE_ENABLE_MT5")  # подключать MT5 (MetaApi) к боевому контуру; по умолчанию выключено: Binance-контур работает без ключей MetaApi
+LIVE_ENABLE_MT5 = _env_bool("LIVE_ENABLE_MT5")  # подключать площадку Forex/металлов (cTrader; в коде MT5) к боевому контуру; по умолчанию выключено: Binance-контур работает без ключей cTrader
 LIVE_MT5_ACCOUNT_CURRENCIES = ("USD", "USDT", "USDC")  # суточный PnL складывается с Binance 1:1: счёт MT5 в другой валюте не допускается
 BALANCE_PATH = os.environ.get("BINANCE_BALANCE_PATH", "/fapi/v3/balance")
 INCOME_PATH = "/fapi/v1/income"

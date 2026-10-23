@@ -1,5 +1,5 @@
 """Паритет разметки клиента (client/tradeai_client/chr_overlay.py) с настоящими детекторами CHR: точки касаний и поджатия, которые клиент восстанавливает
-по свечам снапшота, обязаны совпасть с тем, что записал бот (meta.touches, meta.squeeze_points). Сценарии - те же, что в test_chr_strategies.py."""
+по свечам снапшота, обязаны совпасть с тем, что записал бот (meta.touches, meta.squeeze_points - низы / верхи старой и свежей половины локальной базы). Сценарии - те же, что в test_chr_strategies.py."""
 
 import sys
 from pathlib import Path
@@ -37,7 +37,7 @@ def test_horizontal_overlay_matches_the_detector(flip):
     assert out is not None and out["verified"] is True, out and out["notes"]
     touches = [i for i in out["items"] if i["kind"] == "point" and i["label"].startswith("Касание")]
     squeeze = [i for i in out["items"] if i["kind"] == "point" and i["label"].startswith("Поджатие")]
-    assert [t["t"] for t in touches] == [34 * STEP, 44 * STEP] and len(squeeze) == 3
+    assert [t["t"] for t in touches] == [34 * STEP, 44 * STEP] and len(squeeze) == 2
     assert [s["p"] for s in squeeze] == sig.meta["squeeze_points"]
     assert any(i["kind"] == "point" and i["label"] == "Пробой" for i in out["items"])
 

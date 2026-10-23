@@ -1,6 +1,6 @@
 """Сопровождение MT5-позиций планом выхода стратегии: ПАРИТЕТ с Shadow (VirtualTracker), закрытый рынок, неизвестный исход, рестарт.
 
-Клиент - настоящий `MetaApiLiveClient` поверх имитации RPC, у которой цена движется: стоп и брокерский TP срабатывают при пересечении
+Клиент - настоящий `CTraderConnector` поверх имитации RPC, у которой цена движется: стоп и брокерский TP срабатывают при пересечении
 (по цене тика, как стоп-маркет у Shadow), `modify_position` за ценой отвергается кодом 10016. Одна траектория подаётся и `VirtualTracker`, и
 `ExecutionRouter`; сравниваются ВСЕ закрытия: причина, доля исходного объёма, цена (сетка цен кратна 0.25 - расхождение = логика, а не округление).
 Допустимое физическое отличие - «немедленный стоп» (стоп по закрытой свече на/за ценой; брокер ответил бы 10016): бот закрывает по рынку сразу,
@@ -12,7 +12,7 @@ from collections import Counter
 
 import pytest
 
-from exchange.mt5_metaapi import MetaApiTradeError
+from exchange.ctrader import CTraderTradeError
 from exchange.router import ExecutionRouter, Mt5Tracked, RouteRejected
 from orchestrator.journal import MemoryEventLog
 from orchestrator.registry import SCALP_1R_PLAN, VWAP_PLAN
@@ -59,16 +59,11 @@ class MovingMt5(FakeMt5Rpc):
             raise trade_error(10016)  # INVALID_STOPS: стоп на цене или за ней
         return await super().modify_position(position_id, sl, tp)
 
-    async def close_position(self, position_id, options=None):
+    async def close_position(self, position_id, volume=None, *, client_id=None):
         pos = next((p for p in self.positions if p["id"] == position_id), None)
-        res = await super().close_position(position_id, options)
-        if pos is not None and not any(p["id"] == position_id for p in self.positions):
-            self._fill(pos["volume"], "market")
-        return res
-
-    async def close_position_partially(self, position_id, volume, options=None):
-        res = await super().close_position_partially(position_id, volume, options)
-        self._fill(volume, "market")
+        res = await super().close_position(position_id, volume, client_id=client_id)
+        if pos is not None:
+            self._fill(pos["volume"] if volume is None else volume, "market")
         return res
 
 
@@ -345,7 +340,7 @@ def test_other_trade_errors_are_not_swallowed():
         for _ in range(3):
             router.on_bar_closed(SYM, BarInfo(2001.0, 2000.0, 0.5))
         rpc.effects.append(trade_error(10019))  # NO_MONEY на закрытии по тайм-ауту - не рыночная пауза и не неизвестный исход
-        with pytest.raises(MetaApiTradeError):
+        with pytest.raises(CTraderTradeError):
             await router.poll_mt5()
     asyncio.run(body())
 

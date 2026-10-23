@@ -3,7 +3,8 @@
 Бот пишет в снапшот сделки линии (уровень / наклонная линия / поджатие), маркеры (2-я опора, пробой) и в `meta` - ЧИСЛО касаний и ЦЕНЫ точек поджатия, но не время
 и цену каждого касания. Недостающие точки клиент восстанавливает по свечам снапшота ТЕМ ЖЕ правилом, что детекторы (strategies/chr_common.py, chr_horizontal.py,
 chr_trendline.py): пивот (D2, окно k = 3) подтверждён на баре i + k, поэтому для сигнальной свечи j берутся пивоты с i <= j - 1 - k; касание уровня - экстремум пивота
-не дальше touch_atr * ATR[j-1] от уровня; касание наклонной линии - то же относительно значения линии в момент пивота; поджатие - три последних пивота противоположного вида.
+не дальше touch_atr * ATR[j-1] от уровня; касание наклонной линии - то же относительно значения линии в момент пивота; поджатие (с 2026-10-23) - локальная база в comp_bars барах перед пробоем:
+экстремумы low (лонг) / high (шорт) старой и свежей половины окна (strategies/chr_common.compression).
 Сверка с ботом: число касаний и цены точек поджатия сравниваются с `meta`; результат («совпало» / «не совпало») показывается в панели, а не скрывается.
 Пороги - константы CHR_H_* / CHR_T_* стратегий; здесь продублированы значениями по умолчанию (если вы меняете калибровку бота - обновите и их).
 
@@ -16,7 +17,7 @@ TOUCH_ATR = 0.25
 HORIZONTAL_WINDOW = 30
 TRENDLINE_WINDOW = 60
 TOUCH_DEPTH = 4  # пивотов цепочки, проверяемых на касание наклонной линии (CHR_T_TOUCH_DEPTH)
-SQUEEZE_POINTS = 3
+COMP_BARS = 8  # окно локальной компрессии (CHR_*_COMP_BARS, 5-10 баров)
 STRATEGIES = ("Horizontal_Breakout_CHR", "Trendline_Breakout_CHR")
 
 AMBER, VIOLET, BLUE, GREY = "#ffb300", "#b07cf0", "#4aa3ff", "#8b93a3"
@@ -111,17 +112,23 @@ def build_overlay(snap: dict[str, Any]) -> dict[str, Any] | None:
     for n, i in enumerate(touch_idx, start=1):
         items.append({"kind": "point", "t": times[i], "p": candles[i][level_kind], "color": AMBER, "label": f"Касание {n}", "r": 5})
 
-    # ---- поджатие: три последних пивота противоположного вида (higher lows у лонга / lower highs у шорта)
-    sq_idx = [i for i in pivots(candles, sq_kind) if i <= last_pivot_index][-SQUEEZE_POINTS:]
+    # ---- поджатие: локальная база comp_bars баров перед пробоем; точки - самые низкие low (лонг) / высокие high (шорт) старой и свежей половины окна
+    w = int(meta.get("comp_bars") or COMP_BARS)
+    h = w // 2
+    sq_idx: list[int] = []
+    if j - w >= 0:
+        pick = (min if long else max)
+        sq_idx = [pick(range(j - w, j - w + h), key=lambda i: candles[i][sq_kind]), pick(range(j - h, j), key=lambda i: candles[i][sq_kind])]
+        items.append({"kind": "zone", "t1": times[j - w], "t2": times[j - 1], "p1": max(c["high"] for c in candles[j - w:j]), "p2": min(c["low"] for c in candles[j - w:j]),
+                      "color": VIOLET, "fill": "rgba(176,124,240,0.10)", "label": "База"})
     sq_prices = [candles[i][sq_kind] for i in sq_idx]
     for n, i in enumerate(sq_idx, start=1):
         items.append({"kind": "point", "t": times[i], "p": candles[i][sq_kind], "color": VIOLET, "label": f"Поджатие {n}", "r": 5})
     for a, b in zip(sq_idx, sq_idx[1:]):
         items.append({"kind": "line", "t1": times[a], "p1": candles[a][sq_kind], "t2": times[b], "p2": candles[b][sq_kind], "color": VIOLET, "width": 2, "dash": [], "label": ""})
-    squeeze_geo = _find(geometry, "line", "поджатие")
-    if squeeze_geo and len(sq_idx) >= 2:  # продолжение линии поджатия до пробойной свечи: куда шла структура
-        items.append({"kind": "line", "t1": times[sq_idx[-1]], "p1": candles[sq_idx[-1]][sq_kind], "t2": t_break, "p2": candles[sq_idx[-1]][sq_kind], "color": VIOLET,
-                      "width": 1, "dash": [3, 4], "label": "Стоп за последней точкой"})
+    if meta.get("sl_extreme") is not None:
+        ext = float(meta["sl_extreme"])
+        items.append({"kind": "line", "t1": times[max(0, j - 8)], "p1": ext, "t2": t_break, "p2": ext, "color": VIOLET, "width": 1, "dash": [3, 4], "label": "Локальный свинг (стоп - 0.2 ATR)"})
 
     items.append({"kind": "point", "t": t_break, "p": candles[j]["close"], "color": BLUE, "label": "Пробой", "r": 7})
 
@@ -135,8 +142,10 @@ def build_overlay(snap: dict[str, Any]) -> dict[str, Any] | None:
     side_word = "лонг (пробой вверх)" if long else "шорт (пробой вниз)"
     notes.append(f"Бот увидел: {what}; {side_word}.")
     notes.append(f"Касаний: {len(touch_idx)}" + (f" (бот записал {want_touches})" if want_touches is not None else "") + f"; допуск касания {tol:.6g} (= {TOUCH_ATR} ATR).")
-    kind_word = "повышающиеся минимумы (higher lows)" if long else "понижающиеся максимумы (lower highs)"
-    notes.append(f"Поджатие: {len(sq_idx)} {kind_word}: " + ", ".join(f"{p:.6g}" for p in sq_prices) + ".")
+    kind_word = "минимумы подтягиваются к уровню" if long else "максимумы опускаются к уровню"
+    notes.append(f"Поджатие (база {w} баров перед пробоем): волатильность затухает, {kind_word}; опорные точки: " + ", ".join(f"{p:.6g}" for p in sq_prices) + ".")
+    if meta.get("sl_extreme") is not None:
+        notes.append(f"Стоп за ближайшим локальным свингом {float(meta['sl_extreme']):.6g} (последние 3-8 баров), отступ 0.2 ATR.")
     if bias:
         notes.append(f"Тренд H4: {bias} (жёсткий фильтр CHR).")
     if meta.get("body_frac") is not None:

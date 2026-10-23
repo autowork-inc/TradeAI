@@ -224,6 +224,48 @@ def test_restart_marks_dangling_trades_aborted():
 
 
 @needs_db
+def test_restart_restores_shadow_trades_through_the_database():
+    """2026-10-23: рестарт НЕ убивает теневые сделки. Открытая позиция и ждущая лимитка приходят из БД в `restorable` и продолжаются в новом трекере;
+    рыночная заявка и сделка без снапшота - aborted. Закрытия, остаток и MFE/MAE читаются обратно из trade_closes/trades."""
+    from orchestrator.tracker import ScaleOutPlan
+
+    plan2 = ScaleOutPlan(((1.0, 0.5), (4.0, 0.5)))
+
+    async def body():
+        db = await fresh_db()
+        rec = PgRecorder(db)
+        await rec.start()
+        tracker = VirtualTracker(MemoryEventLog(), equity=10_000.0, recorder=rec, plans={"smc": plan2})
+        sigs = [mk(bar=1), mk(symbol="ETHUSDT", bar=1), mk(symbol="SOLUSDT", bar=1), mk(symbol="XRPUSDT", bar=1)]
+        for sg in sigs:
+            tracker.submit(sg, 1000)
+        tracker.on_tick(tick(100.5, 10))  # BTC открыта
+        tracker.on_tick(tick(94.9, 11))  # BTC +1R: частичное закрытие 50%
+        for sg in sigs[:3]:  # снапшот есть у BTC, ETH и SOL; у XRP - нет
+            rec.snapshot({"trade_id": sg.signal_id, "strategy_id": "smc", "created_at": 1000, "candles": [], "geometry": [],
+                          "meta": {"entry": sg.entry, "sl": sg.sl, "tp": sg.tp, "inval": sg.inval, "interval": sg.interval}})
+        await rec.flush()
+        await rec.aclose()
+        db2 = await Database.connect(TEST_URL, attempts=2, delay_s=0.1)
+        rec2 = PgRecorder(db2, restore_open=True)
+        aborted = await rec2.start()
+        items = rec2.restorable
+        t2 = VirtualTracker(MemoryEventLog(), equity=10_000.0, recorder=rec2, plans={"smc": plan2})
+        restored, skipped = t2.restore(items, 3 * IV)
+        await rec2.flush()
+        rows = {r["id"]: (r["status"], r["exit_reason"], r["gap_affected"]) for r in await db2.fetch("SELECT id, status, exit_reason, gap_affected FROM trades")}
+        await rec2.aclose()
+        return aborted, items, restored, skipped, rows, sigs
+
+    aborted, items, restored, skipped, rows, sigs = run(body())
+    assert aborted == [sigs[3].signal_id] and skipped == []
+    assert {t.trade_id for t in restored} == {sigs[0].signal_id, sigs[1].signal_id, sigs[2].signal_id}
+    btc = next(t for t in restored if t.signal.symbol == "BTCUSDT")
+    assert btc.status == "open" and btc.levels_done == 1 and abs(btc.remaining - 0.5) < 1e-9 and len(btc.legs) == 1 and btc.gap_affected
+    assert rows[sigs[0].signal_id] == ("open", None, True) and rows[sigs[1].signal_id][0] == "pending_limit" and rows[sigs[3].signal_id][:2] == ("aborted", "process_restart")
+
+
+@needs_db
 def test_restart_after_pool_change_aborts_old_coins_and_does_not_crash_on_new_ones():
     """2026-10-11: пул Shadow заменён (BTC/ETH/DOGE -> SOL/XRP/...). Висящие сделки старых монет -> aborted, новые монеты пишутся как обычно."""
     async def body():

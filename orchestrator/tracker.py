@@ -31,8 +31,9 @@
 процесс падает и перезапускается (R1). Подавления исключений здесь нет.
 """
 
+import logging
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -40,9 +41,11 @@ import config
 from features import defaults as D
 from orchestrator.journal import EventLog
 from orchestrator.risk import RiskSizer, Sizing, SizingRejected
-from orchestrator.types import BarInfo, Event, Kind, Signal, Tick
-from persistence.recorder import NullRecorder, TradeRecorder
+from orchestrator.types import BarInfo, Direction, Event, Kind, Signal, Tick
+from persistence.recorder import DbShadowTrade, NullRecorder, TradeRecorder
 from utils.errors import ConfigError, TradingInfraError
+
+log = logging.getLogger("orchestrator.tracker")
 
 PENDING_LIMIT, PENDING_MARKET, OPEN, CLOSED, CANCELLED = "pending_limit", "pending_market", "open", "closed", "cancelled"
 ACTIVE = (PENDING_LIMIT, PENDING_MARKET, OPEN)
@@ -282,6 +285,79 @@ class VirtualTracker:
                                                        "tp": signal.tp, "geometry": list(signal.geometry), "meta": signal.meta,
                                                        "plan": plan.describe()})
         return Submission(True)
+
+    # ------------------------------------------------------------------------------- восстановление после рестарта
+
+    def restore(self, items: Sequence[DbShadowTrade], now_ms: int) -> tuple[list[VirtualTrade], list[str]]:
+        """Продолжает теневые сделки прошлого запуска (2026-10-23): ждущие лимитки и открытые позиции поднимаются из БД с прежними ценой входа, SL, уровнем тейка,
+        долей остатка, записанными закрытиями и MFE/MAE. Тики за время простоя не видны, поэтому КАЖДАЯ восстановленная сделка получает gap_affected=True:
+        она доводится до конца (график, статус), но в статистику не входит. Ближайший тик проверит стоп/уровни/заполнение по текущей цене - так же, как сработал бы
+        стоп на бирже. Счётчик свечей считается по времени (свечи простоя не приходили). Нечитаемая запись (нет входа/таймфрейма в снапшоте, нет риска) не роняет
+        старт: она помечается aborted/process_restart и возвращается во втором списке. -> (восстановленные, id пропущенных).
+        Вызывать до первого тика и ДО поиска новых сигналов; блокировку монеты вернуть через `Orchestrator.adopt_held`."""
+        restored: list[VirtualTrade] = []
+        skipped: list[str] = []
+        for item in items:
+            trade = self._rebuild(item, now_ms)
+            if trade is None:
+                skipped.append(item.row["id"])
+                self._rec.trade({**item.row, "status": "aborted", "exit_reason": "process_restart"})
+                continue
+            if self._active[trade.signal.symbol].get(trade.signal.strategy) is not None:
+                raise TrackerError(f"{trade.trade_id}: ключ {trade.signal.position_key} уже занят при восстановлении (в БД не может быть двух активных сделок по ключу)")
+            self._ids.add(trade.trade_id)
+            self.trades.append(trade)
+            self._active[trade.signal.symbol][trade.signal.strategy] = trade
+            self._persist(trade)
+            self._emit(now_ms, "trade_restored", trade, {"status": trade.status, "remaining": trade.remaining, "legs": len(trade.legs), "bars_closed": trade.bars_closed})
+            restored.append(trade)
+        return restored, skipped
+
+    def _rebuild(self, item: DbShadowTrade, now_ms: int) -> VirtualTrade | None:
+        row, meta = item.row, item.meta
+        interval = meta.get("interval")
+        ivl_ms = config.INTERVAL_MS.get(interval) if isinstance(interval, str) else None
+        if ivl_ms is None or meta.get("entry") is None or row["signal_time"] is None or (row["status"] == OPEN and not (row["risk"] or 0) > 0):
+            log.warning("Теневая сделка %s не восстановлена: в снапшоте нет таймфрейма/входа или у позиции нет риска", row["id"])
+            return None
+        direction, kind = Direction(row["side"]), Kind(row["kind"])
+        bar_close_ms = int(row["signal_time"])
+        extra = {k: v for k, v in meta.items() if k not in ("entry", "sl", "tp", "inval", "interval")}
+        signal = Signal(signal_id=row["id"], strategy=row["strategy_id"], symbol=row["coin"], interval=interval, direction=direction, kind=kind,
+                        bar_open_time=bar_close_ms - ivl_ms, bar_close_ms=bar_close_ms, entry=float(meta["entry"]), sl=float(row["sl"]),
+                        tp=None if meta.get("tp") is None else float(meta["tp"]), inval=None if meta.get("inval") is None else float(meta["inval"]),
+                        geometry=tuple(item.geometry), meta=extra)
+        sgn = direction.sgn
+        plan_rec = row.get("plan") or {}
+        plan = ScaleOutPlan.from_record(plan_rec["levels"], plan_rec.get("tp_anchor", "fill")) if plan_rec.get("levels") else self.plan_for(signal.strategy)
+        t = VirtualTrade(signal, sgn, self._equity, row["status"], bar_close_ms, plan)
+        t.sl_m = sgn * signal.sl
+        t.stop_m = sgn * float(row["stop_price"]) if row["stop_price"] is not None else t.sl_m
+        t.gap_affected = True
+        t.bars_closed = max(0, (now_ms - bar_close_ms) // ivl_ms)
+        ref = float(row["entry_price"] if row["entry_price"] is not None else signal.entry)
+        if row["qty"] is not None and row["risk_amount"] is not None:
+            t.sizing = Sizing(float(row["qty"]), float(row["qty"]) * ref, float(row["qty"]) * ref / self._equity, float(row["risk_amount"]))
+        if kind is Kind.LIMIT:
+            t.tp_m, t.inval_m = sgn * signal.tp, sgn * signal.inval
+        if row["status"] == PENDING_LIMIT:
+            if t.sizing is None:
+                return None
+            t.entry_m, t.risk = sgn * signal.entry, abs(signal.sl - signal.entry)
+            return t
+        if row["status"] != OPEN or row["entry_price"] is None or row["entry_time"] is None or t.sizing is None:
+            return None
+        t.fill_price, t.fill_ts, t.entry_m, t.risk = float(row["entry_price"]), int(row["entry_time"]), sgn * float(row["entry_price"]), float(row["risk"])
+        t.fill_bar_no = max(0, (t.fill_ts - bar_close_ms) // ivl_ms) + 1
+        t.mfe_r, t.mae_r = float(row["mfe_r"] or 0.0), float(row["mae_r"] or 0.0)
+        t.be_armed = bool(row["be_armed"])
+        t.legs = [Leg(int(c["seq"]), int(c["ts"]), c["reason"], float(c["frac"]), float(c["price"]), float(c["gross_r"]), float(c["fees_r"])) for c in item.closes]
+        t.levels_done = sum(1 for g in t.legs if g.reason == "tp" or g.reason.startswith("scale_"))
+        t.remaining = float(row["remaining_frac"]) if row["remaining_frac"] is not None else max(0.0, 1.0 - sum(g.frac for g in t.legs))
+        if not t.remaining > _EPS:
+            return None  # позиция без остатка не может быть «открытой»: запись противоречива
+        t.tp_m = t.level_q(plan.last_r)
+        return t
 
     # --------------------------------------------------------------------------------------------- тики
 

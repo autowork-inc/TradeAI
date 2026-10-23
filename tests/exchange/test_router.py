@@ -1,6 +1,6 @@
 """ExecutionRouter: маршрут по символу, MT5-вход (лоты, имя брокера, стоп в запросе), закрытый рынок как обычный отказ, сопровождение и сверка.
 
-Клиент MT5 - настоящий `MetaApiLiveClient` поверх имитации RPC с состоянием (`fake_mt5.py`); сети нет."""
+Клиент MT5 - настоящий `CTraderConnector` поверх имитации RPC с состоянием (`fake_mt5.py`); сети нет."""
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -9,7 +9,7 @@ import pytest
 
 import config
 from exchange.binance_live import BinanceLiveClient
-from exchange.mt5_metaapi import MarketClosedError, MetaApiTradeError
+from exchange.ctrader import Quote, MarketClosedError, CTraderTradeError
 from exchange.router import ExecutionRouter, Mt5UnprotectedPosition, RouteRejected, Venue, build_router
 from orchestrator.types import Direction, Kind
 from tests.exchange.fake_mt5 import FULL, FakeMt5Rpc, make_client, make_mapper, trade_error
@@ -91,7 +91,7 @@ def test_market_long_converts_symbol_sizes_lots_and_sends_stop_in_the_same_reque
     # SL 20 пипсов = 0.0020, потеря на лот 200 USD, риск 1% от 100 000 = 1000 -> 5.00 лота
     (name, symbol, volume, sl, tp, options) = rpc.trades[-1]
     assert (name, symbol, volume, sl, tp) == ("market_buy", "EURUSD", 5.0, 1.0981, 1.1081)  # брокерский TP - единственный тейк, 4R от входа
-    assert options["clientId"] == t.client_id and options["fillingModes"] == ["ORDER_FILLING_FOK"]
+    assert options["clientId"] == t.client_id
     assert t.plan.risk_amount == pytest.approx(1000.0) and t.status == "open" and t.position_id and router.tracked_mt5["EURUSD"] is t
 
 
@@ -148,9 +148,9 @@ def test_bad_stop_and_price_deviation_and_missing_tick_value():
     router2, client2, _ = make_router(rpc2)
 
     async def no_tick(symbol):
-        return {"symbol": symbol, "bid": 1.1, "ask": 1.1001}
+        return Quote(symbol, 1.1, 1.1001, None)  # котировка есть, курса конвертации валюты (стоимости тика) нет
 
-    rpc2.get_symbol_price = no_tick
+    rpc2.get_price = no_tick
     assert run(router2.open_mt5(eur_long(), NOW)).reason == "tick_value_unavailable" and rpc2.trades == []
 
 
@@ -188,26 +188,10 @@ def test_broker_answer_10018_is_market_closed_not_a_crash():
     router, client, rpc = make_router()
     rpc.effects = [trade_error(10018)]
     rej = run(router.open_mt5(eur_long(), NOW))
-    assert isinstance(rej, RouteRejected) and rej.reason == "market_closed" and rej.detail["code"] == 10018
+    assert isinstance(rej, RouteRejected) and rej.reason == "market_closed" and rej.detail["code"] == "MARKET_CLOSED"
     assert router.tracked_mt5 == {} and rpc.positions == []
     rpc.effects = [trade_error(10018)]  # то же для лимитки
     assert run(router.open_mt5(eur_long(kind=Kind.LIMIT), NOW)).reason == "market_closed"
-
-
-def test_client_raises_market_closed_error_type_for_10018_and_non_full_mode():
-    client, rpc = make_client()
-    run(client.get_symbol_specification("EURUSD"))
-    rpc.effects = [trade_error(10018)]
-    with pytest.raises(MarketClosedError) as ei:
-        run(client.market_order("EURUSD", "BUY", 0.1))
-    assert isinstance(ei.value, MetaApiTradeError) and ei.value.retryable and ei.value.numeric_code == 10018
-    client._specs["EURUSD"]["tradeMode"] = "SYMBOL_TRADE_MODE_CLOSEONLY"
-    with pytest.raises(MarketClosedError, match="CLOSEONLY"):
-        run(client.limit_order("EURUSD", "BUY", 0.1, 1.09))
-    assert len(rpc.trades) == 1  # лимитка до отправки не дошла
-    # закрытие и модификация по CLOSEONLY разрешены: режим касается только новых входов
-    rpc.positions.append({"id": "9", "type": "POSITION_TYPE_BUY", "symbol": "EURUSD", "volume": 0.1, "openPrice": 1.1, "stopLoss": 1.09, "takeProfit": 0})
-    run(client.close_position("9"))
 
 
 # ---------------------------------------------------------------------------------------------- прочие отказы брокера
@@ -217,11 +201,11 @@ def test_other_broker_refusals_are_rejections_and_unknown_outcome_is_raised():
     router, client, rpc = make_router()
     rpc.effects = [trade_error(10019)]  # нет денег
     rej = run(router.open_mt5(eur_long(), NOW))
-    assert rej.reason == "broker_rejected" and rej.detail["code"] == 10019 and rej.detail["retryable"] is False
+    assert rej.reason == "broker_rejected" and rej.detail["code"] == "NOT_ENOUGH_MONEY" and rej.detail["retryable"] is False
     rpc.effects = [trade_error(10016)]
-    assert run(router.open_mt5(eur_long(), NOW)).detail["name"] == "TRADE_RETCODE_INVALID_STOPS"
+    assert run(router.open_mt5(eur_long(), NOW)).detail["name"] == "TRADING_BAD_STOPS"
     rpc.effects = [trade_error(10012)]  # таймаут: ордер мог дойти до брокера
-    with pytest.raises(MetaApiTradeError) as ei:
+    with pytest.raises(CTraderTradeError) as ei:
         run(router.open_mt5(eur_long(), NOW))
     assert ei.value.outcome_unknown and router.tracked_mt5 == {}
 
@@ -278,29 +262,6 @@ def test_recover_position_without_stop_is_an_emergency():
 
 
 # ---------------------------------------------------------------------------------------------- суточный результат и валюта счёта
-
-
-def test_mt5_realized_pnl_counts_trading_money_but_not_deposits():
-    client, rpc = make_client()
-    start = datetime(2026, 10, 13, tzinfo=timezone.utc)
-    start_ms = int(start.timestamp() * 1000)
-    rpc.add_deal(-30.0, commission=-2.0, swap=-1.0, when=start + timedelta(hours=3))
-    rpc.add_deal(10.0, kind="DEAL_TYPE_BUY", when=start + timedelta(hours=5))
-    rpc.add_deal(100_000.0, kind="DEAL_TYPE_BALANCE", when=start + timedelta(hours=1))  # пополнение - не прибыль
-    rpc.add_deal(-500.0, when=start - timedelta(minutes=1))  # вчера
-    rpc.add_deal(-7.0, kind="DEAL_TYPE_COMMISSION_DAILY", when=start + timedelta(hours=9))
-    assert run(client.realized_pnl_since(start_ms)) == pytest.approx(-30 - 2 - 1 + 10 - 7)
-    rpc.synchronizing = True  # история не досинхронизирована: неполную сумму принимать нельзя
-    with pytest.raises(Exception, match="синхронизируется"):
-        run(client.realized_pnl_since(start_ms))
-
-
-def test_mt5_realized_pnl_paginates():
-    client, rpc = make_client()
-    start = datetime(2026, 10, 13, tzinfo=timezone.utc)
-    for i in range(2500):
-        rpc.add_deal(-0.01, when=start + timedelta(seconds=i))
-    assert run(client.realized_pnl_since(int(start.timestamp() * 1000))) == pytest.approx(-25.0)
 
 
 def test_router_pnl_per_venue_and_account_currency_check():

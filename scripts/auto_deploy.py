@@ -2,10 +2,10 @@
 
 Параметры: аргументы CLI > окружение (VPS_HOST, VPS_PORT, VPS_USER, VPS_PASSWORD, VPS_SSH_KEY_PATH) > ввод в консоли.
 Лучше ключ (`--key`) или `VPS_PASSWORD`: пароль в `--password` виден в истории оболочки.
-Ключи MetaApi (Forex/металлы в Shadow): `--metaapi-token` / `--metaapi-account` или окружение METAAPI_TOKEN / METAAPI_ACCOUNT_ID (окружение
-безопаснее: аргументы видны в истории оболочки). Значения вписываются в `~/trading/.env.shadow` (chmod 600) через временный файл по SFTP:
+Ключи cTrader (Forex/металлы в Shadow): `--ctrader-client-id/-secret/-account/-token/-refresh` или окружение CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET /
+CTRADER_ACCOUNT_ID / CTRADER_ACCESS_TOKEN / CTRADER_REFRESH_TOKEN (окружение безопаснее: аргументы видны в истории оболочки). Значения вписываются в `~/trading/.env.shadow` (chmod 600) через временный файл по SFTP:
 в командах SSH, в выводе и логах их нет, в архив и в Git они не попадают. Не заданы - `.env.shadow` на сервере не меняется (уже вписанные
-ключи остаются); заглушки не пишутся: shadow-run с фиктивным токеном упал бы при подключении к MetaApi (R1).
+ключи остаются); заглушки не пишутся: shadow-run с фиктивным токеном упал бы при подключении к cTrader (R1).
 
 Шаг 0 (2026-10-20): сборка и публикация клиента - `powershell.exe -ExecutionPolicy Bypass -File ./client/build_exe.ps1 -Publish` (.exe собирается,
 .exe и version.json уходят на VPS в ./data/updates). Любой ненулевой код возврата сборки немедленно прерывает деплой ДО подключения к серверу;
@@ -54,8 +54,8 @@ LIVE_REQUIRED_SERVICES = ("postgres", "shadow-live", "api", "analyzer", "web", "
 INCOMING = "trading_incoming"  # каталог на сервере для присланных архивов (его же читает cron: deploy/apply.sh --pending)
 EX_DEFERRED = 75  # deploy/apply.sh: обновление отложено до закрытия боевых позиций
 ENV_FILE = ".env.shadow"
-METAAPI_TMP = ".metaapi.tmp"
-METAAPI_KEYS = ("METAAPI_TOKEN", "METAAPI_ACCOUNT_ID", "WEB_LOGIN", "WEB_PASSWORD")  # значения, которые auto_deploy вписывает в .env.shadow
+CTRADER_TMP = ".ctrader.tmp"
+CTRADER_KEYS = ("CTRADER_CLIENT_ID", "CTRADER_CLIENT_SECRET", "CTRADER_ACCOUNT_ID", "CTRADER_ACCESS_TOKEN", "CTRADER_REFRESH_TOKEN", "WEB_LOGIN", "WEB_PASSWORD")  # значения, которые auto_deploy вписывает в .env.shadow
 
 # Признаки блокировки IP биржей (HTTP 451 — гео/юрисдикция, 429/418 — лимиты и бан IP, отказ рукопожатия WebSocket).
 BLOCK_PATTERNS = (
@@ -114,17 +114,23 @@ def parse_health(ps_output: str) -> dict[str, str]:
     return {p[0]: p[2] for p in (line.split() for line in ps_output.splitlines()) if len(p) >= 3}
 
 
-def validate_metaapi(token: str | None, account: str | None) -> dict[str, str]:
-    """Проверка ключей MetaApi до любых действий. Возвращает {имя: значение} только для заданных; значения в сообщения об ошибках не попадают."""
-    if bool(token) != bool(account):
-        fail("MetaApi: токен и id счёта задаются вместе (--metaapi-token и --metaapi-account)")
-    if not token:
+def validate_ctrader(client_id: str | None, client_secret: str | None, account: str | None, token: str | None, refresh: str | None = None) -> dict[str, str]:
+    """Проверка ключей cTrader до любых действий. Обязательная четвёрка (client id, secret, account, token) задаётся вся или не задаётся; refresh token - по желанию.
+    Возвращает {имя: значение} только для заданных; значения в сообщения об ошибках не попадают."""
+    core = (client_id, client_secret, account, token)
+    if any(core) and not all(core):
+        fail("cTrader: client id, client secret, id счёта и access token задаются вместе (--ctrader-client-id, --ctrader-client-secret, --ctrader-account, --ctrader-token)")
+    if not any(core):
         return {}
-    if not re.fullmatch(r"[!-~]+", token) or "'" in token or '"' in token or "\\" in token:
-        fail("--metaapi-token: только печатные ASCII-символы без пробелов, кавычек и обратной косой черты")
-    if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", account):
-        fail("--metaapi-account: ожидается id счёта MetaApi (латиница, цифры, дефис)")
-    return {"METAAPI_TOKEN": token, "METAAPI_ACCOUNT_ID": account}
+    for flag, value in (("--ctrader-client-id", client_id), ("--ctrader-client-secret", client_secret), ("--ctrader-token", token), ("--ctrader-refresh", refresh)):
+        if value and (not re.fullmatch(r"[!-~]+", value) or "'" in value or '"' in value or "\\" in value):
+            fail(f"{flag}: только печатные ASCII-символы без пробелов, кавычек и обратной косой черты")
+    if not re.fullmatch(r"[0-9]{1,12}", account):
+        fail("--ctrader-account: ожидается числовой ctidTraderAccountId")
+    out = {"CTRADER_CLIENT_ID": client_id, "CTRADER_CLIENT_SECRET": client_secret, "CTRADER_ACCOUNT_ID": account, "CTRADER_ACCESS_TOKEN": token}
+    if refresh:
+        out["CTRADER_REFRESH_TOKEN"] = refresh
+    return out
 
 
 def validate_web(login: str | None, password: str | None) -> dict[str, str]:
@@ -139,22 +145,22 @@ def validate_web(login: str | None, password: str | None) -> dict[str, str]:
 
 
 def merge_env_command(d: str) -> str:
-    """Команда на сервере: строки METAAPI_* из временного файла заменяют/дописывают одноимённые в .env.shadow. Секретов в тексте команды нет."""
+    """Команда на сервере: строки CTRADER_*/WEB_* из временного файла заменяют/дописывают одноимённые в .env.shadow. Секретов в тексте команды нет."""
     return (f"cd {d} && umask 077 && touch {ENV_FILE} && {{ [ -z \"$(tail -c1 {ENV_FILE})\" ] || echo >> {ENV_FILE}; }} && "
-            f"for k in {' '.join(METAAPI_KEYS)}; do if grep -q \"^$k=\" {METAAPI_TMP}; then sed -i \"/^$k=/d\" {ENV_FILE}; "
-            f"grep \"^$k=\" {METAAPI_TMP} >> {ENV_FILE}; fi; done; rc=$?; rm -f {METAAPI_TMP}; chmod 600 {ENV_FILE}; exit $rc")
+            f"for k in {' '.join(CTRADER_KEYS)}; do if grep -q \"^$k=\" {CTRADER_TMP}; then sed -i \"/^$k=/d\" {ENV_FILE}; "
+            f"grep \"^$k=\" {CTRADER_TMP} >> {ENV_FILE}; fi; done; rc=$?; rm -f {CTRADER_TMP}; chmod 600 {ENV_FILE}; exit $rc")
 
 
-def push_metaapi(cli: paramiko.SSHClient, remote_dir: str, values: dict[str, str]) -> None:
+def push_ctrader(cli: paramiko.SSHClient, remote_dir: str, values: dict[str, str]) -> None:
     sftp = cli.open_sftp()
-    tmp = f"{remote_dir}/{METAAPI_TMP}"
+    tmp = f"{remote_dir}/{CTRADER_TMP}"
     try:
         with sftp.open(tmp, "w") as f:
             sftp.chmod(tmp, 0o600)  # права до записи секрета
             f.write("".join(f"{k}={v}\n" for k, v in values.items()))
     finally:
         sftp.close()
-    run(cli, merge_env_command(f"~/{remote_dir}"), "запись ключей MetaApi в .env.shadow")  # временный файл удаляется самой командой
+    run(cli, merge_env_command(f"~/{remote_dir}"), "запись ключей cTrader в .env.shadow")  # временный файл удаляется самой командой
 
 
 def get_params(argv: list[str] | None = None) -> argparse.Namespace:
@@ -164,8 +170,11 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--user", default=os.environ.get("VPS_USER", "root"))
     ap.add_argument("--password", default=os.environ.get("VPS_PASSWORD"), help="лучше VPS_PASSWORD или --key")
     ap.add_argument("--key", default=os.environ.get("VPS_SSH_KEY_PATH"), help="путь к приватному SSH-ключу")
-    ap.add_argument("--metaapi-token", default=os.environ.get("METAAPI_TOKEN"), help="токен MetaApi (лучше окружение METAAPI_TOKEN); в логи не выводится")
-    ap.add_argument("--metaapi-account", default=os.environ.get("METAAPI_ACCOUNT_ID"), help="id счёта MetaApi (или METAAPI_ACCOUNT_ID)")
+    ap.add_argument("--ctrader-client-id", default=os.environ.get("CTRADER_CLIENT_ID"), help="Client ID приложения cTrader (или CTRADER_CLIENT_ID)")
+    ap.add_argument("--ctrader-client-secret", default=os.environ.get("CTRADER_CLIENT_SECRET"), help="Client Secret (лучше окружение CTRADER_CLIENT_SECRET); в логи не выводится")
+    ap.add_argument("--ctrader-account", default=os.environ.get("CTRADER_ACCOUNT_ID"), help="ctidTraderAccountId счёта (или CTRADER_ACCOUNT_ID)")
+    ap.add_argument("--ctrader-token", default=os.environ.get("CTRADER_ACCESS_TOKEN"), help="Access Token (лучше окружение CTRADER_ACCESS_TOKEN); в логи не выводится")
+    ap.add_argument("--ctrader-refresh", default=os.environ.get("CTRADER_REFRESH_TOKEN"), help="Refresh Token для автообновления access token (необязательно)")
     ap.add_argument("--web-login", default=os.environ.get("WEB_LOGIN"), help="логин входа в веб-версию (или WEB_LOGIN)")
     ap.add_argument("--web-password", default=os.environ.get("WEB_PASSWORD"), help="пароль входа в веб-версию (лучше окружение WEB_PASSWORD); в логи не выводится")
     ap.add_argument("--remote-dir", default="trading", help="каталог на сервере относительно домашнего (по умолчанию trading)")
@@ -179,7 +188,7 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
         fail("хост не задан")
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", a.remote_dir) or a.remote_dir.startswith("/") or ".." in a.remote_dir:
         fail("--remote-dir: только относительный путь из латиницы, цифр и ._/-")
-    a.metaapi = {**validate_metaapi(a.metaapi_token, a.metaapi_account), **validate_web(a.web_login, a.web_password)}
+    a.ctrader = {**validate_ctrader(a.ctrader_client_id, a.ctrader_client_secret, a.ctrader_account, a.ctrader_token, a.ctrader_refresh), **validate_web(a.web_login, a.web_password)}
     if not a.key and not a.password:
         a.password = getpass.getpass(f"Пароль {a.user}@{a.host}: ")
     return a
@@ -289,11 +298,11 @@ def main(argv: list[str] | None = None) -> int:
         step(5, "Права на секреты")
         run(cli, f"cd {d} && for f in .env .env.shadow; do if [ -f $f ]; then chmod 600 $f; fi; done", "chmod 600")
         ok(".env / .env.shadow (если есть) — 600")
-        if a.metaapi:
-            push_metaapi(cli, a.remote_dir, a.metaapi)
-            ok(f"{' / '.join(a.metaapi)} записаны в .env.shadow (значения не выводятся)")
+        if a.ctrader:
+            push_ctrader(cli, a.remote_dir, a.ctrader)
+            ok(f"{' / '.join(a.ctrader)} записаны в .env.shadow (значения не выводятся)")
         else:
-            print(_c("33", "  Ключи MetaApi и вход в веб-версию не заданы, .env.shadow не менялся (уже записанные на сервере остаются)"))
+            print(_c("33", "  Ключи cTrader и вход в веб-версию не заданы, .env.shadow не менялся (уже записанные на сервере остаются)"))
 
         if incremental:
             step(6, "Остановка старых контейнеров не нужна: deploy/apply.sh сам перезапускает действующий контур")

@@ -2,7 +2,7 @@
 
 ```
  LiveExecutionEngine ──► ExecutionRouter ──┬─ BTCUSDT, ETHUSDT ───────► BinanceLiveClient   (движок исполняет сам, разд. 3.23 CLAUDE.md)
-   сигнал (Signal)                         ├─ EURUSD, XAUUSD, XAGUSD ─► MetaApiLiveClient    (ниже: имя брокера, лоты, ордер со стопом)
+   сигнал (Signal)                         ├─ EURUSD, XAUUSD, XAGUSD ─► CTraderConnector    (ниже: имя брокера, лоты, ордер со стопом)
                                            └─ любой другой символ ────► отказ `unsupported_symbol`
 ```
 
@@ -44,7 +44,7 @@ from typing import Any
 
 import config
 from exchange.binance_live import BinanceLiveClient
-from exchange.mt5_metaapi import MarketClosedError, MetaApiError, MetaApiLiveClient, MetaApiOrder, MetaApiTradeError
+from exchange.ctrader import MarketClosedError, CTraderError, CTraderConnector, CTraderOrder, CTraderTradeError
 from exchange import mt5_exit
 from exchange.mt5_exit import Mt5Exit
 from exchange.mt5_risk import Mt5OrderPlan, Mt5Rejected, Mt5RiskParams, size_position
@@ -140,8 +140,7 @@ class Mt5Event:
 
 
 def mt5_client_id(prefix: str, key: str) -> str:
-    """clientId для MetaApi: обязателен формат `<стратегия>_<позиция>_<ордер>` (иначе ValidationException «must match required pattern»),
-    вместе с комментарием не длиннее 30-31 символа. Префикс бота остаётся первой частью: `recover_mt5` отличает свои позиции по нему."""
+    """clientOrderId для cTrader: до 50 символов (ставится и в label позиции). Префикс бота остаётся первой частью: `recover_mt5` отличает свои позиции по нему."""
     return f"{prefix}_{hashlib.sha1(key.encode('utf-8')).hexdigest()[:14]}_E"
 
 
@@ -154,7 +153,7 @@ class ExecutionRouter:
         self,
         *,
         binance: BinanceLiveClient | None = None,
-        mt5: MetaApiLiveClient | None = None,
+        mt5: CTraderConnector | None = None,
         mapper: SymbolMapper | None = None,
         binance_symbols: Collection[str] = config.LIVE_BINANCE_SYMBOLS,
         mt5_symbols: Collection[str] = config.LIVE_MT5_SYMBOLS,
@@ -284,18 +283,18 @@ class ExecutionRouter:
             else:
                 order = await self.mt5.market_order(plan.broker_symbol, plan.side, plan.lots, plan.sl, plan.tp, client_id=prepared.client_id)
         except MarketClosedError as exc:
-            return RouteRejected("market_closed", {"why": str(exc), "code": exc.numeric_code})
-        except MetaApiTradeError as exc:
+            return RouteRejected("market_closed", {"why": str(exc), "code": exc.code})
+        except CTraderTradeError as exc:
             if exc.outcome_unknown:
                 raise  # ордер мог дойти до брокера: сверка по clientId - решение вызывающего (R1)
-            return RouteRejected("broker_rejected", {"code": exc.numeric_code, "name": exc.retcode_name, "broker_reason": exc.reason, "retryable": exc.retryable})
+            return RouteRejected("broker_rejected", {"code": exc.code, "name": exc.code, "broker_reason": exc.reason, "retryable": exc.retryable})
         return self._track(prepared, order)
 
     async def open_mt5(self, signal: Signal, now_ms: int) -> Mt5Tracked | RouteRejected:
         prepared = await self.prepare_mt5(signal, now_ms)
         return prepared if isinstance(prepared, RouteRejected) else await self.send_mt5(prepared)
 
-    def _track(self, p: Mt5Prepared, order: MetaApiOrder) -> Mt5Tracked:
+    def _track(self, p: Mt5Prepared, order: CTraderOrder) -> Mt5Tracked:
         market = p.kind is not Kind.LIMIT
         t = Mt5Tracked(p.signal.signal_id, p.signal.strategy, p.signal.symbol, p.plan.broker_symbol, p.plan.side, p.kind, p.client_id, p.plan.lots,
                        order.order_id, order.position_id if market else None, "open" if market else "pending", p.plan, exit_plan=p.exit_plan,
@@ -449,7 +448,7 @@ class ExecutionRouter:
             if p.stop_loss is None:
                 raise Mt5UnprotectedPosition(f"{p.symbol}: на счёте MT5 позиция {p.position_id} ({p.side} {p.lots}) без стопа - Safe Mode, разберите вручную")
             if symbol in self._tracked:
-                raise MetaApiError(f"{symbol}: на счёте MT5 две позиции по символу, а контур допускает одну")
+                raise CTraderError(f"{symbol}: на счёте MT5 две позиции по символу, а контур допускает одну")
             rec = by_cid.get(p.client_id or "")
             if rec is not None and rec.symbol == symbol:
                 rec.status, rec.position_id = "open", p.position_id
@@ -467,7 +466,7 @@ class ExecutionRouter:
             if symbol is None or not cid.startswith(self._prefix):
                 continue
             if symbol in self._tracked:
-                raise MetaApiError(f"{symbol}: на счёте MT5 позиция и наш отложенный ордер одновременно")
+                raise CTraderError(f"{symbol}: на счёте MT5 позиция и наш отложенный ордер одновременно")
             rec = by_cid.get(cid)
             if rec is not None and rec.symbol == symbol:
                 rec.status, rec.order_id = "pending", str(o.get("id"))
@@ -487,12 +486,12 @@ class ExecutionRouter:
 
 async def build_router(binance: BinanceLiveClient | None, *, with_mt5: bool, risk_params: Mt5RiskParams | None = None,
                        plans: Mapping[str, ScaleOutPlan] | None = None, state_path: Path | None = None) -> ExecutionRouter:
-    """Собирает маршрутизатор боевого контура. MT5 подключается только при `with_mt5` (ключи MetaApi из окружения, иначе `ConfigError`):
+    """Собирает маршрутизатор боевого контура. MT5 подключается только при `with_mt5` (ключи cTrader из окружения, иначе `ConfigError`):
     подключение к аккаунту, загрузка имён и спецификаций `LIVE_MT5_SYMBOLS` (`allow_disabled=True`: закрытый рынок при старте не роняет процесс),
     проверка валюты счёта."""
     if not with_mt5:
         return ExecutionRouter(binance=binance, risk_params=risk_params)
-    mt5 = MetaApiLiveClient()
+    mt5 = CTraderConnector()
     await mt5.connect()
     mapper = SymbolMapper(mt5, allow_disabled=True)
     await mapper.load(config.LIVE_MT5_SYMBOLS)

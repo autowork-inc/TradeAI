@@ -201,18 +201,19 @@ def test_registry_rejects_unknown_and_duplicate_names(monkeypatch):
 
 # ============================== сквозной прогон: пять настоящих детекторов на одном ряду свечей, окно 300 баров, тики на каждую свечу
 
+LOOSE_COMP = dict(comp_decay=9.0, comp_max_range_atr=9.0, comp_height_atr=50.0, comp_rub_atr=50.0, max_risk_atr=50.0)  # ослабленная компрессия: на случайном блуждании сигналы CHR иначе редки
 SOFT = {
     SMC_PRO_TREND: lambda: StrategySMC(SmcSetupParams(htf_filter=True, max_exposure=1e9), name=SMC_PRO_TREND),
     SMC_COUNTER_TREND: lambda: StrategyCounterTrend(CounterTrendParams(min_sweep_atr=0.05, volume_mult=0.5)),
     OBI_BREAKOUT: lambda: StrategyObiBreakout(ObiParams(impulse_atr_mult=0.3, obi_min=0.2, delta_min=0.2, delta_volume_mult=0.5)),
     ICT_KILLZONES: lambda: StrategyKillzones(KillzoneParams(min_asia_range_atr=0, min_sweep_depth_atr=0, min_wick_frac=0)),
-    VWAP_REVERSION: lambda: StrategyVwapReversion(VwapParams(sd_mult=1.5, min_day_bars=8, max_entry_to_ext_atr=99.0)),
+    VWAP_REVERSION: lambda: StrategyVwapReversion(VwapParams(**dict(max_band_dist_atr=99.0, max_band_dist_vwap_frac=99.0), sd_mult=1.5, min_day_bars=8, max_entry_to_ext_atr=99.0)),
     HORIZONTAL_BREAKOUT: lambda: StrategyHorizontalBreakout(HorizontalParams(volume_mult=0.5, min_clv=0.3, max_box_atr=8.0, min_touches=2,
                                                                              min_body_atr=0.1, max_risk_atr=6.0)),
     TRENDLINE_BREAKOUT: lambda: StrategyTrendlineBreakout(TrendlineParams(volume_mult=0.5, sweep_volume_mult=0.5, min_clv=0.3, min_body_atr=0.1,
                                                                           max_risk_atr=6.0)),
-    HORIZONTAL_BREAKOUT_CHR: lambda: StrategyHorizontalBreakoutChr(ChrHorizontalParams(squeeze_points=2)),
-    TRENDLINE_BREAKOUT_CHR: lambda: StrategyTrendlineBreakoutChr(ChrTrendlineParams(squeeze_points=2)),
+    HORIZONTAL_BREAKOUT_CHR: lambda: StrategyHorizontalBreakoutChr(ChrHorizontalParams(**LOOSE_COMP)),
+    TRENDLINE_BREAKOUT_CHR: lambda: StrategyTrendlineBreakoutChr(ChrTrendlineParams(**LOOSE_COMP)),
 }
 
 

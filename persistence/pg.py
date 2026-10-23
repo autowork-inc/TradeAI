@@ -8,8 +8,9 @@ Fail-Fast (R1). Ошибка записи (БД упала, строка не п
 ошибка, а не молчаливая потеря. Что НЕ защищено: записи, лежавшие в очереди в момент падения процесса (доли секунды при нормальной
 работе); JSONL-журнал остаётся вторым источником. Для боевого LIVE (R7) перед отправкой ордера нужен `await flush()`.
 
-Состояние Shadow в памяти при перезапуске не восстанавливается (О17), поэтому `start()` помечает «висящие» сделки прошлого
-запуска (заявка/позиция) как `aborted`/`process_restart` - в БД не остаётся вечно открытых виртуальных позиций.
+Теневые сделки при перезапуске продолжаются (2026-10-23, отмена О17): `PgRecorder(restore_open=True)` отдаёт ждущие лимитки и открытые позиции в `restorable`,
+а трекер поднимает их (`VirtualTracker.restore`) с пометкой gap_affected. Остальные «висящие» сделки (рыночная заявка без исполнения, нет снапшота) и все
+сделки при `restore_open=False` `start()` помечает `aborted`/`process_restart` - в БД не остаётся вечно открытых виртуальных позиций.
 Это касается ТОЛЬКО режима рекордера (`mode`, по умолчанию 'shadow'): боевые строки (mode='live') не трогаются - их состояние живёт в файле
 `live_engine_state.json` и после рестарта восстанавливается движком (upsert строки, закрытий и снапшота).
 """
@@ -25,7 +26,7 @@ from typing import Any
 
 from persistence import schema
 from persistence.db import Database
-from persistence.recorder import DbOpenTrade, Row
+from persistence.recorder import DbOpenTrade, DbShadowTrade, Row
 from utils.errors import DataError, TradingInfraError
 
 log = logging.getLogger("persistence.pg")
@@ -90,6 +91,28 @@ async def fetch_open_live(db: Database) -> list[DbOpenTrade]:
     return [DbOpenTrade(r, tuple(closes.get(r["id"], ()))) for r in rows]
 
 
+async def fetch_open_shadow(db: Database, mode: str = "shadow") -> list[DbShadowTrade]:
+    """Незавершённые теневые сделки (ждущая лимитка и открытая позиция) со снапшотом и закрытиями - для продолжения после рестарта.
+    Сделка без снапшота (процесс упал между записью строки и снапшота) не восстанавливается: уйдёт в aborted вместе с остальными сиротами."""
+    rows = [{name: from_db(kind, r[name]) for name, kind in schema.TRADE_COLUMNS.items()} for r in await db.fetch(schema.SELECT_OPEN_SHADOW, mode)]
+    if not rows:
+        return []
+    ids = [r["id"] for r in rows]
+    snaps = {s["trade_id"]: s for s in await db.fetch(schema.SELECT_SNAPSHOT_META, ids)}
+    kinds = {**schema.CLOSE_COLUMNS, "trade_id": "text"}
+    closes: dict[str, list[Row]] = {}
+    for c in await db.fetch(schema.SELECT_CLOSES_FULL, ids):
+        closes.setdefault(c["trade_id"], []).append({k: from_db(kinds[k], c[k]) for k in c.keys()})
+    out: list[DbShadowTrade] = []
+    for r in rows:
+        snap = snaps.get(r["id"])
+        if snap is None:
+            log.warning("Теневая сделка %s без снапшота: восстановить нельзя", r["id"])
+            continue
+        out.append(DbShadowTrade(r, tuple(closes.get(r["id"], ())), from_db("json", snap["meta"]) or {}, tuple(from_db("json", snap["geometry"]) or ())))
+    return out
+
+
 async def fetch_resync_candidates(db: Database) -> list[DbOpenTrade]:
     """Закрытые боевые сделки с `exit_reason='unknown'` или `gap_affected` (и без прежней попытки сверки) вместе с записанными закрытиями."""
     rows = [{name: from_db(kind, r[name]) for name, kind in schema.TRADE_COLUMNS.items()} for r in await db.fetch(schema.SELECT_RESYNC)]
@@ -129,8 +152,10 @@ def to_args(row: Row, columns: dict[str, str]) -> list[Any]:
 
 
 class PgRecorder:
-    def __init__(self, db: Database, *, mode: str = "shadow", max_queue: int = 20_000):
-        self._db, self._mode = db, mode
+    def __init__(self, db: Database, *, mode: str = "shadow", max_queue: int = 20_000, restore_open: bool = False):
+        """restore_open=True (shadow_run): висящие теневые сделки НЕ уходят в aborted, а отдаются в `self.restorable` для продолжения (`VirtualTracker.restore`)."""
+        self._db, self._mode, self._restore_open = db, mode, restore_open
+        self.restorable: list[DbShadowTrade] = []
         self._queue: asyncio.Queue[tuple[str, Row]] = asyncio.Queue(maxsize=max_queue)
         self._task: asyncio.Task | None = None
         self.written = 0
@@ -138,9 +163,12 @@ class PgRecorder:
     async def start(self) -> list[str]:
         """Миграции, пометка висящих сделок прошлого запуска, запуск писателя. -> id помеченных сделок."""
         await self._db.migrate()
-        orphans = await self._db.fetch(schema.ABORT_ORPHANS, self._mode)
+        self.restorable = await fetch_open_shadow(self._db, self._mode) if self._restore_open else []
+        orphans = await self._db.fetch(schema.ABORT_ORPHANS, self._mode, [t.row["id"] for t in self.restorable])
         for r in orphans:
-            log.warning("Сделка %s (%s) прошлого запуска помечена aborted: состояние Shadow в памяти не восстанавливается", r["id"], f"{r['coin']}_{r['strategy_id']}")
+            log.warning("Сделка %s (%s) прошлого запуска помечена aborted: восстановить её нельзя (нет снапшота / рыночная заявка без исполнения)", r["id"], f"{r['coin']}_{r['strategy_id']}")
+        for t in self.restorable:
+            log.info("Теневая сделка %s (%s_%s, %s) будет продолжена после рестарта", t.row["id"], t.row["coin"], t.row["strategy_id"], t.row["status"])
         self._task = asyncio.create_task(self._writer(), name="pg_recorder")
         return [r["id"] for r in orphans]
 

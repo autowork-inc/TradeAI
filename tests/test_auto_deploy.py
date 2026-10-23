@@ -38,32 +38,38 @@ def test_remote_dir_validation():
     assert ad.get_params(["--host", "h", "--key", "k"]).remote_dir == "trading"
 
 
-def test_metaapi_args_validated_and_optional(monkeypatch):
-    monkeypatch.delenv("METAAPI_TOKEN", raising=False)
-    monkeypatch.delenv("METAAPI_ACCOUNT_ID", raising=False)
-    assert ad.get_params(["--host", "h", "--key", "k"]).metaapi == {}
-    a = ad.get_params(["--host", "h", "--key", "k", "--metaapi-token", "tok.en_123", "--metaapi-account", "abcd1234-ef56"])
-    assert a.metaapi == {"METAAPI_TOKEN": "tok.en_123", "METAAPI_ACCOUNT_ID": "abcd1234-ef56"}
+ENV_NAMES = ("CTRADER_CLIENT_ID", "CTRADER_CLIENT_SECRET", "CTRADER_ACCOUNT_ID", "CTRADER_ACCESS_TOKEN", "CTRADER_REFRESH_TOKEN")
+GOOD = ["--ctrader-client-id", "123_cid", "--ctrader-client-secret", "sec.ret_1", "--ctrader-account", "7654321", "--ctrader-token", "tok.en_123"]
+
+
+def test_ctrader_args_validated_and_optional(monkeypatch):
+    for n in ENV_NAMES:
+        monkeypatch.delenv(n, raising=False)
+    assert ad.get_params(["--host", "h", "--key", "k"]).ctrader == {}
+    a = ad.get_params(["--host", "h", "--key", "k", *GOOD, "--ctrader-refresh", "ref.resh_1"])
+    assert a.ctrader == {"CTRADER_CLIENT_ID": "123_cid", "CTRADER_CLIENT_SECRET": "sec.ret_1", "CTRADER_ACCOUNT_ID": "7654321", "CTRADER_ACCESS_TOKEN": "tok.en_123",
+                         "CTRADER_REFRESH_TOKEN": "ref.resh_1"}
 
 
 @pytest.mark.parametrize("args", [
-    ["--metaapi-token", "tok.en_123"],  # без id счёта
-    ["--metaapi-account", "abcd1234-ef56"],  # без токена
-    ["--metaapi-token", "to ken", "--metaapi-account", "abcd1234-ef56"],
-    ["--metaapi-token", "to'ken", "--metaapi-account", "abcd1234-ef56"],
-    ["--metaapi-token", "token", "--metaapi-account", "bad id;rm"]])
-def test_metaapi_args_rejected(monkeypatch, args):
-    monkeypatch.delenv("METAAPI_TOKEN", raising=False)
-    monkeypatch.delenv("METAAPI_ACCOUNT_ID", raising=False)
+    ["--ctrader-token", "tok.en_123"],  # без остальных ключей
+    ["--ctrader-account", "7654321"],
+    GOOD[:6],  # без токена
+    [*GOOD[:6], "--ctrader-token", "to ken"],
+    [*GOOD[:6], "--ctrader-token", "to'ken"],
+    ["--ctrader-client-id", "a", "--ctrader-client-secret", "b", "--ctrader-account", "bad id;rm", "--ctrader-token", "c"]])
+def test_ctrader_args_rejected(monkeypatch, args):
+    for n in ENV_NAMES:
+        monkeypatch.delenv(n, raising=False)
     with pytest.raises(SystemExit):
         ad.get_params(["--host", "h", "--key", "k", *args])
 
 
-def test_metaapi_secret_not_in_command_or_error(capsys):
+def test_ctrader_secret_not_in_command_or_error(capsys):
     cmd = ad.merge_env_command("~/trading")
-    assert "METAAPI_TOKEN" in cmd and "chmod 600" in cmd and "rm -f" in cmd
+    assert "CTRADER_ACCESS_TOKEN" in cmd and "chmod 600" in cmd and "rm -f" in cmd
     with pytest.raises(SystemExit):
-        ad.validate_metaapi("sekret value", "abcd1234-ef56")
+        ad.validate_ctrader("cid", "sekret value", "7654321", "tok")
     assert "sekret" not in capsys.readouterr().err
 
 
@@ -100,7 +106,7 @@ def test_client_build_runs_before_any_ssh_connection(monkeypatch):
     """Порядок в main: сборка клиента -> архив -> SSH. Упавшая сборка не должна дойти до сборки архива и подключения."""
     calls = []
     monkeypatch.setattr(ad, "get_params", lambda argv=None: __import__("argparse").Namespace(remote_dir="trading", skip_client_build=False, host="h", user="u", port=22,
-                                                                                            key=None, password="x", metaapi={}, health_wait=0, keep_archive=True))
+                                                                                            key=None, password="x", ctrader={}, health_wait=0, keep_archive=True))
     monkeypatch.setattr(ad, "build_client", lambda *a, **k: (calls.append("client"), ad.fail("сборка упала"))[1])
     monkeypatch.setattr(ad, "build_archive", lambda *a, **k: calls.append("archive"))
     monkeypatch.setattr(ad, "connect", lambda a: calls.append("ssh"))
@@ -116,5 +122,5 @@ def test_web_credentials_are_validated_together_and_never_echoed(capsys):
         with pytest.raises(SystemExit):
             ad.validate_web(*bad)
     assert "Cheshir" not in capsys.readouterr().err
-    assert "WEB_PASSWORD" in ad.METAAPI_KEYS and "WEB_LOGIN" in ad.merge_env_command("~/trading")  # вписываются в .env.shadow тем же безопасным способом
+    assert "WEB_PASSWORD" in ad.CTRADER_KEYS and "WEB_LOGIN" in ad.merge_env_command("~/trading")  # вписываются в .env.shadow тем же безопасным способом
     assert "web" in ad.REQUIRED_SERVICES and "nginx" in ad.LIVE_REQUIRED_SERVICES

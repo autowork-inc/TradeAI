@@ -13,7 +13,7 @@
 Устойчивость к сбоям: состояние берётся у брокера. Выполненные уровни выводятся из ФАКТИЧЕСКИХ лотов позиции (`lots <= остаток после уровня k`),
 а объём закрытия считается как «лоты сейчас - остаток после уровня», поэтому повтор после неизвестного исхода или рестарта не закроет лишнего.
 
-Закрытый рынок (retcode 10018 / `MarketClosedError`) - не авария и не Safe Mode: действие остаётся ожидающим, в журнал один раз
+Закрытый рынок (MARKET_CLOSED / `MarketClosedError`) - не авария и не Safe Mode: действие остаётся ожидающим, в журнал один раз
 пишется `deferred`, при следующем опросе оно повторяется, при успехе пишется `replayed`. Неизвестный исход запроса (таймаут, обрыв) -
 повтор в следующий опрос (все операции идемпотентны по лотам/цене). «Стоп уже за ценой» при переносе (INVALID_STOPS 10016) - выход по рынку
 без Safe Mode. Любая другая ошибка брокера - исключение (R1).
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Mapping
 
-from exchange.mt5_metaapi import MarketClosedError, MetaApiLiveClient, MetaApiPosition, MetaApiTradeError
+from exchange.ctrader import MarketClosedError, CTraderConnector, CTraderPosition, CTraderTradeError
 from exchange.symbol_mapper import Mt5SymbolSpec
 from features import defaults as D
 from orchestrator.live_risk import split_levels
@@ -108,7 +108,7 @@ def broker_tp(plan: ScaleOutPlan, entry: float, sl: float, sgn: float, spec: Mt5
     return level_price(entry, sgn, plan.last_r, abs(entry - sl), spec)
 
 
-def build_exit(plan: ScaleOutPlan, pos: MetaApiPosition, sl: float, spec: Mt5SymbolSpec) -> Mt5Exit:
+def build_exit(plan: ScaleOutPlan, pos: CTraderPosition, sl: float, spec: Mt5SymbolSpec) -> Mt5Exit:
     """Состояние сопровождения для только что открытой позиции. Если закрыть надо сразу (вход за стопом, план не делится) - `forced_reason`."""
     sgn = -1.0 if pos.side == "BUY" else 1.0
     entry = pos.open_price
@@ -145,11 +145,11 @@ def on_bar_closed(ex: Mt5Exit, bar: BarInfo | None, spec: Mt5SymbolSpec, max_hol
 # ------------------------------------------------------------------------------------------------ шаг сопровождения
 
 
-def _market_closed(exc: MetaApiTradeError) -> bool:
+def _market_closed(exc: CTraderTradeError) -> bool:
     return isinstance(exc, MarketClosedError)
 
 
-async def step(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPosition, spec: Mt5SymbolSpec) -> list[Mt5ExitEvent]:
+async def step(ex: Mt5Exit, client: CTraderConnector, pos: CTraderPosition, spec: Mt5SymbolSpec) -> list[Mt5ExitEvent]:
     """Один опрос открытой позиции: выполненные уровни (по лотам брокера) -> уровни по цене -> тайм-аут/принудительный выход.
 
     `pos` - свежая позиция у брокера. Возвращает события; полное закрытие - событие `closed` (позиции у брокера больше нет)."""
@@ -176,7 +176,7 @@ async def step(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPosition, spe
         volume = round(lots - target, 8)
         try:
             await client.close_position(pos.position_id, volume)
-        except MetaApiTradeError as exc:
+        except CTraderTradeError as exc:
             if _market_closed(exc):
                 events += _defer(ex, f"level_{k}", exc)
                 break
@@ -196,11 +196,11 @@ def _level_reason(ex: Mt5Exit, k: int) -> str:
     return "tp" if k == last else f"scale_{ex.levels[k][0]:g}r"
 
 
-async def _close_all(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPosition, reason: str, key: str) -> list[Mt5ExitEvent]:
+async def _close_all(ex: Mt5Exit, client: CTraderConnector, pos: CTraderPosition, reason: str, key: str) -> list[Mt5ExitEvent]:
     """Закрыть остаток по рынку. Закрытый рынок - отложено (ex.forced_reason остаётся, повтор при следующем опросе)."""
     try:
         await client.close_position(pos.position_id)
-    except MetaApiTradeError as exc:
+    except CTraderTradeError as exc:
         if reason not in ("tp",):
             ex.forced_reason = reason  # повторить, пока рынок не откроется
         if _market_closed(exc):
@@ -214,12 +214,12 @@ async def _close_all(ex: Mt5Exit, client: MetaApiLiveClient, pos: MetaApiPositio
     return events
 
 
-def _defer(ex: Mt5Exit, key: str, exc: MetaApiTradeError) -> list[Mt5ExitEvent]:
+def _defer(ex: Mt5Exit, key: str, exc: CTraderTradeError) -> list[Mt5ExitEvent]:
     """Рынок закрыт: команда не потеряна (состояние не продвинуто), в журнал - один раз на действие."""
     if key in ex.deferred:
         return []
     ex.deferred.append(key)
-    return [Mt5ExitEvent("deferred", {"action": key, "code": exc.numeric_code, "why": "market_closed"})]
+    return [Mt5ExitEvent("deferred", {"action": key, "code": exc.code, "why": "market_closed"})]
 
 
 def _replayed(ex: Mt5Exit, key: str) -> list[Mt5ExitEvent]:

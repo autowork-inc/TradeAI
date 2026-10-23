@@ -148,7 +148,8 @@ def _vwap(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[s
         f"3. {_entry_line(trade)} До VWAP ≈ {'—' if r_vwap is None else f'{r_vwap:.2f}'}R.",
     ]
     facts = [("Таймфрейм", interval), ("VWAP", fmt_price(vwap)), ("σ (взвешенное по объёму)", fmt_price(sd)), ("Полоса входа", fmt_price(band)),
-             ("До VWAP, R", "—" if r_vwap is None else f"{r_vwap:.2f}"), ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
+             ("До VWAP, R", "—" if r_vwap is None else f"{r_vwap:.2f}"), ("Закрытие от полосы, ATR (допуск 0.2)", _x(_num(meta, "band_dist_atr"), ".2f")),
+             ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
     return "\n".join(steps), facts
 
 def _x(v: float | None, fmt: str) -> str:
@@ -198,8 +199,9 @@ def _trendline(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tu
 
 def _chr_common(long: bool, meta: dict[str, Any]) -> tuple[str, str]:
     pts = [fmt_price(v) for v in meta.get("squeeze_points") or [] if isinstance(v, (int, float))]
-    squeeze = (f"{'повышающиеся минимумы (higher lows)' if long else 'понижающиеся максимумы (lower highs)'} "
-               + (" -> ".join(pts) if pts else "—"))
+    squeeze = (f"локальная база {meta.get('comp_bars') or '—'} баров: волатильность затухает (размах свежей половины = {_x(_num(meta, 'comp_decay'), '.0%')} от старой), "
+               f"{'минимумы подтягиваются к уровню' if long else 'максимумы опускаются к уровню'} ({' -> '.join(pts) if pts else '—'}), "
+               f"экстремумы трутся об уровень (в среднем {_x(_num(meta, 'comp_rub_atr'), '.2f')} ATR), высота базы {_x(_num(meta, 'comp_height_atr'), '.2f')} ATR")
     return squeeze, f"{'Bullish' if long else 'Bearish'} (жёсткий фильтр: только по тренду H4)"
 
 
@@ -213,7 +215,7 @@ def _chr_horizontal(trade: dict[str, Any], meta: dict[str, Any], interval: str) 
         f"за {meta.get('window') or '—'} баров.",
         f"2. Поджатие к уровню: {squeeze}.",
         f"3. Пробой: закрытие {'выше' if long else 'ниже'} уровня полнотелой свечой (тело {_x(_num(meta, 'body_frac'), '.0%')} размаха).",
-        f"4. {_entry_line(trade)} Стоп за последней точкой поджатия, статичный; тейк 1:4 ({fmt_price(trade.get('tp'))}) на весь объём, частичных фиксаций и безубытка нет.",
+        f"4. {_entry_line(trade)} Стоп за ближайшим локальным свингом ({fmt_price(_num(meta, 'sl_extreme'))}) − 0.2 ATR, статичный; тейк 1:4 ({fmt_price(trade.get('tp'))}) на весь объём, частичных фиксаций и безубытка нет.",
     ]
     facts = [("Таймфрейм", interval), ("Тренд H4", trend), ("Уровень", fmt_price(level)), ("Касаний уровня", str(touches if touches is not None else "—")),
              ("Поджатие", squeeze), ("Тело пробойной свечи", _x(_num(meta, "body_frac"), ".0%")), ("Риск, ATR", _x(_num(meta, "risk_atr"), ".2f")),
@@ -233,7 +235,7 @@ def _chr_trendline(trade: dict[str, Any], meta: dict[str, Any], interval: str) -
         f"2. Поджатие к линии: {squeeze}.",
         f"3. Пробой: закрытие {'выше' if long else 'ниже'} линии ({fmt_price(_num(meta, 'line_level'))}) полнотелой свечой "
         f"(тело {_x(_num(meta, 'body_frac'), '.0%')} размаха).",
-        f"4. {_entry_line(trade)} Стоп за последней точкой поджатия, статичный; тейк 1:4 ({fmt_price(trade.get('tp'))}) на весь объём, частичных фиксаций и безубытка нет.",
+        f"4. {_entry_line(trade)} Стоп за ближайшим локальным свингом ({fmt_price(_num(meta, 'sl_extreme'))}) − 0.2 ATR, статичный; тейк 1:4 ({fmt_price(trade.get('tp'))}) на весь объём, частичных фиксаций и безубытка нет.",
     ]
     facts = [("Таймфрейм", interval), ("Тренд H4", trend), ("Линия на сигнале", fmt_price(_num(meta, "line_level"))),
              ("Наклон, ATR за бар", _x(_num(meta, "slope_atr"), "+.3f")), ("Касаний линии", str(touches if touches is not None else "—")),
@@ -264,9 +266,9 @@ def build_reason(trade: dict[str, Any], meta: dict[str, Any] | None, geometry: l
     elif name == "Trendline_Breakout":
         title, (summary, facts) = "Trendline Breakout", _trendline(trade, meta, interval)
     elif name == "Horizontal_Breakout_CHR":
-        title, (summary, facts) = "Пробой уровня (Horizontal)", _chr_horizontal(trade, meta, interval)
+        title, (summary, facts) = "Пробой (CHR)", _chr_horizontal(trade, meta, interval)
     elif name == "Trendline_Breakout_CHR":
-        title, (summary, facts) = "Наклонка (Trendline)", _chr_trendline(trade, meta, interval)
+        title, (summary, facts) = "Наклонка (CHR)", _chr_trendline(trade, meta, interval)
     else:
         title = name
         summary = "Причина входа для этой стратегии не описана в API; ниже - все параметры сигнала из снапшота."

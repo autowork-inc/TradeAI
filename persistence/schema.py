@@ -200,5 +200,11 @@ SELECT_CLOSES_OF = ("SELECT trade_id, seq, ts, reason, qty, price, pnl, fees, gr
                     "WHERE trade_id = ANY($1::text[]) ORDER BY trade_id, seq")
 ABORT_ORPHANS = (
     "UPDATE trades SET status = 'aborted', exit_reason = 'process_restart', updated_at = now() "
-    "WHERE mode = $1 AND status IN ('pending_limit', 'pending_market', 'open') RETURNING id, coin, strategy_id"
+    "WHERE mode = $1 AND status IN ('pending_limit', 'pending_market', 'open') AND id <> ALL($2::text[]) RETURNING id, coin, strategy_id"
 )
+# Восстановление ТЕНЕВЫХ сделок при старте (2026-10-23): ждущая лимитка и открытая позиция продолжаются с того места, где процесс остановился.
+# pending_market не восстанавливается: позиции ещё нет, вход по первому тику «после сигнала» уже невозможен (сигнал устарел) - такая сделка уходит в aborted.
+SELECT_OPEN_SHADOW = (f"SELECT {', '.join(TRADE_COLUMNS)} FROM trades WHERE mode = $1 AND status IN ('pending_limit', 'open') ORDER BY signal_time")
+SELECT_SNAPSHOT_META = "SELECT trade_id, geometry, meta FROM trade_snapshots WHERE trade_id = ANY($1::text[])"
+SELECT_CLOSES_FULL = ("SELECT trade_id, seq, ts, reason, frac, qty, price, gross_r, fees_r, net_r, pnl, fees FROM trade_closes "
+                      "WHERE trade_id = ANY($1::text[]) ORDER BY trade_id, seq")
