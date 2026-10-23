@@ -41,7 +41,7 @@ import config
 from features import defaults as D
 from orchestrator.journal import EventLog
 from orchestrator.risk import RiskSizer, Sizing, SizingRejected
-from orchestrator.types import BarInfo, Direction, Event, Kind, Signal, Tick
+from orchestrator.types import GEOMETRY_KEYS, BarInfo, Direction, Event, Kind, Signal, Tick
 from persistence.recorder import DbShadowTrade, NullRecorder, TradeRecorder
 from utils.errors import ConfigError, TradingInfraError
 
@@ -118,6 +118,19 @@ class ScaleOutPlan:
             return by_fill
         anchored = signal_entry - side_sgn * r * abs(signal_entry - sl)
         return anchored if side_sgn * anchored < side_sgn * fill else by_fill
+
+
+def _geometry_from_db(trade_id: str, items: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    """Геометрия снапшота из БД -> единый формат Signal. JSONB хранит ключи в своём порядке (p1, p2, t1, t2, type, label), а Signal требует порядок
+    GEOMETRY_KEYS: ключи переставляются (2026-10-23: восстановление падало на этом и бот не поднимался). Запись с другим набором ключей отбрасывается
+    с предупреждением - геометрия нужна только графику, снапшот в БД уже есть."""
+    out = []
+    for g in items:
+        if set(g) != set(GEOMETRY_KEYS):
+            log.warning("Теневая сделка %s: элемент геометрии %r не в едином формате - пропущен при восстановлении", trade_id, g)
+            continue
+        out.append({k: g[k] for k in GEOMETRY_KEYS})
+    return tuple(out)
 
 
 def impulse_hits_limit(bar: BarInfo | None, *, entry: float, sl: float, mult: float = D.IMPULSE_BAR_ATR) -> bool:
@@ -326,7 +339,7 @@ class VirtualTracker:
         signal = Signal(signal_id=row["id"], strategy=row["strategy_id"], symbol=row["coin"], interval=interval, direction=direction, kind=kind,
                         bar_open_time=bar_close_ms - ivl_ms, bar_close_ms=bar_close_ms, entry=float(meta["entry"]), sl=float(row["sl"]),
                         tp=None if meta.get("tp") is None else float(meta["tp"]), inval=None if meta.get("inval") is None else float(meta["inval"]),
-                        geometry=tuple(item.geometry), meta=extra)
+                        geometry=_geometry_from_db(row["id"], item.geometry), meta=extra)
         sgn = direction.sgn
         plan_rec = row.get("plan") or {}
         plan = ScaleOutPlan.from_record(plan_rec["levels"], plan_rec.get("tp_anchor", "fill")) if plan_rec.get("levels") else self.plan_for(signal.strategy)

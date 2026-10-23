@@ -290,3 +290,22 @@ def test_account_snapshot_sums_binance_and_mt5_for_the_api(tmp_path):
 def test_account_snapshot_is_not_written_without_a_path(env, tmp_path):
     run(env.engine.refresh_pnl(NOW))
     assert not list(tmp_path.glob(".live_account.json"))
+
+
+def test_network_timeout_while_reading_daily_pnl_does_not_crash_and_blocks_fail_closed(tmp_path):
+    """Регресс 2026-10-23 (сервер): таймаут GET /fapi/v1/income ронял процесс. Чтение PnL - без ордеров: сбой сети/5xx пишется в лог, PnL не обновляется,
+    а через 120 с без свежего результата риск-менеджер сам не пускает новые входы (pnl_unavailable). Следующий опрос повторяет запрос."""
+    from utils.errors import HttpServerError, NetworkError
+
+    rest = FakeRest(100.0)
+    client = BinanceLiveClient(rest)
+    client.set_filters(FILTERS)
+    risk = manager(tmp_path)
+    eng = LiveExecutionEngine(client, risk, MemoryEventLog(), SafeMode(tmp_path / ".sm"), now_ms=lambda: NOW, interval_ms=BAR, post_only=False)
+    rest.fail[("GET", "/fapi/v1/income")] = [NetworkError("ConnectionTimeoutError"), HttpServerError(502, "/fapi/v1/income", "bad gateway")]
+    run(eng.refresh_pnl(NOW))  # не падает
+    run(eng.refresh_pnl(NOW))
+    assert risk.gate(sol(), NOW).reason == "pnl_unavailable"
+    rest.add_income("REALIZED_PNL", -10.0)
+    run(eng.refresh_pnl(NOW))  # связь вернулась
+    assert risk.daily_pnl == -10.0 and risk.gate(sol(), NOW) is None

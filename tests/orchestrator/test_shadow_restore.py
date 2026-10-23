@@ -4,6 +4,8 @@
 (как `persistence.pg.fetch_open_shadow`) -> ВТОРОЙ трекер поднимает их `restore()` и доводит до конца. Восстановленная сделка обязана нести gap_affected.
 """
 
+import dataclasses
+
 from orchestrator.core import Orchestrator, Route
 from orchestrator.journal import MemoryEventLog
 from orchestrator.tracker import OPEN, PENDING_LIMIT, ScaleOutPlan, VirtualTracker
@@ -129,3 +131,18 @@ def test_market_trade_restored_when_open():
     assert r.status == OPEN and r.gap_affected and abs(r.tp_m - r.level_q(4.0)) < 1e-9
     t2.on_tick(tick(120.1, 9))
     assert r.status == "closed" and r.exit_reason == "tp"
+
+
+def test_geometry_in_jsonb_key_order_is_restored():
+    """Регресс 2026-10-23 (сервер): PostgreSQL JSONB отдаёт ключи геометрии в своём порядке (короткие раньше: p1, p2, t1, t2, type, label),
+    а Signal требует единый порядок - restore падал с DataError на каждом старте, и бот не поднимался. Ключи должны переставляться."""
+    zone = {"type": "zone", "t1": 1, "t2": 2, "p1": 101.0, "p2": 100.0, "label": "FVG"}
+    s = dataclasses.replace(mk(), geometry=(zone,))
+    rec, _ = first_run(s, tick(100.5, 2))
+    jsonb = {k: zone[k] for k in sorted(zone, key=lambda k: (len(k), k))}
+    assert list(jsonb) == ["p1", "p2", "t1", "t2", "type", "label"]
+    items = [DbShadowTrade(i.row, i.closes, i.meta, (jsonb, {"type": "line", "t1": 1})) for i in db_items(rec, s)]  # второй - битый: пропускается
+    tr = VirtualTracker(MemoryEventLog(), equity=10_000.0, recorder=MemoryRecorder())
+    restored, skipped = tr.restore(items, 2 * IV)
+    assert skipped == [] and len(restored) == 1
+    assert restored[0].signal.geometry == (zone,) and list(restored[0].signal.geometry[0]) == ["type", "t1", "t2", "p1", "p2", "label"]

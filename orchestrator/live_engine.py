@@ -365,12 +365,21 @@ class LiveExecutionEngine:
         """Суточный результат ВСЕХ площадок (Binance, MT5) -> риск-менеджер (сквозной лимит: Total = Binance + MT5). Лимит достигнут ->
         новых входов нет на обеих площадках, неисполненные входы (Binance и MT5) снимаются, открытые позиции не трогаем."""
         start = utc_day_start_ms(now_ms)
-        if self.router is None:
-            by_venue = {Venue.BINANCE.value: await self.client.realized_pnl_since(start)}
-        else:
-            by_venue = await self.router.realized_pnl(start)
+        try:
+            if self.router is None:
+                by_venue = {Venue.BINANCE.value: await self.client.realized_pnl_since(start)}
+            else:
+                by_venue = await self.router.realized_pnl(start)
+        except (NetworkError, HttpServerError) as exc:
+            # Только чтение (ордеров нет): временный сбой сети/5xx не роняет процесс с открытыми позициями (2026-10-23: таймаут /fapi/v1/income
+            # уронил бота). PnL остаётся прежним и стареет: через 120 с риск-менеджер сам отклоняет новые входы (pnl_unavailable); повтор - на следующем опросе.
+            log.warning("Суточный PnL не обновлён (временный сбой, повтор на следующем опросе): %s: %s", type(exc).__name__, exc)
+            return
         self._pnl_at_ms = now_ms
-        await self._publish_account(now_ms)
+        try:
+            await self._publish_account(now_ms)
+        except (NetworkError, HttpServerError) as exc:
+            log.warning("Снимок баланса для API не обновлён (временный сбой): %s: %s", type(exc).__name__, exc)
         tripped = False
         for venue, pnl in by_venue.items():
             tripped = self.risk.update_venue_pnl(venue, pnl, now_ms) or tripped
