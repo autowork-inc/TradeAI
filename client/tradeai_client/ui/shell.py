@@ -56,7 +56,7 @@ class Shell:
         self._status_text = ft.Text("Не подключено", size=13, color=w.MUTED)
         self._account_data: dict | None = None
         self._account = ft.Text(fmt.SHADOW_ACCOUNT_TEXT, size=13, color=w.AMBER, weight=ft.FontWeight.W_600,
-                                tooltip="Баланс боевого счёта (Binance + MT5). В режиме Shadow ордера не отправляются.")
+                                tooltip="Баланс боевого счёта Binance. Появляется, когда бот работает и присылает свежий снимок счёта.")
         self._eye = ft.IconButton(icon=ft.Icons.VISIBILITY_OFF, icon_size=18, tooltip="Показать баланс", visible=False, on_click=self._toggle_balance)
         self._build()
 
@@ -192,7 +192,7 @@ class Shell:
                 self._account.update()
                 self._eye.update()
             return
-        self._account.tooltip = "Баланс боевого счёта (Binance + MT5). В режиме Shadow ордера не отправляются."
+        self._account.tooltip = "Баланс боевого счёта Binance. Появляется, когда бот работает и присылает свежий снимок счёта."
         self._account.value = fmt.account_text(self._account_data, shown)
         self._account.color = w.GREEN if fmt.has_balance(self._account_data) else w.AMBER
         self._eye.visible = fmt.has_balance(self._account_data)

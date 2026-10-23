@@ -48,8 +48,8 @@ class DashboardView:
     def _render(self, s: dict) -> None:
         shadow = s["shadow"]
         alive, age = shadow["alive"], shadow["heartbeat_age_s"]
-        pulse = ("Shadow: нет данных о пульсе" if alive is None else
-                 f"Shadow жив · пульс {fmt.fmt_age(age)}" if alive else f"Shadow НЕ отвечает · пульс {fmt.fmt_age(age)}")
+        pulse = ("Бот: нет данных о пульсе" if alive is None else
+                 f"Бот жив · пульс {fmt.fmt_age(age)}" if alive else f"Бот НЕ отвечает (процесс остановлен или завис) · пульс {fmt.fmt_age(age)}")
         pulse_color = w.MUTED if alive is None else (w.GREEN if alive else w.RED)
         self._head.controls = [w.dot(pulse_color), ft.Text(pulse, color=pulse_color, size=13, weight=ft.FontWeight.W_600),
                                ft.Text(f"обновлено {fmt.fmt_local(s['server_time'])}", color=w.MUTED, size=12)]
@@ -59,7 +59,7 @@ class DashboardView:
         if strategies is not None:  # профиль со своим набором стратегий: автомат SMC (S0..S4) и чужие позиции не показываются
             shown = [{**c, "setups": [], "positions": [p for p in c["positions"] if p["strategy_name"] in strategies]} for c in shown]
         crypto, mt5 = split_coins(shown)
-        self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (MT5)", mt5, MT5_COL)]
+        self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (cTrader)", mt5, MT5_COL)]
         events = [e for e in s["events"] if (pool is None or e["coin"] in pool) and (strategies is None or e.get("strategy_id") in strategies or e.get("strategy") in strategies)]
         self._events.controls = [self._event_row(e) for e in events] or [w.label("Событий пока нет")]
 

@@ -171,7 +171,7 @@ def test_account_plaque_and_default_mode():
     assert fmt.account_text(live) == "Баланс: *** USDT" and fmt.default_mode(live) == "live"  # по умолчанию сумма скрыта, Equity в UI нет
     assert fmt.account_text(live, True) == "Баланс: $1,234.50 USDT" and "Эквити" not in fmt.account_text(live, True)
     for none in (None, {}, {"available": False, "balance": None, "equity": None}, {"available": True, "balance": None, "equity": 1}):
-        assert fmt.account_text(none) == "Shadow Mode (Тест)"
+        assert fmt.account_text(none) == "Баланс: нет данных"
     assert fmt.default_mode(None) == "shadow" and fmt.default_mode({"available": False}) == "shadow"
 
 

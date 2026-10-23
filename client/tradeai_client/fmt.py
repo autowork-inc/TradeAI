@@ -33,7 +33,7 @@ STRATEGY_OPTIONS = [("all", "Все")] + [(k, strategy_label(k)) for kind in ("l
                                        for k in STRATEGY_RU if STRATEGY_KIND[k] == kind]
 # контур торговли (поле `mode` сделки): «Все» | только боевые | только виртуальные
 MODE_OPTIONS = [("all", "Все"), ("live", "🟢 Только LIVE"), ("shadow", "🟡 Только SHADOW")]
-SHADOW_ACCOUNT_TEXT = "Shadow Mode (Тест)"
+SHADOW_ACCOUNT_TEXT = "Баланс: нет данных"  # нет свежего снимка боевого счёта (бот не запущен / нет связи с биржей / режим без боевых ордеров)
 RESTART_HINT = "Сделка остановлена из-за перезапуска сервера. Не рискует деньгами, в WinRate не входит"
 # монеты фильтров: текущий пул Shadow (config.SHADOW_SYMBOLS, с 2026-10-14) и прежние пулы - сделки по ним остаются в БД
 COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "SNXUSDT", "ZECUSDT", "ZKUSDT", "KORUUSDT", "EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "XAGUSD",

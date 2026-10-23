@@ -58,7 +58,7 @@ def test_dashboard_shows_every_coin_with_state_positions_and_events(fx):
     assert any(x.startswith("S2 · свип + FVG") for x in t) and any(x.startswith("S3 · CHoCH отклонён (плечо выше потолка)") for x in t)
     assert any("Ждёт лимитку" == x for x in t) and any("Открыта" == x for x in t) and any(x.startswith("Остаток: 50%") for x in t)
     assert any("Автомат сетапа: short:S1 → short:S2" in x for x in t)
-    assert any(x.startswith("Shadow") for x in t)
+    assert any(x.startswith("Бот") for x in t)
 
 
 def test_dashboard_shows_server_errors_and_hides_them_after_recovery(fx):
