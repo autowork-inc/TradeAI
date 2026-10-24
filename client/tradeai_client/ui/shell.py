@@ -114,6 +114,10 @@ class Shell:
         """Пул монет активного профиля (None - все): CHR - умолчания плюс добавленные пользователем."""
         return profiles.coins_for(self.settings.profile, self.settings.chr_extra_coins)
 
+    def shared_coins(self) -> list[str]:
+        """Монеты пула CHR: их видят оба профиля (бот торгует на них все стратегии). SANTA показывает их карточками в Dashboard и в фильтрах, даже без данных бота."""
+        return profiles.coins_for(profiles.CHR, self.settings.chr_extra_coins) or []
+
     async def set_profile(self, profile: str) -> None:
         profile = profiles.normalize_profile(profile)
         if profile == self.settings.profile:
@@ -324,7 +328,7 @@ class Shell:
         user_row = ft.Row([ft.OutlinedButton(f"История обновлений (v{__version__})", icon=ft.Icons.HISTORY_EDU, tooltip="Что и когда добавлено в клиент",
                                              on_click=lambda e: (self.page.pop_dialog(), self.show_changelog())),
                            ft.OutlinedButton(f"Сменить пользователя ({s.profile})", icon=ft.Icons.SWITCH_ACCOUNT, on_click=lambda e: (self.page.pop_dialog(), self.show_profile_dialog())),
-                           ft.OutlinedButton("Монеты CHR…", icon=ft.Icons.PLAYLIST_ADD, disabled=s.profile != profiles.CHR, visible=False,  # 1.6.0: CHR без пула монет
+                           ft.OutlinedButton("Монеты CHR…", icon=ft.Icons.PLAYLIST_ADD, disabled=s.profile != profiles.CHR, visible=s.profile == profiles.CHR,
                                              tooltip="Добавить монеты в пул профиля CHR" if s.profile == profiles.CHR else "Доступно в профиле CHR",
                                              on_click=lambda e: (self.page.pop_dialog(), self.show_chr_coins_dialog()))], spacing=10, wrap=True)
         post = ft.Switch(label="Достраивать свечи после сигнала (публичный REST Binance)", value=s.post_signal_candles)

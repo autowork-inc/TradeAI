@@ -132,7 +132,7 @@ class HistoryView:
             self._mode.visible = strategies is None  # CHR: только Shadow-стратегии, переключатель режима не нужен
 
     def _coin_options(self) -> list[tuple[str, str]]:
-        return [(c, fmt.coin_short(c)) for c in dict.fromkeys([*COINS, *self._server_coins])]
+        return [(c, fmt.coin_short(c)) for c in dict.fromkeys([*COINS, *getattr(self.host, "shared_coins", lambda: [])(), *self._server_coins])]
 
     def set_coins(self, coins: list[str]) -> None:
         """Монеты с сервера (автоселектор подключает новые на лету): фильтр «Монеты» получает их вместе с прежними; выбор сохраняется. Профиль CHR держит свой пул."""
@@ -201,9 +201,9 @@ class HistoryView:
         await self.refresh()
 
     async def _load_profile_coins(self, client) -> None:
-        """CHR: варианты фильтра «Монеты» - монеты, где у его стратегий есть сделки (сохранённый выбор переживает подгрузку)."""
-        strategies = self._scope()[0]
-        if strategies is None or self._profile_coins is not None:
+        """Профиль со своими стратегиями, но без пула монет: варианты фильтра «Монеты» - монеты, где у его стратегий есть сделки. У CHR пул есть (1.6.2) - не грузится."""
+        strategies, pool = self._scope()
+        if strategies is None or pool is not None or self._profile_coins is not None:
             return
         try:
             self._profile_coins = await client.trade_coins(strategies)

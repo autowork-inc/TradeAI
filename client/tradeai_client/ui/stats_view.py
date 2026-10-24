@@ -83,7 +83,7 @@ class StatsView:
         self._mode.visible = strategies is None  # CHR: только Shadow-стратегии, переключатель режима не нужен
 
     def _all_coins(self) -> list[str]:
-        return list(dict.fromkeys([*COINS, *self._server_coins]))
+        return list(dict.fromkeys([*COINS, *getattr(self.host, "shared_coins", lambda: [])(), *self._server_coins]))
 
     def set_coins(self, coins: list[str]) -> None:
         """Монеты с сервера (автоселектор подключает новые на лету): фильтр «Монеты» получает их вместе с прежними; выбор сохраняется. Профиль CHR держит свой пул."""

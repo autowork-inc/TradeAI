@@ -41,6 +41,9 @@ class Host:
     def profile_coins(self):
         return profiles.coins_for(self.profile, self.extra)
 
+    def shared_coins(self):
+        return profiles.coins_for(profiles.CHR, self.extra)
+
     def remember_mode(self, mode):
         pass
 
@@ -89,7 +92,8 @@ def test_normalize_coin_maps_short_names_to_real_symbols():
 def test_profile_scopes():
     assert profiles.strategies_for("SANTA") is None and profiles.coins_for("SANTA", ["SOLUSDT"]) is None
     assert profiles.strategies_for("CHR") == ["Trendline_Breakout_CHR", "Horizontal_Breakout_CHR"]
-    assert profiles.coins_for("CHR") is None and profiles.coins_for("CHR", ["SOLUSDT"]) is None  # 1.6.0: CHR ограничивает только стратегии
+    assert profiles.coins_for("CHR") == list(profiles.CHR_DEFAULT_COINS)  # 1.6.2: у CHR снова свой пул монет
+    assert profiles.coins_for("CHR", ["SOLUSDT", "BTCUSDT"]) == [*profiles.CHR_DEFAULT_COINS, "SOLUSDT"]
     assert profiles.normalize_profile("???") == "SANTA" and profiles.normalize_profile(None) == "SANTA" and profiles.normalize_profile("CHR") == "CHR"
 
 
@@ -188,7 +192,7 @@ def test_stats_filters_for_chr_use_its_strategies_and_hide_mode(fx):
     chr_view = StatsView(Host("CHR", ["SOLUSDT"]))
     f = chr_view._filters()
     assert f["strategies"] == ["Trendline_Breakout_CHR", "Horizontal_Breakout_CHR"] and f["mode"] == "shadow"
-    assert f["coins"] is None and chr_view._mode.visible is False  # монеты не урезаются пулом: все сделки CHR
+    assert f["coins"] == [*profiles.CHR_DEFAULT_COINS, "SOLUSDT"] and chr_view._mode.visible is False  # 1.6.2: только пул CHR
     assert [o.key for o in chr_view._strategy.options] == ["all", *profiles.CHR_STRATEGIES]
     chr_view._coin.set_selected(["BTCUSDT"])
     chr_view._strategy.value = "Horizontal_Breakout_CHR"
@@ -220,15 +224,15 @@ def test_empty_coin_selection_queries_nothing(fx):
     assert client.trade_calls == [] and h._total == 0
 
 
-def test_history_chr_scope_coins_of_its_trades_and_favorites_button(fx):
+def test_history_chr_scope_its_coin_pool_and_favorites_button(fx):
     client = FakeClient(fx)
     host = Host("CHR", client=client)
     hist = HistoryView(host)
     asyncio.run(hist.refresh())
-    assert [k for k, _ in hist._coin._options] == ["SOLUSDT", "DOGEUSDT"] and client.coin_calls == [list(profiles.CHR_STRATEGIES)]  # монеты - только где у CHR есть сделки
+    assert [k for k, _ in hist._coin._options] == list(profiles.CHR_DEFAULT_COINS)  # 1.6.2: монеты - пул CHR, а не все, где есть сделки
     asyncio.run(hist._toggle_favorites())  # «Избранное» - кнопка в History, не вкладка
     h_call, f_call = client.trade_calls
-    assert h_call["strategies"] == list(profiles.CHR_STRATEGIES) and h_call["coins"] is None and h_call["mode"] == "shadow" and not h_call["favorite"]
+    assert h_call["strategies"] == list(profiles.CHR_STRATEGIES) and h_call["coins"] == list(profiles.CHR_DEFAULT_COINS) and h_call["mode"] == "shadow" and not h_call["favorite"]
     assert f_call["favorite"] is True and f_call["strategies"] is None and f_call["coins"] is None and f_call["mode"] == "all"  # избранное общее: профиль его не режет
     assert hist.state()["favorites"] is True and hist._fav_btn.icon == ft.Icons.STAR
     santa_fav = HistoryView(Host("SANTA", client=client), favorites=True)
@@ -275,17 +279,32 @@ def test_history_star_toggles_via_host_and_updates_the_row(fx):
     assert v._items[1]["is_favorite"] is True
 
 
-def test_dashboard_for_chr_shows_only_coins_with_its_trades(fx):
+def test_dashboard_for_chr_shows_its_coin_pool_and_only_its_trades(fx):
     msg = fx("live_state.json")
     chr_dash = DashboardView(Host("CHR"))
-    chr_dash.on_message(msg)  # у CHR сделок нет - понятная карточка, а не пустые монеты
-    assert any("Открытых сделок сейчас нет" in (x.value or "") for x in _walk(chr_dash._cards) if isinstance(x, ft.Text))
+    chr_dash.on_message(msg)
+    chr_text = [x.value for x in _walk(chr_dash._cards) if isinstance(x, ft.Text) and x.value]
+    assert all(fmt.coin_short(c) in chr_text for c in profiles.CHR_DEFAULT_COINS)  # карточки всего пула CHR, даже без сделок и без данных сервера
+    assert "DOGE" not in chr_text and "Открытых сделок нет" in chr_text
+    btc = next(c for c in msg["coins"] if c["coin"] == "BTCUSDT")
+    btc["positions"] = [{**next(c for c in msg["coins"] if c["positions"])["positions"][0], "strategy_name": "Horizontal_Breakout_CHR"}]
     doge = next(c for c in msg["coins"] if c["coin"] == "DOGEUSDT")
     doge["positions"] = [{**doge["positions"][0], "strategy_name": "Horizontal_Breakout_CHR"}]
     chr_dash.on_message(msg)
     chr_text = [x.value for x in _walk(chr_dash._cards) if isinstance(x, ft.Text) and x.value]
-    assert "DOGE" in chr_text and "BTC" not in chr_text  # только монеты, где есть сделки CHR
+    assert "DOGE" not in chr_text  # монета вне пула CHR не показывается
+    assert any("Пробой" in (t or "") for t in chr_text)  # сделка CHR по BTC видна
     assert not any(t.startswith("S2 ·") or t.startswith("S3 ·") for t in chr_text)  # автомат SMC для CHR не показывается
+
+
+def test_dashboard_for_santa_also_shows_chr_coins_with_all_info(fx):
+    msg = fx("live_state.json")
+    msg["coins"] = [c for c in msg["coins"] if c["coin"] not in profiles.CHR_DEFAULT_COINS[:4]]  # бот ещё не прислал Forex (нет ключей cTrader)
+    santa = DashboardView(Host("SANTA", ["SOLUSDT"]))
+    santa.on_message(msg)
+    text = [x.value for x in _walk(santa._cards) if isinstance(x, ft.Text) and x.value]
+    assert all(fmt.coin_short(c) in text for c in [*profiles.CHR_DEFAULT_COINS, "SOLUSDT"])  # SANTA видит и монеты CHR
+    assert "DOGE" in text  # и все остальные монеты бота
 
 
 def _walk(c):

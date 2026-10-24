@@ -80,16 +80,15 @@ class DashboardView:
         strategies = getattr(self.host, "profile_strategies", lambda: None)()
         pool = getattr(self.host, "profile_coins", lambda: None)()
         shown = [c for c in s["coins"] if pool is None or c["coin"] in pool]
-        if strategies is not None:  # профиль со своим набором стратегий (CHR): только монеты, где у него есть сделки; автомат SMC (S0..S4) не показывается
-            shown = [{**c, "setups": [], "positions": [p for p in c["positions"] if p["strategy_name"] in strategies]} for c in shown]
-            shown = [c for c in shown if c["positions"]]
+        if strategies is None and pool is None:  # SANTA видит всё: и монеты пула CHR, даже если бот по ним пока ничего не прислал (Forex без ключей cTrader)
+            known = {c["coin"] for c in shown}
+            shown += [{"coin": coin, "setups": [], "positions": []} for coin in getattr(self.host, "shared_coins", lambda: [])() if coin not in known]
+        if strategies is not None:  # профиль со своим набором стратегий (CHR, 1.6.2): карточки ВСЕХ монет его пула, позиции - только его стратегий; автомат SMC (S0..S4) не показывается
+            by_coin = {c["coin"]: c for c in s["coins"]}
+            shown = [{**by_coin.get(coin, {"coin": coin, "positions": []}), "setups": [],
+                      "positions": [p for p in by_coin.get(coin, {}).get("positions", []) if p["strategy_name"] in strategies]} for coin in (pool or [])]
         crypto, mt5 = split_coins(shown)
         self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (cTrader)", mt5, MT5_COL)]
-        if strategies is not None and not shown:
-            names = ", ".join(fmt.STRATEGY_RU.get(x, x) for x in strategies)
-            self._cards.controls = [w.card(ft.Column([w.title("Открытых сделок сейчас нет", 15),
-                                                      w.label(f"{names}: бот ищет сигналы на всех {len(s['coins'])} монетах пула. Как только появится вход, "
-                                                              "здесь будет карточка монеты; история - во вкладке History.", size=13)], spacing=6))]
         events = [e for e in s["events"] if (pool is None or e["coin"] in pool) and (strategies is None or e.get("strategy_id") in strategies or e.get("strategy") in strategies)]
         self._events.controls = [self._event_row(e) for e in events] or [w.label("Событий пока нет")]
 
@@ -117,6 +116,8 @@ class DashboardView:
                                 ft.Column([ft.Text(fmt.setup_text(s), size=13, color=w.TEXT if s["state"] else w.MUTED, weight=ft.FontWeight.W_600 if s["state"] else None),
                                            ft.Text(f"с {fmt.fmt_local(s['since'])}" if s["since"] else "", size=11, color=w.MUTED, visible=bool(s["since"]))],
                                           spacing=0, expand=True)], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+        if not c["setups"] and not c["positions"]:
+            rows.append(ft.Text("Открытых сделок нет", size=12, color=w.MUTED))
         for p in c["positions"]:
             rows.append(ft.Divider(height=8, color=w.BORDER))
             rows.append(self._position(p))
