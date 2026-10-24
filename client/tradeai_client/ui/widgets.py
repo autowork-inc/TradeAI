@@ -425,3 +425,30 @@ class FilterBar:
         res = self._on_toggle()
         if asyncio.iscoroutine(res):
             await res
+
+
+class Collapsible:
+    """Секция со стрелкой (1.8.1): клик по заголовку сворачивает/разворачивает тело; on_toggle(collapsed) - чтобы вид запомнил состояние."""
+
+    def __init__(self, title_text: str, body: ft.Control, *, collapsed: bool = False, on_toggle=None, size: float = 15, extra: list[ft.Control] | None = None):
+        self.body, self._on_toggle = body, on_toggle
+        self._icon = ft.Icon(ft.Icons.EXPAND_MORE, size=20, color=MUTED)
+        self.title = title(title_text, size)
+        self.header = ft.Container(content=ft.Row([self._icon, self.title, *(extra or [])], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                                   on_click=self.toggle, ink=True, border_radius=6, padding=ft.Padding.symmetric(vertical=2, horizontal=2),
+                                   tooltip="Свернуть / развернуть")
+        self.control = ft.Column([self.header, body], spacing=8)
+        self.collapsed = False
+        self.set(collapsed)
+
+    def set(self, collapsed: bool) -> None:
+        self.collapsed = collapsed
+        self.body.visible = not collapsed
+        self._icon.icon = ft.Icons.CHEVRON_RIGHT if collapsed else ft.Icons.EXPAND_MORE
+
+    def toggle(self, _=None) -> None:
+        self.set(not self.collapsed)
+        if self._on_toggle is not None:
+            self._on_toggle(self.collapsed)
+        if attached(self.control):
+            self.control.update()

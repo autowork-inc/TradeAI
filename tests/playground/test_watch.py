@@ -123,5 +123,28 @@ def test_api_proxy_forwards_with_secret_and_maps_failures():
     assert c.get("/api/watch/view", params={"strategy": "ICT_Killzones", "symbol": "BTCUSDT"}).json() == {"ok": 1}
     assert seen["token"] == "k" * 32 and seen["url"] == "http://watch:8000/view?strategy=ICT_Killzones&symbol=BTCUSDT"
     assert c.get("/api/watch/view", params={"strategy": "ICT_Killzones", "symbol": "EURUSD"}).status_code == 422
+    assert c.get("/api/watch/view", params={"strategy": "ICT_Killzones", "symbol": "QUSDT"}).status_code == 200  # однобуквенный тикер (Q) - валиден
+    assert c.get("/api/watch/coins", params={"strategy": "ICT_Killzones"}).status_code == 200 and seen["url"].endswith("/coins?strategy=ICT_Killzones")
     down = app(httpx.MockTransport(lambda r: (_ for _ in ()).throw(httpx.ConnectError("no"))))
     assert down.get("/api/watch/meta").status_code == 503
+
+
+def test_coin_filter_keeps_coins_with_two_ok_checks_and_raises_threshold_over_15(data):
+    svc, _ = service(data)
+
+    def fake_view(oks_long, oks_short, stage=1):
+        side = lambda n: {"stage": stage, "text": "", "checks": [{"label": str(i), "ok": i < n, "value": ""} for i in range(5)]}  # noqa: E731
+        return {"sides": {"long": side(oks_long), "short": side(oks_short)}}
+
+    coins = [f"C{i}USDT" for i in range(20)]
+    svc.meta = lambda: {"strategies": {"ICT_Killzones": {"coins": coins}}, "live_strategies": []}
+    for i, c in enumerate(coins[:5]):
+        svc._views[("ICT_Killzones", c)] = (0, fake_view(i % 3, 1))  # оценки 0,1,2,0,1 (лонг) / 1 (шорт)
+    r = svc.coins("ICT_Killzones")
+    assert [x["coin"] for x in r["coins"]] == ["C2USDT"] and r["threshold"] == 2 and r["hidden"] == 4 and len(r["pending"]) == 15
+    svc._views[("ICT_Killzones", "C0USDT")] = (0, fake_view(0, 0, stage=3))  # сигнал виден всегда
+    assert "C0USDT" in [x["coin"] for x in svc.coins("ICT_Killzones")["coins"]]
+    for i, c in enumerate(coins):
+        svc._views[("ICT_Killzones", c)] = (0, fake_view(3 if i < 4 else 2, 0))
+    r = svc.coins("ICT_Killzones")
+    assert r["threshold"] == 3 and [x["coin"] for x in r["coins"]] == coins[:4] and all(x["score"] == 3 and x["side"] == "long" for x in r["coins"])

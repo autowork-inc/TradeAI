@@ -220,6 +220,25 @@ def _insert_below(hwnd: int, after: int) -> None:
         ctypes.windll.user32.SetWindowPos(hwnd, after, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
 
 
+def _allow_activation(hwnd: int) -> None:
+    """Снять WS_EX_NOACTIVATE, который pywebview ставит окну с focus=False: с ним окно нельзя активировать - оно проваливается под все приложения
+    и не выходит наверх, когда закрывают окно над ним (жалоба 2026-10-24)."""
+    import ctypes
+    import os
+
+    if os.name == "nt":
+        user32 = ctypes.windll.user32
+        user32.SetWindowLongW(hwnd, -20, user32.GetWindowLongW(hwnd, -20) & ~0x8000000)
+
+
+def _is_right_below(hwnd: int, after: int) -> bool:
+    """Окно стоит сразу под `after` в порядке окон (GetWindow(after, GW_HWNDNEXT) == hwnd)."""
+    import ctypes
+    import os
+
+    return os.name != "nt" or int(ctypes.windll.user32.GetWindow(after, 2) or 0) == hwnd
+
+
 def _raise_once(win: Any) -> None:
     """Поднять окно поверх остальных один раз (Windows не даёт фокус новому процессу - короткий on_top это обходит) и не держать его «всегда сверху»."""
     win.on_top = True
@@ -280,9 +299,16 @@ def run_chart_window(spec: dict[str, Any]) -> None:
         me.write_text(json.dumps({"order": order, "beat": time.time(), "hwnd": state["hwnd"]}), encoding="utf-8")
         after = place_after(_read_stack(), key, time.time())
         if after is not None and state["hwnd"] is not None:
-            _insert_below(state["hwnd"], after)  # в фоне, прямо под предыдущим окном графика
+            for _ in range(10):  # в фоне, прямо под предыдущим окном графика; показ/разворот окна может переставить его - проверяем и повторяем
+                _insert_below(state["hwnd"], after)
+                time.sleep(0.15)
+                if _is_right_below(state["hwnd"], after):
+                    break
         elif first:
             _raise_once(win)  # самое первое окно - спереди
+        if state["hwnd"] is not None:
+            win.focus = True  # pywebview больше не вернёт WS_EX_NOACTIVATE при активации
+            _allow_activation(state["hwnd"])  # окно в фоне, но его можно активировать (клик, закрытие окна над ним)
         while not closed.is_set():
             me.write_text(json.dumps({"order": order, "beat": time.time(), "hwnd": state["hwnd"]}), encoding="utf-8")
             closed.wait(STACK_POLL_S)

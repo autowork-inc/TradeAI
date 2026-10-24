@@ -309,8 +309,23 @@ class Shell:
         self._persist_prefs()
 
     def _apply_window_state(self) -> None:
-        """TradeAI Monitor всегда открывается на весь экран (1.6.0, решение пользователя)."""
+        """TradeAI Monitor всегда открывается на весь экран (1.6.0, решение пользователя). Флаг, выставленный до показа окна, Windows иногда теряет
+        (после автообновления окно открылось обычным, 1.8.1) - поэтому разворот повторяется, когда окно уже на экране."""
         self.page.window.maximized = True
+        self.run(self._maximize_when_shown())
+
+    async def _maximize_when_shown(self) -> None:
+        import os
+
+        if os.name != "nt":
+            return
+        import ctypes
+
+        for delay in (0.5, 1.5, 3.0):  # окно Flet (отдельный процесс flet.exe) находим по заголовку; уже развёрнутому SW_MAXIMIZE ничего не делает
+            await asyncio.sleep(delay)
+            hwnd = ctypes.windll.user32.FindWindowW(None, self.page.title or APP_NAME)
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
 
     async def _refresh_tab(self) -> None:
         if self._tab == TAB_STATS:

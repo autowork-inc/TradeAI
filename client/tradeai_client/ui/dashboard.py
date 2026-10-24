@@ -31,16 +31,27 @@ class DashboardView:
         self._head = ft.Row(spacing=12)
         self._error = ft.Container(visible=False)
         self._news = ft.Column(spacing=4, tight=True)
-        self._news_box = ft.Column([w.title("Важные новости недели", 15), w.card(self._news, padding=10)], spacing=8, visible=False)
+        saved = host.view_state("dashboard") if host is not None and hasattr(host, "view_state") else None
+        self._collapsed: dict[str, bool] = dict((saved or {}).get("collapsed") or {})  # свёрнутые секции (1.8.1): запоминаются по профилю
+        self._news_sec = w.Collapsible("Важные новости недели", w.card(self._news, padding=10), collapsed=self._collapsed.get("news", False),
+                                       on_toggle=lambda c: self._remember_collapsed("news", c))
+        self._news_box = ft.Column([self._news_sec.control], visible=False)
         # Live-Dashboard (1.8.0, только SANTA): LIVE-графики боевых стратегий и окно остальных стратегий - над карточками монет
-        self.live = LiveBoard(host) if host is not None and hasattr(host, "client") and hasattr(host, "run") else None
+        self.live = LiveBoard(host, self._collapsed, self._remember_collapsed) if host is not None and hasattr(host, "client") and hasattr(host, "run") else None
         self._live_started = False
         if self.live is not None:
             self.live.control.visible = False
         self.control = ft.Column(
-            [self._head, self._error, *([self.live.control] if self.live is not None else []), self._cards, ft.Container(height=6), self._news_box, w.title("События", 15), w.card(self._events, padding=10)],
+            [self._head, self._error, *([self.live.control] if self.live is not None else []), self._cards, ft.Container(height=6), self._news_box,
+             w.Collapsible("События", w.card(self._events, padding=10), collapsed=self._collapsed.get("events", False),
+                           on_toggle=lambda c: self._remember_collapsed("events", c)).control],
             expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
         self.show_placeholder("Ожидание данных от сервера…")
+
+    def _remember_collapsed(self, key: str, collapsed: bool) -> None:
+        self._collapsed[key] = collapsed
+        if self.host is not None and hasattr(self.host, "remember_view"):
+            self.host.remember_view("dashboard", {"collapsed": dict(self._collapsed)})
 
     # ------------------------------------------------------------------------------------------ новости
 
@@ -109,13 +120,13 @@ class DashboardView:
                 self._live_started = True
                 self.host.run(self.live.refresh())
         crypto, mt5 = split_coins(shown)
-        self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (cTrader)", mt5, MT5_COL)]
+        self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL, "crypto"), *self._section("Форекс / Металлы (cTrader)", mt5, MT5_COL, "forex")]
         events = [e for e in s["events"] if (pool is None or e["coin"] in pool) and (strategies is None or e.get("strategy_id") in strategies or e.get("strategy") in strategies)]
         self._events.controls = [self._event_row(e) for e in events] or [w.label("Событий пока нет")]
 
     # ------------------------------------------------------------------------------------------ карточки
 
-    def _section(self, name: str, coins: list[dict], col: dict) -> list[ft.Control]:
+    def _section(self, name: str, coins: list[dict], col: dict, key: str) -> list[ft.Control]:
         if not coins:
             return []
         cards = []
@@ -123,9 +134,11 @@ class DashboardView:
             card = self._coin_card(c)
             card.col = col
             cards.append(card)
-        return [ft.Row([w.title(f"{name} · {len(coins)}", 15), ft.Container(expand=True, height=1, bgcolor=w.BORDER)], spacing=10,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.ResponsiveRow(cards, spacing=14, run_spacing=14, vertical_alignment=ft.CrossAxisAlignment.START)]
+        sec = w.Collapsible(f"{name} · {len(coins)}", ft.ResponsiveRow(cards, spacing=14, run_spacing=14, vertical_alignment=ft.CrossAxisAlignment.START),
+                            collapsed=self._collapsed.get(key, False), on_toggle=lambda c: self._remember_collapsed(key, c),
+                            extra=[ft.Container(expand=True, height=1, bgcolor=w.BORDER)])
+        sec.header.content.expand = True
+        return [sec.control]
 
     def _coin_card(self, c: dict) -> ft.Control:
         active = max((x["state"] for x in c["setups"] if "chr_positions" not in x), default=0)

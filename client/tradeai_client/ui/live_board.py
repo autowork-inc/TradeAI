@@ -36,6 +36,7 @@ class Panel:
         self.board, self.strategy, self.live, self.coin = board, strategy, live, None
         self.view: dict | None = None
         self.error: str | None = None
+        self.coins_note = ""
         self._coin_dd = ft.Dropdown(label="Монета", width=170, dense=True, border_color=w.BORDER, bgcolor=w.CARD, on_select=self._coin_changed)
         self._strat_dd = None
         if strategies:
@@ -52,11 +53,18 @@ class Panel:
 
     # ------------------------------------------------------------------------------------------ выбор
 
-    def set_coins(self, coins: list[str], preferred: str | None = None) -> None:
-        self._coin_dd.options = [ft.DropdownOption(key=c, text=fmt.coin_short(c)) for c in coins]
+    def set_coins(self, coins: list[str], preferred: str | None = None, labels: dict[str, str] | None = None) -> None:
+        labels = labels or {}
+        self._coin_dd.options = [ft.DropdownOption(key=c, text=labels.get(c, fmt.coin_short(c))) for c in coins]
         if self.coin not in coins:
             self.coin = preferred if preferred in coins else (coins[0] if coins else None)
         self._coin_dd.value = self.coin
+
+    async def refresh_coins(self) -> None:
+        """Выбор монет - только где стратегия видит что-то близкое к сетапу (фильтр сервиса watch); монета с позицией бота - всегда."""
+        coins, labels, note = await self.board.filtered_coins(self.strategy)
+        self.coins_note = note
+        self.set_coins(coins, self.board.preferred_coin(self.strategy), labels)
 
     def _coin_changed(self, e=None) -> None:
         self.coin = self._coin_dd.value
@@ -66,9 +74,12 @@ class Panel:
     def _strategy_changed(self, e=None) -> None:
         self.strategy = self._strat_dd.value
         self.coin = None
-        self.set_coins(self.board.coins_for(self.strategy), self.board.preferred_coin(self.strategy))
+        self.board.host.run(self._switch())
+
+    async def _switch(self) -> None:
+        await self.refresh_coins()
         self.board.remember()
-        self.board.host.run(self.load())
+        await self.load()
 
     # ------------------------------------------------------------------------------------------ данные
 
@@ -96,7 +107,7 @@ class Panel:
         positions = [p for p in self.board.positions(v["symbol"]) if p.get("strategy_name") == self.strategy]
         self._chart.content = candle_chart(v["candles"], interval_ms=IV_MS.get(v["interval"], 900_000), geometry=v["geometry"],
                                            levels=position_levels(positions), forming=v.get("forming"), width=width, height=320)
-        self._summary.value = f"{v['interval']} · {v['summary']}" + (f" · обновлено с ошибкой: {self.error}" if self.error else "")
+        self._summary.value = f"{v['interval']} · {v['summary']}" + (f" · {self.coins_note}" if self.coins_note else "") +             (f" · обновлено с ошибкой: {self.error}" if self.error else "")
         cols = []
         for side in ("long", "short"):
             s = v["sides"][side]
@@ -115,7 +126,7 @@ class Panel:
 
 
 class LiveBoard:
-    def __init__(self, host) -> None:
+    def __init__(self, host, collapsed: dict | None = None, on_collapse=None) -> None:
         self.host = host
         self.meta: dict | None = None
         self._state: dict | None = None
@@ -124,8 +135,12 @@ class LiveBoard:
         self._live_row = ft.Row(spacing=14, vertical_alignment=ft.CrossAxisAlignment.START, wrap=False)
         self._other_box = ft.Column(spacing=8)
         self._note = ft.Text("", size=12, color=w.MUTED)
-        self.control = ft.Column([ft.Row([w.title("LIVE: как бот смотрит рынок", 15), self._note], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                                  self._live_row, w.title("Остальные стратегии: что ищет бот", 15), self._other_box], spacing=10)
+        collapsed, remember = collapsed or {}, on_collapse or (lambda k, c: None)
+        self._live_sec = w.Collapsible("LIVE: как бот смотрит рынок", self._live_row, collapsed=collapsed.get("live", False), extra=[self._note],
+                                       on_toggle=lambda c: remember("live", c))
+        self._other_sec = w.Collapsible("Остальные стратегии: что ищет бот", self._other_box, collapsed=collapsed.get("shadow", False),
+                                        on_toggle=lambda c: remember("shadow", c))
+        self.control = ft.Column([self._live_sec.control, self._other_sec.control], spacing=10)
         self._loop_started = False
 
     # ------------------------------------------------------------------------------------------ данные бота (live_state)
@@ -145,6 +160,25 @@ class LiveBoard:
 
     def coins_for(self, strategy: str) -> list[str]:
         return list(((self.meta or {}).get("strategies") or {}).get(strategy, {}).get("coins") or [])
+
+    async def filtered_coins(self, strategy: str) -> tuple[list[str], dict[str, str], str]:
+        """(монеты, подписи, пояснение): прошедшие фильтр сервиса (>= 2 условий; больше 15 - >= 3), лучшие сверху, + монеты с позицией этой стратегии.
+        Сервис ещё не посчитал монеты (только запустился) или недоступен - все монеты стратегии."""
+        every = self.coins_for(strategy)
+        held = [c["coin"] for c in (self._state or {}).get("coins", []) if any(p.get("strategy_name") == strategy for p in c.get("positions", []))]
+        try:
+            data = await self.host.client.watch_coins(strategy)
+        except ApiError:
+            return every, {}, ""
+        if not data["coins"] and data["pending"]:
+            return every, {}, f"монеты ещё считаются ({data['total'] - len(data['pending'])} из {data['total']})"
+        labels = {r["coin"]: f"{fmt.coin_short(r['coin'])} · {r['score']}✓ {'▲' if r['side'] == 'long' else '▼'}" + (" СИГНАЛ" if r["stage"] == 3 else "")
+                  for r in data["coins"]}
+        coins = list(dict.fromkeys([*held, *(r["coin"] for r in data["coins"])]))
+        if not coins:  # ни одна монета не набрала порог: чтобы окно не было пустым - лучшие по числу условий (их нет в фильтре - так и подписано)
+            return every[:5], {}, f"ни одна монета не набрала {data['threshold']} условий - показаны первые"
+        note = f"монет {len(coins)} из {data['total']} (≥{data['threshold']} условий)"
+        return coins, labels, note
 
     def preferred_coin(self, strategy: str) -> str | None:
         """Монета, на которую интереснее смотреть: позиция этой стратегии, иначе самый продвинутый сетап автомата (SMC), иначе первая."""
@@ -212,6 +246,7 @@ class LiveBoard:
                 return
             self._build()
         self._note.value = f"обновление раз в {int(REFRESH_S)} с · стратегии считают по закрытым свечам, формирующаяся показана бледнее"
+        await asyncio.gather(*(p.refresh_coins() for p in self._panels()))
         await asyncio.gather(*(p.load() for p in self._panels()))
         if not self._loop_started:
             self._loop_started = True
@@ -222,4 +257,5 @@ class LiveBoard:
             await asyncio.sleep(REFRESH_S)
             if self.host.client is None or not self.control.visible or not w.attached(self.control) or getattr(self.host, "_tab", 0) != 0:
                 continue
+            await asyncio.gather(*(p.refresh_coins() for p in self._panels()))
             await asyncio.gather(*(p.load() for p in self._panels()))

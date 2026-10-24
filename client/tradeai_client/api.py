@@ -134,6 +134,10 @@ class ApiClient:
     async def watch_meta(self) -> dict[str, Any]:
         return await self._get("/api/watch/meta")
 
+    async def watch_coins(self, strategy: str) -> dict[str, Any]:
+        """Монеты стратегии, где выполнено >= 2 условий входа (больше 15 таких - >= 3), лучшие сверху."""
+        return await self._get("/api/watch/coins", [("strategy", strategy)])
+
     async def watch_view(self, strategy: str, symbol: str) -> dict[str, Any]:
         return await self._get("/api/watch/view", [("strategy", strategy), ("symbol", symbol)])
 

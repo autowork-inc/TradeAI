@@ -34,7 +34,11 @@ def install(app: FastAPI, settings: Settings, auth: Callable, transport: httpx.A
     async def meta() -> Response:
         return await forward("meta", {})
 
+    @app.get("/api/watch/coins", dependencies=[Depends(auth)])
+    async def coins(strategy: Annotated[str, Query(pattern=r"^[A-Za-z_]{3,40}$")]) -> Response:
+        return await forward("coins", {"strategy": strategy})
+
     @app.get("/api/watch/view", dependencies=[Depends(auth)])
-    async def view(strategy: Annotated[str, Query(pattern=r"^[A-Za-z_]{3,40}$")], symbol: Annotated[str, Query(pattern=r"^[A-Z0-9]{2,20}USDT$")]) -> Response:
+    async def view(strategy: Annotated[str, Query(pattern=r"^[A-Za-z_]{3,40}$")], symbol: Annotated[str, Query(pattern=r"^[A-Z0-9]{1,20}USDT$")]) -> Response:
         return await forward("view", {"strategy": strategy, "symbol": symbol})
 

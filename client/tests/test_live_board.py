@@ -50,6 +50,11 @@ class Client:
     async def watch_meta(self):
         return FX["meta"]
 
+    async def watch_coins(self, strategy):
+        coins = FX["meta"]["strategies"][strategy]["coins"]
+        return {"strategy": strategy, "threshold": 2, "total": len(coins), "pending": [], "hidden": len(coins) - 1,
+                "coins": [{"coin": coins[-1], "score": 3, "side": "short", "stage": 2}]}
+
     async def watch_view(self, strategy, symbol):
         self.views.append((strategy, symbol))
         return FX["views"].get(strategy, FX["views"]["ICT_Killzones"])
@@ -92,7 +97,10 @@ def test_one_live_chart_per_live_strategy_and_other_strategies_window():
     asyncio.run(b.refresh())
     assert [p.strategy for p in b.live_panels] == FX["meta"]["live_strategies"] == ["SMC_Pro_Trend"]  # одна боевая стратегия - один LIVE-график
     assert b.other is not None and b.other.strategy not in FX["meta"]["live_strategies"]
-    assert ("SMC_Pro_Trend", "BTCUSDT") in host.client.views and b.other.coin == FX["meta"]["strategies"][b.other.strategy]["coins"][0]
+    assert ("SMC_Pro_Trend", "BTCUSDT") in host.client.views  # монета с позицией бота - в выборе всегда, даже если фильтр её не прошёл
+    others = FX["meta"]["strategies"][b.other.strategy]["coins"]
+    assert b.other.coin == others[-1] and [o.key for o in b.other._coin_dd.options] == [others[-1]]  # остальные: только прошедшие фильтр
+    assert "3✓ ▼" in b.other._coin_dd.options[0].text and "≥2 условий" in b.other.coins_note
     body = texts(b.control)
     assert "LIVE" in body and "Позиция бота" in body and "SL 82077.28" in body.replace("SL ", "SL ") and "наблюдает" in body
 
@@ -103,8 +111,9 @@ def test_switching_strategy_resets_coin_and_is_remembered():
     asyncio.run(b.refresh())
     b.other._strat_dd.value = "Trendline_Breakout_CHR"
     b.other._strategy_changed()
-    assert b.other.strategy == "Trendline_Breakout_CHR" and b.other.coin == "BTCUSDT"
-    assert host.saved["live_board"]["other"] == ["Trendline_Breakout_CHR", "BTCUSDT"]
+    asyncio.run(b.other._switch())
+    assert b.other.strategy == "Trendline_Breakout_CHR" and b.other.coin == FX["meta"]["strategies"]["Trendline_Breakout_CHR"]["coins"][-1]
+    assert host.saved["live_board"]["other"] == ["Trendline_Breakout_CHR", b.other.coin]
     asyncio.run(b.other.load())
     assert "наклон" in texts(b.other.control)
 

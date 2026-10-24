@@ -4,6 +4,7 @@
 
 GET /meta                         -> live-стратегии (APPROVED_STRATEGIES), все стратегии с их таймфреймом и монетами (автоселектор бота, только крипта)
 GET /view?strategy=..&symbol=..   -> взгляд стратегии + формирующаяся свеча
+GET /coins?strategy=..            -> монеты, где выполнено >= 2 условий (больше 15 таких - >= 3); фоновый прогрев держит взгляды всех монет свежими
 
 Свечи: публичный REST Binance, кэш по (монета, таймфрейм): закрытые перекачиваются только после закрытия новой свечи, формирующаяся - не чаще раза в 10 с.
 Контекст строится как в боте: окно последних 300/90 закрытых свечей -> FeatureEngine -> MtfState (4h; у SMC_Pro_Trend 1h + 1d). Взгляд кэшируется до
@@ -39,6 +40,8 @@ log = logging.getLogger("playground.watch_server")
 
 HISTORY = {"15m": 300, "5m": 300, "1h": D.MTF_STRUCT_HISTORY_BARS, "4h": D.HTF_HISTORY_BARS, "1d": D.MTF_BIAS_HISTORY_BARS}
 FORMING_TTL_S = 10.0
+COINS_MIN_OK = 2  # монета видна в выборе, если по какой-то стороне выполнено столько условий чек-листа (решение пользователя 2026-10-24)
+COINS_MAX = 15  # таких больше - порог +1
 UNIVERSE_FILE = ".symbol_universe.json"
 OHLCV = ["open_time", "open", "high", "low", "close", "volume"]
 
@@ -127,6 +130,13 @@ class WatchService:
     # ------------------------------------------------------------------------------------------ взгляд
 
     async def view(self, name: str, symbol: str) -> dict[str, Any]:
+        out = dict(await self.look(name, symbol))
+        out["forming"] = await self.forming(symbol, self.strategies[name].interval)
+        out["server_ms"] = self.now_ms()
+        return out
+
+    async def look(self, name: str, symbol: str) -> dict[str, Any]:
+        """Взгляд стратегии на последней закрытой свече (кэш до следующей), без формирующейся свечи."""
         s = self.strategies.get(name)
         if s is None:
             raise DataError(f"неизвестная стратегия {name}")
@@ -145,10 +155,47 @@ class WatchService:
                     v = await asyncio.to_thread(self._compute, s, symbol, tf, work, states, htf)
                     cached = (bar, v)
                     self._views[(name, symbol)] = cached
-        out = dict(cached[1])
-        out["forming"] = await self.forming(symbol, tf)
-        out["server_ms"] = self.now_ms()
-        return out
+        return cached[1]
+
+    # ------------------------------------------------------------------------------------------ фильтр монет
+
+    def coins(self, name: str) -> dict[str, Any]:
+        """Монеты стратегии, где по какой-либо стороне выполнено >= 2 условий чек-листа (если таких больше COINS_MAX - >= 3), лучшие сверху.
+        Считается по уже посчитанным взглядам (их держит в актуальном виде фоновый прогрев `warm`); ещё не посчитанные - в `pending`."""
+        if name not in self.strategies:
+            raise DataError(f"неизвестная стратегия {name}")
+        all_coins = self.meta()["strategies"][name]["coins"]
+        rows, pending = [], []
+        for c in all_coins:
+            got = self._views.get((name, c))
+            if got is None:
+                pending.append(c)
+                continue
+            best = max(got[1]["sides"].items(), key=lambda kv: (sum(1 for x in kv[1]["checks"] if x["ok"] is True), kv[1]["stage"]))
+            rows.append({"coin": c, "score": sum(1 for x in best[1]["checks"] if x["ok"] is True), "side": best[0], "stage": max(v["stage"] for v in got[1]["sides"].values())})
+        rows.sort(key=lambda r: (r["stage"] != 3, -r["score"], -r["stage"]))  # сигналы первыми, дальше - больше выполненных условий
+        threshold = COINS_MIN_OK
+        if sum(1 for r in rows if r["score"] >= threshold) > COINS_MAX:
+            threshold += 1
+        keep = [r for r in rows if r["score"] >= threshold or r["stage"] == 3]  # сигнал показывается всегда
+        return {"strategy": name, "threshold": threshold, "coins": keep, "hidden": len(rows) - len(keep), "pending": pending, "total": len(all_coins)}
+
+    async def warm(self, pause_s: float = 2.0) -> None:
+        """Фон: держать взгляды всех стратегий по всем монетам свежими (для фильтра монет). Пересчёт - только когда закрылась новая свеча (кэш look)."""
+        while True:
+            meta = self.meta()
+            for name, info in meta["strategies"].items():
+                for coin in info["coins"]:
+                    try:
+                        await self.look(name, coin)
+                    except DataError as exc:  # монета слишком новая / нет истории - пропускаем
+                        log.info("прогрев %s %s: %s", name, coin, exc)
+                    except TradingInfraError as exc:  # Binance недоступен / бан - пауза и следующий круг
+                        log.warning("прогрев остановлен: %s", exc)
+                        await asyncio.sleep(60)
+                        break
+                    await asyncio.sleep(0.05)
+            await asyncio.sleep(pause_s)
 
     def _compute(self, s, symbol: str, tf: str, work: pl.DataFrame, states: dict[str, pl.DataFrame], htf: MtfState) -> dict:
         received = self.now_ms()
@@ -187,7 +234,14 @@ def make_app(service: WatchService, token: str) -> web.Application:
 
     app.router.add_get("/health", health)
     app.router.add_get("/meta", meta)
+    async def coins(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(service.coins(request.query.get("strategy", "")))
+        except DataError as exc:
+            return web.json_response({"detail": f"data: {exc}"}, status=422)
+
     app.router.add_get("/view", view)
+    app.router.add_get("/coins", coins)
     return app
 
 
@@ -204,8 +258,7 @@ async def main() -> None:
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", 8000).start()
         log.info("watch: слушаю :8000, стратегий %d", len(service.strategies))
-        while True:
-            await asyncio.sleep(3600)
+        await service.warm()  # фоновый прогрев взглядов для фильтра монет; ошибка кода - падение процесса (R1), Docker перезапускает
 
 
 if __name__ == "__main__":

@@ -287,11 +287,15 @@ def test_later_charts_open_in_the_background_under_the_previous_ones(monkeypatch
     monkeypatch.setattr(chart_window, "_window_args", lambda spec: (object(), "<html></html>"))
     monkeypatch.setattr(chart_window, "_own_hwnd", lambda title: 444)
     monkeypatch.setattr(chart_window, "_insert_below", lambda hwnd, after: placed.append((hwnd, after)))
+    monkeypatch.setattr(chart_window, "_is_right_below", lambda hwnd, after: True)
+    allowed = []
+    monkeypatch.setattr(chart_window, "_allow_activation", allowed.append)
     for key, order, hwnd in (("1", 1, 111), ("2", 2, 222), ("3", 3, 333)):
         (tmp_path / f"{key}.json").write_text(_json.dumps({"order": order, "beat": _time.time() + 60, "hwnd": hwnd}), encoding="utf-8")
     chart_window.run_chart_window({"title": "DOGE", "chart_order": 4})
     _, kw = calls["create"]
     assert kw["focus"] is False and placed == [(444, 333)] and calls["win"].shown == 0
+    assert allowed == [444]  # окно в фоне, но его можно активировать (без WS_EX_NOACTIVATE)
     assert chart_window.place_after({"a": {"order": 1, "beat": 9, "hwnd": 1}, "z": {"order": 9, "beat": 9}}, "z", 10) == 1
 
 """Окно графика: сборка страницы (конфиг без секретов, JS-файлы внутри), мост ChartApi (свечи, рисунки, избранное), хранилище рисунков, JS без синтаксических ошибок.
