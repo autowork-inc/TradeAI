@@ -149,7 +149,10 @@ class Orchestrator:
             return self._event(ctx, "skipped_stale", signal, {**base, "age_ms": age})
         for gate in self._gates:
             reason = gate.check(signal, ctx.received_ms)
-            if reason is not None:
+            if reason is not None and getattr(gate, "tag_only", False):  # фильтр-метка (новости, 2026-10-24): сигнал идёт дальше с пометкой в meta
+                signal.meta[gate.name] = reason
+                self._event(ctx, f"tagged_{gate.name}", signal, {**base, "reason": reason})
+            elif reason is not None:
                 return self._event(ctx, "skipped_filter", signal, {**base, "filter": gate.name, "reason": reason})
         lock = self.lock_for(signal.strategy)
         owner = Owner(signal.strategy, signal.signal_id)

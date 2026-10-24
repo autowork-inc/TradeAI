@@ -35,10 +35,9 @@ def normalize_coin(text: str) -> str:
 
 
 def coins_for(profile: str, extra: list[str] | tuple[str, ...] = ()) -> list[str] | None:
-    """Пул монет профиля; None - без ограничения (SANTA). Для CHR - умолчания плюс добавленные пользователем, без повторов."""
-    if normalize_profile(profile) != CHR:
-        return None
-    return list(dict.fromkeys([*CHR_DEFAULT_COINS, *extra]))
+    """Пул монет профиля: None - без ограничения. 1.6.0: и у CHR тоже - его стратегии торгуют на всём пуле бота (альты Binance Test, крипта, MT5),
+    а прежний пул из 6 монет прятал почти все его сделки (Dashboard и History были пустыми). Профиль CHR ограничивает только стратегии."""
+    return None
 
 
 def strategies_for(profile: str) -> list[str] | None:

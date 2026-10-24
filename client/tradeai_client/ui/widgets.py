@@ -393,6 +393,19 @@ class FilterSelect:
         if attached(self.control):
             self.control.update()
 
+    def state(self) -> dict:
+        """Для запоминания (1.6.0): выбранные ключи (None - «Все») и вид."""
+        return {"selected": self.keys(), "multi": self._is_multi}
+
+    def restore(self, state: dict | None) -> None:
+        """Вернуть сохранённый выбор (неизвестные ключи отбрасываются; ничего не осталось - «Все»)."""
+        if not isinstance(state, dict):
+            return
+        self.set_multi(bool(state.get("multi")))
+        selected = state.get("selected")
+        if isinstance(selected, list) and selected:
+            self.set_selected([k for k in selected if isinstance(k, str)])
+
 
 class FilterBar:
     """Тумблер «Мультивыбор» для набора `FilterSelect`: ВЫКЛ - все фильтры обычные выпадающие списки, ВКЛ - каждый открывает диалог с чекбоксами."""

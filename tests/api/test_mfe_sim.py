@@ -36,12 +36,14 @@ def trade(**kw):
 FEE = 0.0005 * 100  # вход MARKET, R = 1
 
 
-def test_every_status_with_entry_is_taken_live_duplicates_and_bad_stops_are_counted():
+def test_every_status_with_entry_and_live_copies_are_taken_bad_stops_are_counted():
     rows = [row(id="a", status="aborted"), row(id="b", status="closed"), row(id="c", status="open"),
-            row(id="a:live", mode="live"), row(id="x:live", mode="live"), row(id="bad", sl=101.0)]
+            row(id="a:live", mode="live"), row(id="x:live", mode="live"), row(id="bad", sl=101.0), row(id="chr", strategy="Trendline_Breakout_CHR")]
     trades, counts = m.select_trades(rows)
-    assert [t.id for t in trades] == ["a", "b", "c", "x:live"]  # live без теневой пары - своя сделка
-    assert counts == {"rows": 6, "live_duplicates": 1, "bad_stop": 1}
+    assert [t.id for t in trades] == ["a", "b", "c", "a:live", "x:live"]  # 1.6.0: live-копии тоже считаются
+    assert counts == {"rows": 6, "live_copies": 1, "bad_stop": 1, "other_profile": 1}
+    chr_trades, chr_counts = m.select_trades(rows, "chr")  # профиль CHR - только свои стратегии
+    assert [t.id for t in chr_trades] == ["chr"] and chr_counts["other_profile"] == 6
 
 
 def test_take_profit_before_stop_and_pessimism_inside_one_candle():
@@ -49,14 +51,16 @@ def test_take_profit_before_stop_and_pessimism_inside_one_candle():
     r = m.simulate_path(t, path((101.6, 99.5), (100.5, 98.5)), t.sl, NOW)
     assert r.by_tp[1.5] == pytest.approx(1.5 - FEE - 0.0005 * 101.5) and r.by_tp[2.0] == pytest.approx(-1 - FEE - 0.0005 * 99)
     assert r.mfe_r == pytest.approx(1.6) and r.stop_hit_ms == T0 + 2 * MIN
+    # Scale Out бота: 50% на +1R взято, остаток на 2R не дошёл - стоп
+    assert r.outcome(2.0, scale=True) == pytest.approx(0.5 - 0.5 - FEE - 0.5 * 0.0005 * 101 - 0.5 * 0.0005 * 99)
     both = m.simulate_path(t, path((102.5, 98.9)), t.sl, NOW)  # одна свеча задела и тейк 2R, и стоп -> стоп
     assert both.by_tp[2.0] == pytest.approx(-1 - FEE - 0.0005 * 99) and both.mfe_r == 0.0
 
 
-def test_unfinished_path_is_not_counted_and_horizon_closes_at_last_close():
+def test_open_trade_is_counted_at_the_current_price_and_horizon_closes_at_last_close():
     t = trade()
-    live = m.simulate_path(t, path((100.5, 99.5)), t.sl, now_ms=T0 + 10 * MIN)
-    assert live.by_tp[1.0] is None
+    live = m.simulate_path(t, path((100.5, 99.5), close=100.3), t.sl, now_ms=T0 + 10 * MIN)
+    assert live.open_now and live.by_tp[1.0] == pytest.approx(0.3 - FEE - 0.0005 * 100.3)  # открытая: по текущей цене
     done = m.simulate_path(t, path((100.5, 99.5), close=100.4), t.sl, now_ms=NOW)
     assert done.by_tp[4.0] == pytest.approx(0.4 - FEE - 0.0005 * 100.4)
 
@@ -103,7 +107,7 @@ class FakePool:
             async def __aexit__(self, *a):
                 return False
 
-            async def fetch(self, sql, since):
+            async def fetch(self, sql, since, until):
                 return pool.rows
         return Ctx()
 
@@ -125,9 +129,11 @@ def test_http_job_runs_in_background_and_reports(monkeypatch):
             asyncio.run(asyncio.sleep(0.01))
         assert st["status"] == "done", st
         rep = st["report"]
-        assert rep["counts"]["with_entry"] == 2 and rep["counts"]["simulated"] == 1 and rep["counts"]["live_duplicates"] == 1
-        assert rep["counts"]["no_candles_symbols"] == ["EURUSD"]
+        assert rep["counts"]["with_entry"] == 3 and rep["counts"]["simulated"] == 2 and rep["counts"]["live_copies"] == 1
+        assert rep["counts"]["no_candles_symbols"] == ["EURUSD"] and rep["scale_matrix"] and rep["verdict"]["best_plain"]
         assert rep["verdict"]["best_tp"] == 4.0 and [r["tp"] for r in rep["tp_matrix"]] == list(m.TP_GRID)
+        assert c.get("/api/mfe/status?scope=chr").json()["status"] == "idle"  # у профиля CHR своё задание
+        assert c.post("/api/mfe/run?since=2026-10-22&until=2026-10-21").status_code == 422
         assert {"symbol": "BTCUSDT", "interval": "1m"}.items() <= dict(calls[0].url.params).items()
         assert c.post("/api/mfe/run?since=bad").status_code == 422
 
@@ -144,3 +150,37 @@ def test_binance_ban_stops_the_job_with_a_clear_message(monkeypatch):
                 break
             asyncio.run(asyncio.sleep(0.01))
         assert st["status"] == "failed" and "ограничил" in st["error"]
+
+
+def test_strategy_state_reads_auto_tp_overrides_and_templates_by_profile(tmp_path):
+    import json
+
+    data = tmp_path / "live"
+    data.mkdir()
+    (data / ".auto_tp.json").write_text(json.dumps({"updated_ms": 5, "since": "2026-10-22", "strategies": {
+        "ICT_Killzones": {"tp_r": 6.5, "n": 7}, "Trendline_Breakout_CHR": {"tp_r": 2.0, "n": 5}}}), encoding="utf-8")
+    lab = tmp_path / "lab"
+    (lab / "proposals").mkdir(parents=True)
+    (lab / "strategy_overrides.json").write_text(json.dumps({"version": 1, "strategies": {"ICT_Killzones": {"params": {"x": 1}}}}), encoding="utf-8")
+    (lab / "proposals" / "p.json").write_text(json.dumps({"id": "p", "strategy": "ICT_Killzones", "title": "t", "status": "template"}), encoding="utf-8")
+    santa = m.read_strategy_state([data], lab, "santa")
+    assert santa["auto_tp"]["strategies"] == {"ICT_Killzones": {"tp_r": 6.5, "n": 7}} and santa["proposals"][0]["status"] == "template"
+    assert "ICT_Killzones" in santa["overrides"]
+    chr_ = m.read_strategy_state([data], lab, "chr")
+    assert list(chr_["auto_tp"]["strategies"]) == ["Trendline_Breakout_CHR"] and chr_["proposals"] == [] and chr_["overrides"] == {}
+
+
+def test_news_endpoint_reads_the_freshest_bot_calendar(tmp_path):
+    import json
+
+    from api.main import read_news
+
+    old, new = tmp_path / "shadow", tmp_path / "live"
+    old.mkdir()
+    new.mkdir()
+    (old / ".news_calendar.json").write_text(json.dumps({"loaded_ms": 1, "events": [[1792413000000, "USD", "старое"]]}), encoding="utf-8")
+    (new / ".news_calendar.json").write_text(json.dumps({"loaded_ms": 5, "events": [[1792499400000, "USD", "Federal Funds Rate"],
+                                                                                    [1792413000000, "CAD", "CPI m/m"]]}), encoding="utf-8")
+    data = read_news([old, new])
+    assert data["loaded_ms"] == 5 and [e["title"] for e in data["events"]] == ["CPI m/m", "Federal Funds Rate"] and data["events"][0]["ts"].endswith("Z")
+    assert read_news([tmp_path / "none"]) == {"loaded_ms": None, "events": []}

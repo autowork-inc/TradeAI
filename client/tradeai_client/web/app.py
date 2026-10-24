@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -28,7 +29,8 @@ from tradeai_client.web import auth, charts
 log = logging.getLogger("tradeai.web")
 TOKEN_KEY = "tradeai_web_token"
 NARROW_PX = 700  # уже этого - телефон: компактные отступы
-TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_MFE, TAB_FAVORITES = range(5)
+TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_MFE = range(4)  # «Избранное» - кнопка в History (1.6.0)
+UI_KEY = "tradeai_ui_state"
 STATUS_COLORS = {"ok": w.GREEN, "live": w.GREEN, "connecting": w.AMBER, "error": w.RED, "auth": w.RED, "throttled": w.RED}
 
 
@@ -70,9 +72,10 @@ class WebShell:
         self.tap_opens_chart = True  # на телефоне нет двойного тапа: один тап по сделке открывает график
         self._launcher = ft.UrlLauncher()
         page.services.append(self._launcher)
+        self.ui_state: dict = {}  # память интерфейса этой вкладки браузера (localStorage через SharedPreferences, ключ UI_KEY); до видов - они её читают
+        self.save_ui = None  # функция записи в браузер (ставит WebApp)
         self.dashboard, self.stats, self.history = DashboardView(self), StatsView(self), HistoryView(self)
         self.mfe = MfeView(self)
-        self.favorites = HistoryView(self, favorites=True)
         self._dot, self._status_text = w.dot(w.MUTED, 12), ft.Text("Подключение…", size=12, color=w.MUTED)
         self._account = ft.Text("", size=12, color=w.AMBER, weight=ft.FontWeight.W_600)
         self.control = self._build()
@@ -87,11 +90,10 @@ class WebShell:
                        spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         status = ft.Row([self._dot, self._status_text, self._account], spacing=8, wrap=True, run_spacing=2, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         header = ft.Column([title, status], spacing=0)
-        labels = [("Dashboard", ft.Icons.DASHBOARD), ("Statistics", ft.Icons.BAR_CHART), ("History", ft.Icons.HISTORY), ("MFE Simulator", ft.Icons.SCIENCE),
-                  ("Favorites", ft.Icons.STAR)]
-        tabs = ft.Tabs(length=5, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
+        labels = [("Dashboard", ft.Icons.DASHBOARD), ("Statistics", ft.Icons.BAR_CHART), ("History", ft.Icons.HISTORY), ("MFE Simulator", ft.Icons.SCIENCE)]
+        self._tabs_ctl = tabs = ft.Tabs(length=4, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label=t, icon=i) for t, i in labels], scrollable=True),
-            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.mfe.control, self.favorites.control],
+            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.mfe.control],
                           expand=True)], expand=True))
         return ft.Column([header, tabs], expand=True, spacing=6)
 
@@ -152,13 +154,18 @@ class WebShell:
 
     async def _refresh_account(self) -> None:
         client = self.client
+        if client is not None:
+            try:
+                self.dashboard.set_news(await client.news())
+            except ApiError:
+                pass  # нет календаря - карточка новостей просто не обновится
         if client is None:
             return
         try:
             info = await client.info()
         except ApiError:
             return
-        for view in (self.stats, self.history, self.favorites):
+        for view in (self.stats, self.history):
             view.set_coins(list(info.get("coins") or []))
         account = info.get("account")
         self._account.value = fmt.account_text(account, False) if fmt.has_balance(account) else ""
@@ -170,7 +177,31 @@ class WebShell:
 
     async def _tab_changed(self, e) -> None:
         self._tab = int(e.control.selected_index)
+        self.ui_state["tab"] = self._tab
+        self._save_ui()
         await self._refresh_tab()
+
+    def view_state(self, name: str) -> dict | None:
+        state = (self.ui_state.get("views") or {}).get(name)
+        return state if isinstance(state, dict) else None
+
+    def remember_view(self, name: str, state: dict) -> None:
+        self.ui_state.setdefault("views", {})[name] = state
+        self._save_ui()
+
+    def _save_ui(self) -> None:
+        if self.save_ui is not None:
+            self.page.run_task(self.save_ui, dict(self.ui_state))
+
+    def restore_ui(self, state: dict) -> None:
+        """Память браузера (1.6.0): последняя вкладка и фильтры History/Statistics - до первой загрузки данных."""
+        self.ui_state = state if isinstance(state, dict) else {}
+        for name, view in (("history", self.history), ("stats", self.stats)):
+            view.restore_state(self.view_state(name))
+        tab = self.ui_state.get("tab")
+        if isinstance(tab, int) and 0 <= tab < 4:
+            self._tab = tab
+            self._tabs_ctl.selected_index = tab
 
     async def _refresh_tab(self) -> None:
         if self._tab == TAB_STATS:
@@ -179,8 +210,6 @@ class WebShell:
             await self.history.refresh()
         elif self._tab == TAB_MFE:
             await self.mfe.refresh()
-        elif self._tab == TAB_FAVORITES:
-            await self.favorites.refresh()
 
     def remember_mode(self, mode: str | None) -> None:
         if mode not in fmt.MODE_KEYS:
@@ -192,8 +221,7 @@ class WebShell:
     # ------------------------------------------------------------------------------------------ сделка: избранное и карточка разбора
 
     def set_favorite_everywhere(self, trade_id: str, value: bool) -> None:
-        for view in (self.history, self.favorites):
-            view.set_favorite(trade_id, value)
+        self.history.set_favorite(trade_id, value)
 
     async def toggle_favorite(self, trade: dict) -> bool | None:
         client = self.client
@@ -327,8 +355,7 @@ class WebApp:
         """Мобильная раскладка: при узком экране отступы страницы минимальны (всё остальное - wrap/ResponsiveRow/горизонтальный скролл таблицы)."""
         self.page.padding = 8 if (self.page.width or 0) < NARROW_PX else 16
         if self.shell is not None:  # поворот телефона: History/Favorites переключаются между таблицей и карточками
-            for view in (self.shell.history, self.shell.favorites):
-                view.relayout()
+            self.shell.history.relayout()
         if w.attached(self.page.controls[0]) if self.page.controls else False:
             self.page.update()
 
@@ -378,6 +405,16 @@ class WebApp:
 
     async def open_app(self) -> None:
         self.shell = WebShell(self.page, self.cfg, self.logout)
+        try:  # память интерфейса браузера (1.6.0): недоступна - начинаем с умолчаний, это не ошибка входа
+            raw = await asyncio.wait_for(self.prefs.get(UI_KEY), timeout=5)
+        except asyncio.TimeoutError:
+            raw = None
+        self.shell.restore_ui(json.loads(raw) if isinstance(raw, str) and raw.startswith("{") else {})
+
+        async def save_ui(state: dict) -> None:
+            await self.prefs.set(UI_KEY, json.dumps(state))
+
+        self.shell.save_ui = save_ui
         self.page.controls.clear()
         self.page.add(self.shell.control)
         self.page.update()

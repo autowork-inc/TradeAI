@@ -107,7 +107,8 @@ class NewsCalendar:
     def __init__(self, fetch: Callable[[], Awaitable[list[NewsEvent]]], *, cache_path: Path | None = None,
                  refresh_s: float = config.NEWS_REFRESH_S, before_ms: int = config.NEWS_BLACKOUT_BEFORE_MS, after_ms: int = config.NEWS_BLACKOUT_AFTER_MS,
                  max_age_ms: int = config.NEWS_MAX_AGE_MS, wall_ms: Callable[[], int] = lambda: int(time.time() * 1000),
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep, tag_only: bool = False):
+        self.tag_only = tag_only  # True: сигнал в окне новости не отклоняется, а помечается meta.news (Оркестратор, signal_gates)
         self._fetch, self._cache = fetch, cache_path
         self._refresh_s, self._before, self._after, self._max_age = refresh_s, before_ms, after_ms, max_age_ms
         self._wall, self._sleep = wall_ms, sleep

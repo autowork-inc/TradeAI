@@ -66,6 +66,13 @@ class FakeClient:
         self.stat_calls.append(kw)
         return self.fx("stats.json")
 
+    async def news(self):
+        return {"loaded_ms": 1, "events": []}
+
+    async def trade_coins(self, strategies):
+        self.coin_calls = getattr(self, "coin_calls", []) + [list(strategies)]
+        return ["SOLUSDT", "DOGEUSDT"]
+
 
 # ======================================================================================== профили
 
@@ -82,8 +89,7 @@ def test_normalize_coin_maps_short_names_to_real_symbols():
 def test_profile_scopes():
     assert profiles.strategies_for("SANTA") is None and profiles.coins_for("SANTA", ["SOLUSDT"]) is None
     assert profiles.strategies_for("CHR") == ["Trendline_Breakout_CHR", "Horizontal_Breakout_CHR"]
-    assert profiles.coins_for("CHR") == ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSDT", "ETHUSDT"]
-    assert profiles.coins_for("CHR", ["SOLUSDT", "BTCUSDT"])[-1] == "SOLUSDT" and profiles.coins_for("CHR", ["BTCUSDT"]).count("BTCUSDT") == 1
+    assert profiles.coins_for("CHR") is None and profiles.coins_for("CHR", ["SOLUSDT"]) is None  # 1.6.0: CHR ограничивает только стратегии
     assert profiles.normalize_profile("???") == "SANTA" and profiles.normalize_profile(None) == "SANTA" and profiles.normalize_profile("CHR") == "CHR"
 
 
@@ -175,15 +181,15 @@ def test_multiselect_list_height_is_capped_for_long_lists():
 # ======================================================================================== профиль в видах
 
 
-def test_stats_filters_for_chr_use_its_strategies_and_coin_pool_and_hide_mode(fx):
+def test_stats_filters_for_chr_use_its_strategies_and_hide_mode(fx):
     santa = StatsView(Host())
     f = santa._filters()
     assert f["strategies"] is None and f["coins"] is None and santa._mode.visible is not False
     chr_view = StatsView(Host("CHR", ["SOLUSDT"]))
     f = chr_view._filters()
     assert f["strategies"] == ["Trendline_Breakout_CHR", "Horizontal_Breakout_CHR"] and f["mode"] == "shadow"
-    assert f["coins"] == profiles.coins_for("CHR", ["SOLUSDT"]) and chr_view._mode.visible is False
-    assert [k for k, _ in chr_view._coin._options] == f["coins"] and [o.key for o in chr_view._strategy.options] == ["all", *profiles.CHR_STRATEGIES]
+    assert f["coins"] is None and chr_view._mode.visible is False  # монеты не урезаются пулом: все сделки CHR
+    assert [o.key for o in chr_view._strategy.options] == ["all", *profiles.CHR_STRATEGIES]
     chr_view._coin.set_selected(["BTCUSDT"])
     chr_view._strategy.value = "Horizontal_Breakout_CHR"
     f = chr_view._filters()
@@ -214,18 +220,44 @@ def test_empty_coin_selection_queries_nothing(fx):
     assert client.trade_calls == [] and h._total == 0
 
 
-def test_history_chr_scope_and_shared_favorites_tab(fx):
+def test_history_chr_scope_coins_of_its_trades_and_favorites_button(fx):
     client = FakeClient(fx)
     host = Host("CHR", client=client)
-    hist, fav = HistoryView(host), HistoryView(host, favorites=True)
+    hist = HistoryView(host)
     asyncio.run(hist.refresh())
-    asyncio.run(fav.refresh())
+    assert [k for k, _ in hist._coin._options] == ["SOLUSDT", "DOGEUSDT"] and client.coin_calls == [list(profiles.CHR_STRATEGIES)]  # монеты - только где у CHR есть сделки
+    asyncio.run(hist._toggle_favorites())  # «Избранное» - кнопка в History, не вкладка
     h_call, f_call = client.trade_calls
-    assert h_call["strategies"] == list(profiles.CHR_STRATEGIES) and h_call["coins"] == profiles.coins_for("CHR") and h_call["mode"] == "shadow" and not h_call["favorite"]
+    assert h_call["strategies"] == list(profiles.CHR_STRATEGIES) and h_call["coins"] is None and h_call["mode"] == "shadow" and not h_call["favorite"]
     assert f_call["favorite"] is True and f_call["strategies"] is None and f_call["coins"] is None and f_call["mode"] == "all"  # избранное общее: профиль его не режет
+    assert hist.state()["favorites"] is True and hist._fav_btn.icon == ft.Icons.STAR
     santa_fav = HistoryView(Host("SANTA", client=client), favorites=True)
     asyncio.run(santa_fav.refresh())
     assert client.trade_calls[-1] == f_call
+
+
+def test_history_and_stats_filters_are_remembered_and_restored(fx):
+    saved = {}
+
+    class MemHost(Host):
+        def view_state(self, name):
+            return saved.get(name)
+
+        def remember_view(self, name, state):
+            saved[name] = state
+
+    h = HistoryView(MemHost())
+    h._coin.set_selected(["ETHUSDT"])
+    h._strategy.value = "VWAP_Reversion"
+    asyncio.run(h._filter_changed())
+    again = HistoryView(MemHost())
+    assert again._coin.keys() == ["ETHUSDT"] and again._strategy.keys() == ["VWAP_Reversion"]
+    s = StatsView(MemHost())
+    s._period.value = "7d"
+    s._side.value = "long"
+    asyncio.run(s._changed())
+    restored = StatsView(MemHost())
+    assert restored._period.value == "7d" and restored._side.keys() == ["long"]
 
 
 def test_history_star_toggles_via_host_and_updates_the_row(fx):
@@ -243,15 +275,16 @@ def test_history_star_toggles_via_host_and_updates_the_row(fx):
     assert v._items[1]["is_favorite"] is True
 
 
-def test_dashboard_for_chr_shows_only_its_coins_and_positions(fx):
+def test_dashboard_for_chr_shows_only_coins_with_its_trades(fx):
     msg = fx("live_state.json")
-    full = DashboardView(Host())
-    full.on_message(msg)
     chr_dash = DashboardView(Host("CHR"))
+    chr_dash.on_message(msg)  # у CHR сделок нет - понятная карточка, а не пустые монеты
+    assert any("Открытых сделок сейчас нет" in (x.value or "") for x in _walk(chr_dash._cards) if isinstance(x, ft.Text))
+    doge = next(c for c in msg["coins"] if c["coin"] == "DOGEUSDT")
+    doge["positions"] = [{**doge["positions"][0], "strategy_name": "Horizontal_Breakout_CHR"}]
     chr_dash.on_message(msg)
-    full_text = [x.value for x in _walk(full._cards) if isinstance(x, ft.Text) and x.value]
     chr_text = [x.value for x in _walk(chr_dash._cards) if isinstance(x, ft.Text) and x.value]
-    assert "DOGE" in full_text and "DOGE" not in chr_text and "BTC" in chr_text  # DOGE вне пула CHR
+    assert "DOGE" in chr_text and "BTC" not in chr_text  # только монеты, где есть сделки CHR
     assert not any(t.startswith("S2 ·") or t.startswith("S3 ·") for t in chr_text)  # автомат SMC для CHR не показывается
 
 
@@ -285,7 +318,6 @@ def test_switching_profile_is_saved_and_reconfigures_every_view(monkeypatch, tmp
     asyncio.run(sh.set_profile("CHR"))
     assert saved[-1][0] == "CHR" and sh.profile_strategies() == list(profiles.CHR_STRATEGIES)
     assert sh.stats._mode.visible is False and sh.history._mode.visible is False
-    assert [k for k, _ in sh.stats._coin._options] == profiles.coins_for("CHR")
     assert sh._chr_pnl is not None and sh._account.value.startswith("Баланс CHR:")  # баланс считается по стратегиям CHR, а не по счёту биржи
     assert sh.client.stat_calls[-1]["strategies"] == list(profiles.CHR_STRATEGIES) and sh.client.stat_calls[-1]["mode"] == "shadow"
     asyncio.run(sh.set_profile("SANTA"))
@@ -303,11 +335,13 @@ def test_chr_balance_text_in_header_starts_at_zero_before_any_trade(monkeypatch,
     assert sh._account.value == "Баланс CHR: −$3.00"
 
 
-def test_chr_coin_pool_changes_propagate_and_persist(monkeypatch, tmp_path):
-    sh, saved = make_shell(monkeypatch, tmp_path, profile="CHR")
-    sh.settings.chr_extra_coins = ["SOLUSDT"]
-    sh._after_coin_pool_change("x")
-    assert saved[-1] == ("CHR", ["SOLUSDT"]) and "SOLUSDT" in [k for k, _ in sh.history._coin._options]
+def test_main_window_always_opens_maximized_and_last_tab_is_restored(monkeypatch, tmp_path):
+    from tradeai_client.ui import shell as shell_mod
+
+    monkeypatch.setattr(shell_mod, "load_settings", lambda: ClientSettings(ui_state={"tab": shell_mod.TAB_MFE}))
+    monkeypatch.setattr(shell_mod, "save_settings", lambda s, path=None: None)
+    sh = shell_mod.Shell(MagicMock())
+    assert sh.page.window.maximized is True and sh._tab == shell_mod.TAB_MFE
 
 
 class StarClient:
@@ -508,8 +542,7 @@ def test_significance_card_sits_in_the_same_row_as_the_filters_on_wide_screens_a
     assert stats._goal.control in goal_box.controls and goal_box.col == {"xs": 12, "md": 3}
     assert not any(getattr(c, "expand", None) for c in filters.controls)  # в Row(wrap=True) нельзя класть expand-элементы (Flutter ErrorWidget)
     analysis = AnalysisView(Host())
-    rows = [c for c in analysis.control.controls if isinstance(c, ft.Row) and analysis._goal.control in c.controls]
-    assert len(rows) == 1 and rows[0].controls[-1] is analysis._goal.control and rows[0].controls[0].wrap
+    assert not hasattr(analysis, "_goal")  # 1.6.0: в Analysis без «значимости выводов» (решение пользователя)
 
 
 # ======================================================================================== тумблер «Мультивыбор» для всех фильтров

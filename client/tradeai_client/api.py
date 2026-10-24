@@ -160,13 +160,27 @@ class ApiClient:
         except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
             raise ApiError("network", _HINTS["network"]) from exc
 
+    async def news(self) -> dict[str, Any]:
+        """Важные новости недели (High Impact) из календаря бота."""
+        return await self._get("/api/news")
+
+    async def trade_coins(self, strategies: list[str]) -> list[str]:
+        """Монеты, где у этих стратегий есть сделки (профиль CHR: фильтр «Монеты» - только его монеты)."""
+        data = await self._get("/api/trade_coins", [("strategy", x) for x in strategies])
+        return list(data.get("coins") or [])
+
     # ---- MFE Simulator (api/mfe_sim.py): доигрывание всех сделок с входом по 1m-свечам Binance на сервере
 
-    async def mfe_run(self, since: str) -> dict[str, Any]:
-        return await self._request("POST", "/api/mfe/run", [("since", since)])
+    async def mfe_run(self, since: str, until: str | None = None, scope: str = "santa") -> dict[str, Any]:
+        params = [("since", since), ("scope", scope)] + ([("until", until)] if until else [])
+        return await self._request("POST", "/api/mfe/run", params)
 
-    async def mfe_status(self) -> dict[str, Any]:
-        return await self._get("/api/mfe/status")
+    async def mfe_status(self, scope: str = "santa") -> dict[str, Any]:
+        return await self._get("/api/mfe/status", [("scope", scope)])
+
+    async def strategy_state(self, scope: str = "santa") -> dict[str, Any]:
+        """Текущие тейки авто-TP бота, одобренные изменения и шаблоны предложений (только чтение)."""
+        return await self._get("/api/strategy/state", [("scope", scope)])
 
     # ---- Strategy Quant Analyzer (через прокси основного API: /api/analysis/*)
 

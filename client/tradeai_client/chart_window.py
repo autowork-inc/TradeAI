@@ -138,21 +138,159 @@ def _window_args(spec: dict[str, Any]) -> tuple[ChartApi, str]:
     return ChartApi(spec), build_html(build_config(spec, drawings))
 
 
+STACK_DIR = Path(__import__("tempfile").gettempdir()) / "tradeai_charts"  # общая «стопка» окон графиков (все процессы окон этого ПК)
+STACK_FRESH_S = 3.0  # запись окна старше - окно закрыто/процесс умер
+STACK_POLL_S = 0.5
+
+
+GEOMETRY_FILE = STACK_DIR / "last_geometry.json"  # место и размер последнего ЗАКРЫТОГО окна графика: по нему открывается следующее
+
+
+def stack_front(entries: dict[str, dict[str, Any]], now: float) -> str | None:
+    """Ключ ПЕРВОГО открытого из живых окон графиков."""
+    alive = [(e["order"], k) for k, e in entries.items() if now - e.get("beat", 0) <= STACK_FRESH_S]
+    return min(alive)[1] if alive else None
+
+
+def place_after(entries: dict[str, dict[str, Any]], me: str, now: float) -> int | None:
+    """HWND окна, ПОД которым должно встать новое окно: самое позднее из открытых раньше него (живых). Открыли a, b, c, d, e - сверху вниз
+    a, b, c, d, e: каждое следующее уходит под предыдущие и не перекрывает первое. None - открытых раньше нет (окно встаёт спереди)."""
+    order = entries[me]["order"]
+    older = [(e["order"], e.get("hwnd")) for k, e in entries.items()
+             if k != me and e["order"] < order and now - e.get("beat", 0) <= STACK_FRESH_S and e.get("hwnd")]
+    return max(older)[1] if older else None
+
+
+def load_geometry() -> dict[str, Any]:
+    """Место и размер последнего закрытого окна графика; нет - на весь экран."""
+    try:
+        g = json.loads(GEOMETRY_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"maximized": True}
+    ok = isinstance(g, dict) and all(isinstance(g.get(k), (int, float)) for k in ("x", "y", "width", "height")) and g["width"] >= 400 and g["height"] >= 300
+    return g if ok else {"maximized": True}
+
+
+def _read_stack() -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for f in STACK_DIR.glob("*.json"):
+        if f == GEOMETRY_FILE:
+            continue
+        try:
+            out[f.stem] = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):  # файл соседнего окна пишется прямо сейчас или уже удалён - пропускаем этот опрос
+            continue
+    return out
+
+
+def _own_hwnd(title: str) -> int | None:
+    """HWND окна этого процесса с нашим заголовком (Windows); иначе None."""
+    import ctypes
+    import os
+    from ctypes import wintypes
+
+    if os.name != "nt":
+        return None
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+    pid = os.getpid()
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            buf = ctypes.create_unicode_buffer(512)
+            user32.GetWindowTextW(hwnd, buf, 512)
+            if buf.value == title:
+                found.append(int(hwnd))
+                return False
+        return True
+
+    user32.EnumWindows(each, 0)
+    return found[0] if found else None
+
+
+def _insert_below(hwnd: int, after: int) -> None:
+    """Поставить окно сразу ПОД `after` в порядке окон, без активации и без изменения места/размера (Windows SetWindowPos)."""
+    import ctypes
+    import os
+
+    if os.name == "nt":
+        ctypes.windll.user32.SetWindowPos(hwnd, after, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+
+
+def _raise_once(win: Any) -> None:
+    """Поднять окно поверх остальных один раз (Windows не даёт фокус новому процессу - короткий on_top это обходит) и не держать его «всегда сверху»."""
+    win.on_top = True
+    win.show()
+    time.sleep(0.2)
+    win.on_top = False
+
+
 def run_chart_window(spec: dict[str, Any]) -> None:
-    """Точка входа процесса окна: строит страницу и блокируется до закрытия окна."""
+    """Точка входа процесса окна: строит страницу и блокируется до закрытия окна (1.6.0).
+    Место и размер - как у последнего закрытого окна графика (первый раз - на весь экран). Порядок: открыли a, b, c, d, e - сверху вниз a, b, c, d, e
+    (каждое следующее открывается в фоне под предыдущими, без фокуса); закрытие окна никого не поднимает."""
+    import os
+    import threading
+
     import webview
 
     api, html = _window_args(spec)
-    # 2026-10-23: окно сразу развёрнуто на весь экран, поверх остальных окон и в фокусе (раньше открывалось маленьким, и его приходилось искать и разворачивать).
-    window = webview.create_window(f"TradeAI · {spec['title']}", html=html, js_api=api, width=1500, height=900, background_color="#0e1117",
-                                   maximized=True, on_top=True, focus=True)
-    webview.start(_bring_to_front, window)
+    STACK_DIR.mkdir(parents=True, exist_ok=True)
+    key = f"{os.getpid()}"
+    order = int(spec.get("chart_order") or time.time_ns())
+    me = STACK_DIR / f"{key}.json"
+    me.write_text(json.dumps({"order": order, "beat": time.time()}), encoding="utf-8")
+    first = stack_front(_read_stack(), time.time()) == key
+    geo = load_geometry()
+    title = f"TradeAI · {spec['title']}"
+    kw: dict[str, Any] = {"maximized": True} if geo.get("maximized") else {"x": int(geo["x"]), "y": int(geo["y"]), "width": int(geo["width"]),
+                                                                          "height": int(geo["height"])}
+    window = webview.create_window(title, html=html, js_api=api, background_color="#0e1117", focus=first, **{"width": 1500, "height": 900, **kw})
+    closed = threading.Event()
+    state = {"maximized": bool(geo.get("maximized")), "hwnd": None}
 
+    def on_maximized() -> None:
+        state["maximized"] = True
 
-def _bring_to_front(window: Any) -> None:
-    """Вызывается pywebview уже после показа окна: повторно поднимает его поверх главного дашборда (Windows может отказать в фокусе новому процессу, `on_top` это обходит)."""
-    window.on_top = True
-    window.show()
+    def on_restored() -> None:
+        state["maximized"] = False
+
+    def on_closing() -> None:
+        """Запомнить место и размер закрываемого окна: следующее окно графика откроется так же."""
+        g = {"maximized": state["maximized"]}
+        for k in ("x", "y", "width", "height"):
+            v = getattr(window, k, None)
+            if isinstance(v, (int, float)):
+                g[k] = v
+        GEOMETRY_FILE.write_text(json.dumps(g), encoding="utf-8")
+
+    window.events.maximized += on_maximized
+    window.events.restored += on_restored
+    window.events.closing += on_closing
+    window.events.closed += closed.set
+
+    def keep_stack(win: Any) -> None:
+        """Поток окна: место в стопке сразу после показа, затем «пульс» (живые окна стопки) раз в 0.5 с."""
+        if state["maximized"]:
+            win.maximize()
+        state["hwnd"] = _own_hwnd(title)
+        me.write_text(json.dumps({"order": order, "beat": time.time(), "hwnd": state["hwnd"]}), encoding="utf-8")
+        after = place_after(_read_stack(), key, time.time())
+        if after is not None and state["hwnd"] is not None:
+            _insert_below(state["hwnd"], after)  # в фоне, прямо под предыдущим окном графика
+        elif first:
+            _raise_once(win)  # самое первое окно - спереди
+        while not closed.is_set():
+            me.write_text(json.dumps({"order": order, "beat": time.time(), "hwnd": state["hwnd"]}), encoding="utf-8")
+            closed.wait(STACK_POLL_S)
+
+    try:
+        webview.start(keep_stack, window)
+    finally:
+        me.unlink(missing_ok=True)
 
 
 _PROCESSES: list["multiprocessing.process.BaseProcess"] = []
@@ -171,6 +309,7 @@ def open_chart(spec: dict[str, Any]) -> "multiprocessing.process.BaseProcess":
     if not _PROCESSES:
         atexit.register(terminate_all)  # регистрируется позже atexit-обработчика multiprocessing -> выполняется раньше его join()
     _PROCESSES[:] = [p for p in _PROCESSES if p.is_alive()]
+    spec = {**spec, "chart_order": time.time_ns()}  # порядок открытия: первое окно - верхнее в стопке
     process = multiprocessing.get_context("spawn").Process(target=run_chart_window, args=(spec,), name=f"chart-{spec['trade_id']}"[:60])
     process.start()
     _PROCESSES.append(process)

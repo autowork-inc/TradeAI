@@ -186,7 +186,7 @@ LIVE_MAX_HOLD_BARS = 192  # тайм-аут позиции (как у VirtualTra
 LIVE_MAX_ENTRY_DEVIATION = 0.01  # MARKET-вход отклоняется, если mark price биржи ушла от цены сигнала больше чем на эту долю
 LIVE_STATE_NAME = "live_engine_state.json"  # состояние боевых сделок (переживает рестарт; сверяется с биржей при старте)
 LIVE_MT5_STATE_NAME = "live_mt5_state.json"  # состояние сопровождения MT5-позиций (Scale Out / безубыток / трейлинг); источник правды по объёму - брокер
-BOT_VERSION = "1.5.0"  # версия сервера (бота): пишется в лог при старте; клиент и сервер выпускаются с одним номером
+BOT_VERSION = "1.6.0"  # версия сервера (бота): пишется в лог при старте; клиент и сервер выпускаются с одним номером
 CTRADER_RECONNECT_PAUSE_S = _env_float("CTRADER_RECONNECT_PAUSE_S", 300.0)  # пауза перед переподключением к cTrader после сбоя связи (orchestrator/mt5_link.py): 5 минут
 CTRADER_ENV = os.environ.get("CTRADER_ENV", "auto")  # auto: хост (demo/live) определяется по списку счетов токена; demo | live - принудительно
 CTRADER_TOKEN_FILE_NAME = ".ctrader_tokens.json"  # пара токенов, обновлённая по Refresh Token (СЕКРЕТ: лежит в DATA_DIR, в git и архивы деплоя не попадает)
@@ -196,12 +196,21 @@ NEWS_FILTER_ENABLED = os.environ.get("NEWS_FILTER_ENABLED", "true").strip().lowe
 NEWS_CALENDAR_URL = os.environ.get("NEWS_CALENDAR_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")  # недельный календарь ForexFactory (JSON)
 NEWS_REFRESH_S = 3600.0  # календарь скачивается раз в час
 NEWS_TIMEOUT_S = 2.0  # жёсткий таймаут запроса: сбой - исключение сразу, бот не ждёт
-NEWS_BLACKOUT_BEFORE_MS = 15 * 60_000  # новые сигналы задерживаются за 15 минут до High Impact события...
-NEWS_BLACKOUT_AFTER_MS = 15 * 60_000  # ...и 15 минут после
+NEWS_BLACKOUT_BEFORE_MS = 5 * 60_000  # окно новости: 5 минут до High Impact события (ставки ЦБ, CPI, NFP...)...
+NEWS_BLACKOUT_AFTER_MS = 5 * 60_000  # ...и 5 минут после (2026-10-24, решение пользователя: было 15/15)
+# tag (по умолчанию, 2026-10-24: «на новостях хорошие импульсы - пусть пробует»): сигнал в окне новости НЕ блокируется, а помечается meta.news;
+# block - сигнал в окне отклоняется (skipped_filter), как раньше
+NEWS_FILTER_MODE = os.environ.get("NEWS_FILTER_MODE", "tag").strip().lower()
 NEWS_MAX_AGE_MS = 8 * 86_400_000  # календарь старше (недельный + запас) - фильтр новостей не блокирует (fail-open), в лог предупреждение
 NEWS_CACHE_NAME = ".news_calendar.json"  # последний удачный календарь в DATA_DIR
 # Ретроспективная сверка закрытых боевых сделок (exit_reason='unknown' / gap_affected) с userTrades Binance при старте TRADE_MODE=live (orchestrator/live_resync.py)
 RESYNC_CLOSED_TRADES = os.environ.get("RESYNC_CLOSED_TRADES", "true").strip().lower() not in ("0", "false", "no", "off")
+# Авто-подстройка финального тейка (orchestrator/auto_tp.py, 2026-10-24): Scale Out 50% на +1R + финальный X, X - по 1m-доигрыванию сделок стратегии
+AUTO_TP_ENABLED = os.environ.get("AUTO_TP_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
+AUTO_TP_SINCE = os.environ.get("AUTO_TP_SINCE", "2026-10-22")  # с 22.10 логика стратегий переписана: более ранние сделки не показательны
+AUTO_TP_MIN_TRADES = int(_env_float("AUTO_TP_MIN_TRADES", 5))  # меньше завершённых сделок у стратегии - тейк не меняется
+AUTO_TP_DEFAULT_R = _env_float("AUTO_TP_DEFAULT_R", 4.0)  # финальный тейк, пока подстройка ещё ничего не подобрала
+AUTO_TP_STATE_NAME = ".auto_tp.json"  # последние подобранные тейки (DATA_DIR): переживают рестарт; их же показывает клиент
 WEEKEND_FILTER_ENABLED = os.environ.get("WEEKEND_FILTER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")  # суббота 00:00 - воскресенье 23:59 UTC; действует ТОЛЬКО при TRADE_MODE=live
 USE_TESTNET = _env_bool("USE_TESTNET")  # ордера боевого контура идут на testnet; данные Shadow (свечи/тики) по-прежнему mainnet
 TESTNET_REST_URL = "https://testnet.binancefuture.com"

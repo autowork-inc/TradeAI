@@ -13,7 +13,7 @@ from tradeai_client.ui import widgets as w
 
 POLL_S = 1.5
 POLL_MAX_S = 900.0
-STRAT_COLS = [150, 62, 72, 66, 70, 70, 78, 82, 78, 72, 80]
+STRAT_COLS = [150, 62, 72, 66, 70, 70, 78, 82, 78, 72]
 VERDICT_RU = {"degraded": ("ДЕГРАДАЦИЯ", w.RED), "suspected": ("ПОДОЗРЕНИЕ", w.AMBER), "improved": ("УЛУЧШЕНИЕ", w.GREEN), "inconclusive": ("не отличимо от шума", w.MUTED),
               "insufficient_data": ("мало данных", w.MUTED)}
 CONF_RU = {"high": ("высокая", w.GREEN), "medium": ("средняя", w.AMBER), "low": ("низкая", w.RED)}
@@ -46,12 +46,11 @@ class AnalysisView:
         self._bar = ft.ProgressBar(width=260, value=0, visible=False, color=w.ACCENT, bgcolor=w.BORDER)
         self._stage = ft.Text("", size=12, color=w.MUTED)
         self._info = ft.Text("", size=12, color=w.MUTED)
-        self._goal = w.GoalBar(fmt.TRADES_GOAL, width=150)  # «значимость выводов»: сделок в отчёте / 200, у правого края строки фильтров
         self._body = ft.Column(spacing=14)
         self.control = ft.Column([ft.Container(height=2),
                                   ft.Row([ft.Row([self._mode, self._before, self._after, self._run, self._ring, ft.Column([self._bar, self._stage], spacing=2, tight=True)],
                                                  spacing=10, run_spacing=8, wrap=True, expand=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                                          self._goal.control], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START), self._info, self._body],
+                                          ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START), self._info, self._body],
                                  expand=True, scroll=ft.ScrollMode.AUTO, spacing=12)
         self._job_id: str | None = None
         self._report: dict | None = None
@@ -74,7 +73,6 @@ class AnalysisView:
         if self._running:
             return
         self._report, self._job_id = None, None
-        self._goal.set(0)
         self._placeholder("Нажмите «Run Deep Analysis»: анализатор посчитает метрики по закрытым сделкам выбранного режима.")
         if w.attached(self.control):
             self.control.update()
@@ -112,7 +110,7 @@ class AnalysisView:
         cal = st["calendar"]
         cal_text = (f"календарь: {cal['events']} событий ({fmt.fmt_local(cal['from'])} — {fmt.fmt_local(cal['to'])})" if cal["events"]
                     else "календарь новостей ещё не получен от бота (News Impact недоступен)")
-        self._info.value = f"Анализатор v{st['version']} · воркер {'работает' if st['worker_alive'] else 'НЕ работает'} · {cal_text} · порог значимости {st['min_conclusions']} сделок"
+        self._info.value = f"Анализатор v{st['version']} · воркер {'работает' if st['worker_alive'] else 'НЕ работает'} · {cal_text}"
         self.control.update()
 
     # ------------------------------------------------------------------------------------------ запуск
@@ -167,9 +165,10 @@ class AnalysisView:
         self._job_id, self._report = job_id, r
         out: list[ft.Control] = []
         for text in r.get("warnings") or []:
+            if "значим" in text.lower() or "200" in text:  # 1.6.0: решение пользователя - без напоминаний «мало сделок / значимость низкая»
+                continue
             out.append(w.banner(text, w.AMBER))
         d, o = r["data"], r["overall"]
-        self._goal.set(int(d["trades"]))
         out.append(w.label(f"Выборка: {d['trades']} закрытых сделок · {', '.join(fmt.STRATEGY_RU.get(s, s) for s in d['strategies']) or '—'} · "
                            f"{fmt.fmt_local(d['from'])} — {fmt.fmt_local(d['to'])} · отчёт {job_id}", size=12))
         out.append(self._overall_kpis(o))
@@ -186,11 +185,10 @@ class AnalysisView:
 
     @staticmethod
     def _overall_kpis(m: dict) -> ft.Control:
-        sig = m["significance"]
         pf = fmt.fmt_pf(m)
         ci = m.get("expectancy_r_ci")
         return ft.Row([
-            w.kpi("Сделок", str(m["n"]), sub="достаточно данных" if sig["enough"] else f"мало (нужно {sig['min_trades']}+)", color=w.TEXT if sig["enough"] else w.AMBER),
+            w.kpi("Сделок", str(m["n"])),
             w.kpi("Profit Factor", pf, color=w.MUTED if pf == fmt.DASH else (w.GREEN if pf == "∞" or float(pf) >= 1 else w.RED)),
             w.kpi("Sharpe / Sortino", f"{_n(m.get('sharpe_daily'))} / {_n(m.get('sortino_daily'))}", sub="дневные, годовые (√365)", width=230,
                   tooltip="Sharpe и Sortino по дневным суммам R, нормированные на год (365 дней)"),
@@ -202,7 +200,7 @@ class AnalysisView:
 
     def _strategy_table(self, r: dict) -> ft.Control:
         muted = lambda t, right=False: w.cell(t, color=w.MUTED, size=12, align_right=right)  # noqa: E731
-        head = ["Стратегия", "Сделок", "Win Rate", "PF", "Sharpe", "Sortino", "Матожид. R", "Матожид. $", "MDD R", "MDD %", "Значимость"]
+        head = ["Стратегия", "Сделок", "Win Rate", "PF", "Sharpe", "Sortino", "Матожид. R", "Матожид. $", "MDD R", "MDD %"]
         rows = [w.table_row([muted(h, i > 0) for i, h in enumerate(head)], widths=STRAT_COLS, height=26)]
         for sid, s in sorted(r["strategies"].items()):
             m = s["metrics"]
@@ -211,8 +209,7 @@ class AnalysisView:
                 w.cell(fmt.fmt_pf(m), align_right=True), w.cell(_n(m.get("sharpe_daily")), align_right=True), w.cell(_n(m.get("sortino_daily")), align_right=True),
                 w.cell(_n(m["expectancy_r"], 3, True), color=fmt.r_color(m["expectancy_r"]), align_right=True),
                 w.cell(_n(m.get("expectancy_usd"), 2, True), color=fmt.r_color(m.get("expectancy_usd")), align_right=True),
-                w.cell(_n(m.get("max_drawdown_r")), align_right=True), w.cell(_n(m.get("max_drawdown_pct"), 1), align_right=True),
-                w.cell("достаточно" if m["significance"]["enough"] else "мало данных", color=w.GREEN if m["significance"]["enough"] else w.AMBER, size=12, align_right=True)],
+                w.cell(_n(m.get("max_drawdown_r")), align_right=True), w.cell(_n(m.get("max_drawdown_pct"), 1), align_right=True)],
                 widths=STRAT_COLS))
         return w.card(ft.Column([w.title("Метрики по стратегиям", 15), ft.Column(rows, spacing=2, scroll=ft.ScrollMode.AUTO)], spacing=10))
 

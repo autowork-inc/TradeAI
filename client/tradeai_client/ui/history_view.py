@@ -43,12 +43,12 @@ class HistoryView:
         self._next = ft.IconButton(icon=ft.Icons.ARROW_FORWARD, tooltip="Старше", on_click=self._next_page, disabled=True)
         self._rows = ft.Column(spacing=2)
         self._busy = ft.ProgressRing(width=18, height=18, stroke_width=2, visible=False)
+        self._profile_coins: list[str] | None = None  # монеты, где у стратегий профиля есть сделки (CHR); None - ещё не загружены
+        self._fav_btn = ft.OutlinedButton("Избранное", icon=ft.Icons.STAR_BORDER, on_click=self._toggle_favorites,
+                                          tooltip="Показать только сделки со звёздочкой (эталонные сетапы)")
         header = w.table_row([w.cell(t, color=w.MUTED, size=12, align_right=t in ("Итог R", "PnL USDT")) for t, _ in COLS], widths=WIDTHS, height=28)
         tap = getattr(host, "tap_opens_chart", False)
-        hint = ("Эталонные сетапы, отмеченные звёздочкой (общие для всех профилей). " + ("Тап по строке — график;" if tap else "Двойной клик по строке — график;") + " звёздочка в строке снимает отметку."
-                if favorites else
-                ("Тап по строке — график сделки" if tap else "Двойной клик по строке — график сделки") + " (свечи снапшота, вход/выход, SL/TP, зона FVG, причина входа). Звёздочка — пометить сделку как «идеальный сетап» (попадёт во вкладку «Избранное»).")
-        filter_controls = [self._mode.control, self._status.control, self._coin.control, self._strategy.control, self._bar.control,
+        filter_controls = [self._mode.control, self._status.control, self._coin.control, self._strategy.control, self._bar.control, self._fav_btn,
                            ft.IconButton(icon=ft.Icons.REFRESH, tooltip="Обновить", on_click=self._reload), self._busy]
         pager = [self._info, self._prev, self._next]
         self._table = ft.Row([ft.Column([header, ft.Column([self._rows], scroll=ft.ScrollMode.AUTO, expand=True)], spacing=6, width=TABLE_W)],
@@ -64,10 +64,49 @@ class HistoryView:
             self.control = ft.Column([
                 ft.Container(height=2),
                 ft.Row([*filter_controls, *pager], spacing=10, run_spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                w.label(hint, size=12),
                 table,
             ], expand=True, spacing=10)
         self.apply_profile()
+        self.restore_state(getattr(host, "view_state", lambda _n: None)("history"))
+
+    # ------------------------------------------------------------------------------------------ память фильтров (1.6.0)
+
+    def state(self) -> dict:
+        return {"mode": self._mode.state(), "status": self._status.state(), "coin": self._coin.state(), "strategy": self._strategy.state(),
+                "multi": bool(self._bar.switch.value), "favorites": self.favorites}
+
+    def restore_state(self, st: dict | None) -> None:
+        """Фильтры, выбранные в прошлый раз (переживают перезапуск, переустановку и перезагрузку страницы)."""
+        if not isinstance(st, dict):
+            return
+        self._bar.set(bool(st.get("multi")))
+        self._pending_coin = st.get("coin")  # CHR: варианты монет приходят с сервера позже - выбор вернётся после загрузки
+        for key, f in (("status", self._status), ("coin", self._coin), ("strategy", self._strategy)):
+            f.restore(st.get(key))
+        if not self.favorites and isinstance(st.get("mode"), dict) and self._mode.visible:
+            self._mode.restore(st["mode"])
+            self._mode_touched = True
+        self._set_favorites(bool(st.get("favorites")))
+
+    def _remember(self) -> None:
+        remember = getattr(self.host, "remember_view", None)
+        if remember is not None:
+            remember("history", self.state())
+
+    def _set_favorites(self, on: bool) -> None:
+        self.favorites = on
+        self._fav_btn.icon = ft.Icons.STAR if on else ft.Icons.STAR_BORDER
+        self._fav_btn.style = ft.ButtonStyle(color=w.AMBER if on else None, side=ft.BorderSide(1, w.AMBER) if on else None)
+        self._mode.visible = not on and self._scope()[0] is None
+
+    async def _toggle_favorites(self, _=None) -> None:
+        """«Избранное» - кнопка в History (1.6.0, вместо отдельной вкладки): только сделки со звёздочкой обоих контуров, профильные фильтры не применяются."""
+        self._set_favorites(not self.favorites)
+        self._offset = 0
+        self._remember()
+        if w.attached(self.control):
+            self.control.update()
+        await self.refresh()
 
     # ------------------------------------------------------------------------------------------ профиль и фильтры
 
@@ -82,8 +121,11 @@ class HistoryView:
         strategies, pool = self._scope()
         options = fmt.STRATEGY_OPTIONS if strategies is None else [("all", "Все")] + [(k, fmt.strategy_label(k)) for k in strategies]
         self._strategy.set_options(options, select_all=True)
+        self._profile_coins = None
         if pool is not None:
             self._coin.set_options([(c, fmt.coin_short(c)) for c in pool], select_all=True)
+        elif strategies is not None:  # профиль CHR: монеты - только те, где у его стратегий есть сделки (загружаются с сервера при обновлении)
+            self._coin.set_options([], select_all=True)
         else:
             self._coin.set_options(self._coin_options(), select_all=True)
         if not self.favorites:
@@ -95,7 +137,8 @@ class HistoryView:
     def set_coins(self, coins: list[str]) -> None:
         """Монеты с сервера (автоселектор подключает новые на лету): фильтр «Монеты» получает их вместе с прежними; выбор сохраняется. Профиль CHR держит свой пул."""
         self._server_coins = list(coins)
-        if self._scope()[1] is None:
+        strategies, pool = self._scope()
+        if pool is None and strategies is None:
             self._coin.set_options(self._coin_options())
 
     def _query_filters(self) -> tuple[list[str] | None, list[str] | None, str]:
@@ -125,6 +168,7 @@ class HistoryView:
 
     async def _filter_changed(self, _=None) -> None:
         self._offset = 0
+        self._remember()
         await self.refresh()
 
     def _mode_choice(self) -> str:
@@ -135,6 +179,7 @@ class HistoryView:
     async def _mode_changed(self, _=None) -> None:
         self._mode_touched = True
         self.host.remember_mode(self._mode_choice())
+        self._remember()
         await self._filter_changed()
 
     def follow_default_mode(self, mode: str) -> bool:
@@ -155,8 +200,24 @@ class HistoryView:
         self._offset += PAGE
         await self.refresh()
 
+    async def _load_profile_coins(self, client) -> None:
+        """CHR: варианты фильтра «Монеты» - монеты, где у его стратегий есть сделки (сохранённый выбор переживает подгрузку)."""
+        strategies = self._scope()[0]
+        if strategies is None or self._profile_coins is not None:
+            return
+        try:
+            self._profile_coins = await client.trade_coins(strategies)
+        except ApiError:
+            return
+        keep = getattr(self, "_pending_coin", None) or self._coin.state()
+        self._coin.set_options([(c, fmt.coin_short(c)) for c in self._profile_coins], select_all=True)
+        self._coin.restore(keep)
+        self._pending_coin = None
+
     async def refresh(self) -> None:
         client = self.host.client
+        if client is not None and not self.favorites:
+            await self._load_profile_coins(client)
         if client is None:
             return
         if any(f.is_empty for f in self._bar.filters):  # «Снять всё» в каком-то фильтре: ничего не выбрано - ничего и не показываем (запрос без фильтра вернул бы всё)

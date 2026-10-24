@@ -24,6 +24,7 @@ class Settings:
     api_key: str
     shadow_data_dir: Path  # откуда читается «пульс» shadow-run (.shadow_heartbeat); каталог монтируется только для чтения
     live_data_dir: Path | None = None  # каталог боевого контура shadow-live (его «пульс» тоже читается; работает либо shadow-run, либо shadow-live)
+    strategy_lab_dir: Path | None = None  # strategy_lab/ в образе API: предложения/шаблоны и strategy_overrides.json (только чтение, вкладка MFE Simulator)
     coins: tuple[str, ...] = DEFAULT_COINS
     poll_interval_s: float = 2.0  # как часто хаб опрашивает БД для WebSocket
     keepalive_s: float = 10.0  # полное состояние уходит клиентам не реже, чем раз в столько секунд (в т.ч. «пульс» shadow-run)
@@ -66,7 +67,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     return Settings(
         database_url=e.get("DATABASE_URL", ""), api_key=e.get("API_KEY", ""),
         shadow_data_dir=Path(e.get("SHADOW_DATA_DIR", "/app/data/shadow")),
-        live_data_dir=Path(e["LIVE_DATA_DIR"]) if e.get("LIVE_DATA_DIR") else None, coins=coins, poll_interval_s=poll, port=port,
+        live_data_dir=Path(e["LIVE_DATA_DIR"]) if e.get("LIVE_DATA_DIR") else None, strategy_lab_dir=Path(e.get("STRATEGY_LAB_DIR", "/app/strategy_lab")), coins=coins, poll_interval_s=poll, port=port,
         analyzer_url=e.get("ANALYZER_URL", ""), analyzer_token=e.get("ANALYZER_TOKEN", ""),
         golden_set_dir=Path(e["GOLDEN_SET_DIR"]) if e.get("GOLDEN_SET_DIR") else None,
         update_dir=Path(e["UPDATE_DIR"]) if e.get("UPDATE_DIR") else None,

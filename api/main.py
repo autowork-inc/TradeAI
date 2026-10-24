@@ -65,6 +65,8 @@ SELECT id, coin, strategy_id, side, exit_reason, r_multiple, pnl, exit_time FROM
 """
 COUNTS_SQL = "SELECT status, gap_affected, count(*) AS n FROM trades WHERE (mode = $1 OR $1 = 'all') GROUP BY status, gap_affected"
 STRATEGIES_SQL = "SELECT DISTINCT strategy_id FROM trades WHERE (mode = $1 OR $1 = 'all') ORDER BY strategy_id"
+# 1.6.0: монеты, по которым у набора стратегий есть сделки (фильтр «Монеты» профиля CHR - только его монеты)
+TRADE_COINS_SQL = "SELECT DISTINCT coin FROM trades WHERE strategy_id = ANY($1::text[]) ORDER BY coin"
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -103,6 +105,22 @@ def where_clause(prefix: str, mode: str, statuses=None, coins=None, strategies=N
     return " AND ".join(parts), args
 
 
+def read_news(dirs: list) -> dict[str, Any]:
+    """Самый свежий `.news_calendar.json` из каталогов данных бота -> {loaded_ms, events: [{ts, currency, title}]} (время - ISO UTC)."""
+    best: dict[str, Any] | None = None
+    for d in dirs:
+        f = d / ".news_calendar.json"
+        if f.is_file():
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and (best is None or (data.get("loaded_ms") or 0) > (best.get("loaded_ms") or 0)):
+                best = data
+    if best is None:
+        return {"loaded_ms": None, "events": []}
+    events = [{"ts": datetime.fromtimestamp(int(e[0]) / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z"), "currency": e[1], "title": e[2]}
+              for e in best.get("events") or [] if isinstance(e, list) and len(e) >= 3]
+    return {"loaded_ms": best.get("loaded_ms"), "events": sorted(events, key=lambda x: x["ts"])}
+
+
 def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTransport | None = None,
                mfe_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     throttle = FailureThrottle(settings.auth_max_failures, settings.auth_window_s)
@@ -135,7 +153,8 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
     favorites.install(app, settings, auth, pool, lambda: state["write_pool"])  # PUT/DELETE /api/favorites/{id}: единственная запись API в БД
     updates.install(app, settings.update_dir, auth)  # /api/update/version.json, /api/update/TradeAI-Monitor.exe
     analysis_proxy.install(app, settings, auth, analyzer_transport)  # /api/analysis/* -> Strategy Quant Analyzer (отдельный контейнер, наружу не публикуется)
-    app.state.mfe_job = mfe_sim.install(app, auth, pool, mfe_transport)  # /api/mfe/run, /api/mfe/status: MFE Simulator (доигрывание всех сделок по 1m Binance)
+    app.state.mfe_jobs = mfe_sim.install(app, auth, pool, mfe_transport, data_dirs=[d for d in (settings.live_data_dir, settings.shadow_data_dir) if d],
+                                         lab_dir=settings.strategy_lab_dir)  # /api/mfe/run, /api/mfe/status: MFE Simulator (доигрывание всех сделок по 1m Binance)
 
     # ---------------------------------------------------------------------------------- ошибки
 
@@ -206,6 +225,19 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
                 total = await conn.fetchval(f"SELECT count(*) FROM trades t LEFT JOIN favorites f ON f.trade_id = t.id WHERE {where}", *args)
         items = [{**trade_out(r), "has_snapshot": r["has_snapshot"], "is_favorite": r["is_favorite"]} for r in rows]
         return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    @app.get("/api/news", dependencies=[Depends(auth)])
+    async def news() -> dict[str, Any]:
+        """Важные новости недели (High Impact ForexFactory: ставки ЦБ, CPI, NFP...) - из календаря бота; окно ±5 мин вокруг них бот помечает сигналы."""
+        return read_news([d for d in (settings.live_data_dir, settings.shadow_data_dir) if d])
+
+    @app.get("/api/trade_coins", dependencies=[Depends(auth)])
+    async def trade_coins(strategy: Annotated[list[Token] | None, Query()] = None) -> dict[str, Any]:
+        """Монеты, по которым у стратегий есть сделки (любой статус и контур)."""
+        if not strategy:
+            return {"coins": []}
+        async with pool().acquire() as conn:
+            return {"coins": [r["coin"] for r in await conn.fetch(TRADE_COINS_SQL, list(strategy))]}
 
     @app.get("/api/candles", dependencies=[Depends(auth)])
     async def candles_endpoint(coin: Token, interval: Literal["5m", "15m", "1h", "4h"] = "15m", limit: Annotated[int, Query(ge=1, le=candles.MAX_LIMIT)] = 1000,

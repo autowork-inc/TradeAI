@@ -146,3 +146,46 @@ def test_geometry_in_jsonb_key_order_is_restored():
     restored, skipped = tr.restore(items, 2 * IV)
     assert skipped == [] and len(restored) == 1
     assert restored[0].signal.geometry == (zone,) and list(restored[0].signal.geometry[0]) == ["type", "t1", "t2", "p1", "p2", "label"]
+
+
+def test_stop_hit_during_downtime_closes_the_restored_trade_zombie_regression():
+    """Регресс 2026-10-24 (BTWUSDT): стоп шорта задет, пока бот лежал, к рестарту цена вернулась ниже стопа - сделка висела «открытой».
+    Доигрывание простоя по 1m-свечам закрывает её по стопу и временем той свечи."""
+    s = mk()  # шорт: вход 100, SL 105
+    rec, _ = first_run(s, tick(100.5, 2))
+    _, t2, (r,), _ = second_run(rec, s, now_ms=10 * IV)
+    bars = [(IV + 60_000, 101.0, 99.0, 100.0), (IV + 120_000, 105.4, 101.0, 104.0), (IV + 180_000, 103.0, 98.0, 99.0)]  # вторая минута пробила стоп
+    assert t2.replay_bars(SYM, bars) == 2  # после закрытия дальше не играет
+    assert r.status == "closed" and r.exit_reason == "sl" and r.exit_ts == IV + 120_000 + 59_999 and r.gap_affected
+
+
+def test_take_profit_hit_during_downtime_and_untouched_trade_stays_open():
+    s = mk()  # шорт: TP 80
+    rec, _ = first_run(s, tick(100.5, 2))
+    _, t2, (r,), _ = second_run(rec, s, now_ms=10 * IV)
+    t2.replay_bars(SYM, [(IV + 60_000, 101.0, 95.0, 96.0)])
+    assert r.status == OPEN and r.mfe_r > 0.5
+    t2.replay_bars(SYM, [(IV + 120_000, 104.0, 79.0, 80.0)])  # в одной свече и почти стоп, и тейк: стоп не задет (104 < 105) -> тейк
+    assert r.status == "closed" and r.exit_reason == "tp"
+
+
+def test_replay_downtime_fetches_minutes_from_entry_and_closes(monkeypatch):
+    import asyncio
+
+    from scripts import shadow_run
+
+    s = mk()
+    rec, _ = first_run(s, tick(100.5, 2))
+    _, t2, restored, _ = second_run(rec, s, now_ms=10 * IV)
+
+    class Api:
+        def __init__(self):
+            self.calls = []
+
+        async def get(self, path, params, weight=1):
+            self.calls.append(params)
+            return [[IV + 60_000, "100", "106", "99", "104", "0"]] if params["startTime"] <= IV + 60_000 else []
+
+    api = Api()
+    asyncio.run(shadow_run.replay_downtime(api, t2, restored, now_ms=IV + 5 * 60_000))
+    assert api.calls[0]["symbol"] == SYM and api.calls[0]["interval"] == "1m" and restored[0].status == "closed"

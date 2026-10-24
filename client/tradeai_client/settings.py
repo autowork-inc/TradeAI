@@ -41,6 +41,8 @@ class ClientSettings:
     profile_chosen: bool = False  # пользователь уже выбирал профиль на экране выбора (False - экран покажется при запуске)
     last_seen_version: str = ""  # последняя версия, о которой пользователю показали «Что нового»; пусто - ни одной не видел
     mode_filter: str = ""  # последний выбранный пользователем режим Statistics/History (all|live|shadow); пусто - следовать активному контуру
+    # 1.6.0: память интерфейса - последняя вкладка, окно (на весь экран / размер и место), фильтры History и Statistics, профиль которых сохранён
+    ui_state: dict = field(default_factory=dict)
 
     def validate(self) -> "ClientSettings":
         parts = urlsplit(self.base_url.strip())
@@ -59,6 +61,8 @@ class ClientSettings:
             self.last_seen_version = ""
         if not isinstance(self.chr_extra_coins, list) or not all(isinstance(c, str) for c in self.chr_extra_coins):
             self.chr_extra_coins = []
+        if not isinstance(self.ui_state, dict):
+            self.ui_state = {}
 
     @property
     def normalized_url(self) -> str:

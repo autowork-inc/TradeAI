@@ -277,6 +277,10 @@ class VirtualTracker:
     def plan_for(self, strategy: str) -> ScaleOutPlan:
         return self._plans.get(strategy, self._plan)
 
+    def set_plan(self, strategy: str, plan: ScaleOutPlan) -> None:
+        """Новый план выхода стратегии (авто-TP, orchestrator/auto_tp.py): действует на НОВЫЕ сделки; у открытых - план, записанный при входе."""
+        self._plans[strategy] = plan
+
     def submit(self, signal: Signal, now_ms: int) -> Submission:
         if signal.signal_id in self._ids:
             raise TrackerError(f"Сигнал {signal.signal_id} уже зарегистрирован")
@@ -379,6 +383,25 @@ class VirtualTracker:
         return t
 
     # --------------------------------------------------------------------------------------------- тики
+
+    def replay_bars(self, symbol: str, bars: Sequence[tuple[int, float, float, float]]) -> int:
+        """Доигрывание простоя (2026-10-24, «зомби-сделки»): восстановленные сделки не видели тиков, пока бот лежал, и стоп, задетый за это время,
+        оставался незамеченным (BTWUSDT 23.10: стоп пробит в 19:15, бот лежал 16:47-20:21, после рестарта цена вернулась ниже стопа). 1m-свечи простоя
+        (open_ms, high, low, close) превращаются в тики ТЕМ ЖЕ путём, что живые: в каждой свече сначала неблагоприятный экстремум, потом благоприятный,
+        потом close (пессимистично, как в бэктесте: стоп раньше тейка). Время тика - конец минуты. -> сколько свечей проиграно."""
+        n = 0
+        for open_ms, high, low, close in bars:
+            active = self._active.get(symbol)
+            if not active:
+                break
+            ts = open_ms + 59_999
+            for t in list(active.values()):
+                worst, best = (high, low) if t.sgn > 0 else (low, high)  # шорт (sgn=+1): против нас - high; лонг - low
+                for price in (worst, best, close):
+                    if t.status in (OPEN, PENDING_LIMIT):
+                        self._on_trade(t, Tick(symbol, price, ts, "trade"))
+            n += 1
+        return n
 
     def on_tick(self, tick: Tick) -> None:
         by_strategy = self._active.get(tick.symbol)

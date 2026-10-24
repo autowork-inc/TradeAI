@@ -218,6 +218,10 @@ class ExecutionRouter:
 
     # ------------------------------------------------------------------------------- суточный результат
 
+    def set_plan(self, strategy: str, plan: ScaleOutPlan) -> None:
+        """Авто-TP: новый план выхода для новых MT5-сделок стратегии (тот же, что у VirtualTracker)."""
+        self._plans[strategy] = plan
+
     async def realized_pnl(self, start_ms: int) -> dict[str, float]:
         """Реализованный результат каждой подключённой площадки с `start_ms` (убыток отрицателен), в USD/USDT."""
         out: dict[str, float] = {}

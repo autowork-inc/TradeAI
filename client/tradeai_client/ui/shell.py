@@ -24,7 +24,8 @@ from tradeai_client.ui.stats_view import StatsView
 
 log = logging.getLogger("tradeai_client")
 STATUS_COLORS = {"connected": w.GREEN, "connecting": w.AMBER, "reconnecting": w.AMBER, "auth": w.RED, "throttled": w.RED, "error": w.RED, "idle": w.MUTED}
-TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS, TAB_MFE, TAB_FAVORITES = 0, 1, 2, 3, 4, 5
+TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS, TAB_MFE = 0, 1, 2, 3, 4  # 1.6.0: «Избранное» - кнопка во вкладке History, не отдельная вкладка
+TAB_COUNT = 5
 ACCOUNT_REFRESH_S = 30.0  # как часто обновлять баланс в шапке (движок пишет снимок счёта раз в ~30 с)
 POST_BARS_MARGIN = 5  # свечей после выхода, которые показываем за последним маркером
 
@@ -56,8 +57,7 @@ class Shell:
         self._chr_pnl: float | None = None  # баланс профиля CHR: накопленный PnL его сделок от нуля
         self.dashboard, self.stats, self.history, self.analysis = DashboardView(self), StatsView(self), HistoryView(self), AnalysisView(self)
         self.mfe = MfeView(self)
-        self.favorites = HistoryView(self, favorites=True)
-        page.on_resize = lambda e: [v.relayout() for v in (self.history, self.favorites)]  # узкое окно - карточки вместо таблицы
+        page.on_resize = lambda e: self.history.relayout()  # узкое окно - карточки вместо таблицы
         self._profile_btn = ft.TextButton(f"Пользователь: {self.settings.profile}", icon=ft.Icons.PERSON, tooltip="Сменить пользователя (SANTA / CHR)", on_click=lambda e: self.show_profile_dialog())
         self._dot = w.dot(w.MUTED, 12)
         self._status_text = ft.Text("Не подключено", size=13, color=w.MUTED)
@@ -80,12 +80,15 @@ class Shell:
         header = ft.Row([ft.Icon(ft.Icons.CANDLESTICK_CHART, color=w.ACCENT), ft.Text(APP_NAME, size=20, weight=ft.FontWeight.W_700), ft.Container(expand=True),
                          self._profile_btn, self._account, self._eye, ft.VerticalDivider(width=12, color=w.BORDER), self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
                         spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-        tabs = ft.Tabs(length=6, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
+        saved_tab = self.settings.ui_state.get("tab")
+        self._tab = saved_tab if isinstance(saved_tab, int) and 0 <= saved_tab < TAB_COUNT else TAB_DASHBOARD  # 1.6.0: открывается последняя вкладка
+        self._apply_window_state()
+        tabs = ft.Tabs(length=TAB_COUNT, selected_index=self._tab, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label="Dashboard", icon=ft.Icons.DASHBOARD), ft.Tab(label="Statistics", icon=ft.Icons.BAR_CHART),
                             ft.Tab(label="History", icon=ft.Icons.HISTORY), ft.Tab(label="Analysis", icon=ft.Icons.ANALYTICS),
-                            ft.Tab(label="MFE Simulator", icon=ft.Icons.SCIENCE), ft.Tab(label="Favorites", icon=ft.Icons.STAR)]),
-            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control, self.mfe.control,
-                                    self.favorites.control], expand=True)], expand=True))
+                            ft.Tab(label="MFE Simulator", icon=ft.Icons.SCIENCE)]),
+            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control, self.mfe.control],
+                          expand=True)], expand=True))
         p.add(header, ft.Container(height=6), tabs)
 
     def run(self, coro) -> None:
@@ -126,8 +129,10 @@ class Shell:
         """Профиль сменился или изменился его пул монет: фильтры, подписи, Dashboard, баланс."""
         self._profile_btn.content = f"Пользователь: {self.settings.profile}"
         self._profile_btn.update()
-        for view in (self.stats, self.history):
+        for name, view in (("stats", self.stats), ("history", self.history)):
             view.apply_profile()
+            view.restore_state(self.view_state(name))  # у каждого профиля свои сохранённые фильтры
+        self.mfe.reset()
         self.analysis.reset()
         if self._last_state is not None:
             self.dashboard.on_message(self._last_state)
@@ -135,7 +140,7 @@ class Shell:
         self._render_account()
 
     async def start(self) -> None:
-        for goal in (self.stats._goal, self.analysis._goal):  # переливающаяся рамка карточки значимости
+        for goal in (self.stats._goal,):  # переливающаяся рамка карточки значимости (Statistics)
             self.page.run_task(goal.shimmer)
         if not self._settings_error and not self.settings.profile_chosen:
             await self._choose_user()  # как экран входа Windows: выбор запоминается, дальше экран не показывается
@@ -162,13 +167,18 @@ class Shell:
     async def _refresh_account(self) -> None:
         """Баланс боевого счёта в шапку (GET /api/info) и активный контур для фильтров. Ошибка сети уже видна в статусе связи: плашку не трогаем."""
         client = self.client
+        if client is not None:
+            try:
+                self.dashboard.set_news(await client.news())
+            except ApiError:
+                pass  # нет календаря - карточка новостей просто не обновится
         if client is None:
             return
         try:
             info = await client.info()
         except ApiError:
             return
-        for view in (self.stats, self.history, self.favorites):
+        for view in (self.stats, self.history):
             view.set_coins(list(info.get("coins") or []))
         if self.profile == profiles.CHR:
             await self._refresh_chr_balance(client)
@@ -275,7 +285,24 @@ class Shell:
 
     async def _tab_changed(self, e) -> None:
         self._tab = int(e.control.selected_index)
+        self.settings.ui_state["tab"] = self._tab
+        self._persist_prefs()
         await self._refresh_tab()
+
+    # ------------------------------------------------------------------------------------------ память интерфейса (1.6.0)
+
+    def view_state(self, name: str) -> dict | None:
+        """Сохранённые фильтры вида (history / stats) - отдельно для каждого профиля."""
+        state = (self.settings.ui_state.get("views") or {}).get(f"{self.settings.profile}:{name}")
+        return state if isinstance(state, dict) else None
+
+    def remember_view(self, name: str, state: dict) -> None:
+        self.settings.ui_state.setdefault("views", {})[f"{self.settings.profile}:{name}"] = state
+        self._persist_prefs()
+
+    def _apply_window_state(self) -> None:
+        """TradeAI Monitor всегда открывается на весь экран (1.6.0, решение пользователя)."""
+        self.page.window.maximized = True
 
     async def _refresh_tab(self) -> None:
         if self._tab == TAB_STATS:
@@ -286,8 +313,6 @@ class Shell:
             await self.analysis.refresh()
         elif self._tab == TAB_MFE:
             await self.mfe.refresh()
-        elif self._tab == TAB_FAVORITES:
-            await self.favorites.refresh()
 
     # ------------------------------------------------------------------------------------------ настройки
 
@@ -299,7 +324,7 @@ class Shell:
         user_row = ft.Row([ft.OutlinedButton(f"История обновлений (v{__version__})", icon=ft.Icons.HISTORY_EDU, tooltip="Что и когда добавлено в клиент",
                                              on_click=lambda e: (self.page.pop_dialog(), self.show_changelog())),
                            ft.OutlinedButton(f"Сменить пользователя ({s.profile})", icon=ft.Icons.SWITCH_ACCOUNT, on_click=lambda e: (self.page.pop_dialog(), self.show_profile_dialog())),
-                           ft.OutlinedButton("Монеты CHR…", icon=ft.Icons.PLAYLIST_ADD, disabled=s.profile != profiles.CHR,
+                           ft.OutlinedButton("Монеты CHR…", icon=ft.Icons.PLAYLIST_ADD, disabled=s.profile != profiles.CHR, visible=False,  # 1.6.0: CHR без пула монет
                                              tooltip="Добавить монеты в пул профиля CHR" if s.profile == profiles.CHR else "Доступно в профиле CHR",
                                              on_click=lambda e: (self.page.pop_dialog(), self.show_chr_coins_dialog()))], spacing=10, wrap=True)
         post = ft.Switch(label="Достраивать свечи после сигнала (публичный REST Binance)", value=s.post_signal_candles)
@@ -607,8 +632,7 @@ class Shell:
         return now
 
     def set_favorite_everywhere(self, trade_id: str, value: bool) -> None:
-        for view in (self.history, self.favorites):
-            view.set_favorite(trade_id, value)
+        self.history.set_favorite(trade_id, value)
 
     async def _golden_png(self, trade: dict) -> tuple[bytes | None, str]:
         """Картинка графика для золотой базы: тот же график, что открывается по двойному клику, но рисуется Pillow без окна. Не вышло - звёздочка ставится без картинки (JSON сервер соберёт сам)."""

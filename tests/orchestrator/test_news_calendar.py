@@ -60,8 +60,8 @@ def test_symbol_currencies():
     assert symbol_currencies("BTCUSDT") == {"USD"} and symbol_currencies("XAUUSD") == {"USD"} and symbol_currencies("EURUSD") == {"EUR", "USD"}
 
 
-@pytest.mark.parametrize("offset_min, blocked", [(-16, False), (-15, True), (0, True), (15, True), (16, False)])
-def test_blackout_is_fifteen_minutes_before_and_after(offset_min, blocked):
+@pytest.mark.parametrize("offset_min, blocked", [(-6, False), (-5, True), (0, True), (5, True), (6, False)])
+def test_news_window_is_five_minutes_before_and_after(offset_min, blocked):  # 1.6.0: было 15/15
     cal = calendar()
     reason = cal.check(mk(symbol="BTCUSDT"), NFP + offset_min * MIN)
     assert (reason is not None) is blocked and (reason is None or "Non-Farm" in reason)

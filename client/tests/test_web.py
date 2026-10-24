@@ -210,7 +210,7 @@ def test_web_shell_has_the_four_tabs_and_a_two_row_header_without_expand_in_wrap
     shell = web_app.WebShell(page, cfg, on_logout=lambda: None)
     flat = list(walk(shell.control))
     tabs = [x for x in flat if isinstance(x, ft.Tab)]
-    assert [t.label for t in tabs] == ["Dashboard", "Statistics", "History", "MFE Simulator", "Favorites"]
+    assert [t.label for t in tabs] == ["Dashboard", "Statistics", "History", "MFE Simulator"]  # «Избранное» - кнопка в History
     bar = next(x for x in flat if isinstance(x, ft.TabBar))
     assert bar.scrollable  # на узком экране вкладки листаются
     for row in (x for x in flat if isinstance(x, ft.Row) and x.wrap):  # Flutter не допускает expand-детей внутри Wrap (ErrorWidget - серый экран)

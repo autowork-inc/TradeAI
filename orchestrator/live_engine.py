@@ -337,6 +337,12 @@ class LiveExecutionEngine:
             raise ConfigError("LiveExecutionEngine уже запущен")
         self._task = asyncio.create_task(self.run(), name="live_engine")
 
+    def set_plan(self, strategy: str, plan: ScaleOutPlan) -> None:
+        """Авто-TP: новый план выхода для новых боевых сделок стратегии (риск-менеджер Binance и маршрутизатор MT5) - тот же, что у Shadow (R8)."""
+        self.risk.set_plan(strategy, plan)
+        if self.router is not None:
+            self.router.set_plan(strategy, plan)
+
     def check(self) -> None:
         """Из основного цикла: упавшая задача исполнителя роняет процесс (R1)."""
         if self._task is not None and self._task.done():

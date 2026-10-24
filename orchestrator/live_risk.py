@@ -258,7 +258,7 @@ class LiveRiskManager:
             return LiveRejected("insufficient_margin", {"margin_required": margin_required, "available": available_usdt, "leverage": self.leverage,
                                                         "notional": qty * entry, "risk_usdt": self.risk_usdt})
         tp = _to_grid(signal.tp, f.tick_size) if signal.tp is not None else None
-        exit_plan = self._plans.get(signal.strategy, DEFAULT_PLAN)
+        exit_plan = self._plans.get(signal.strategy, DEFAULT_PLAN)  # авто-TP меняет его через set_plan (тот же план, что у VirtualTracker)
         if split_levels(exit_plan, qty, f) is None:  # Scale Out не делится на сетку лота: торговать по другой математике нельзя
             return LiveRejected("plan_not_representable", {"qty": qty, "step": f.step_size, "min_qty": f.min_qty,
                                                            "levels": [list(x) for x in exit_plan.levels]})
@@ -271,6 +271,10 @@ class LiveRiskManager:
         )
         self._busy[signal.symbol] = signal.signal_id
         return plan
+
+    def set_plan(self, strategy: str, plan: ScaleOutPlan) -> None:
+        """Авто-TP (orchestrator/auto_tp.py): новый план выхода для новых сделок стратегии - тот же, что получает VirtualTracker (R8)."""
+        self._plans[strategy] = plan
 
     def release(self, symbol: str, signal_id: str) -> None:
         """Монета свободна (позиции нет, ордера сняты). Чужой или повторный release - ошибка протокола (R1)."""

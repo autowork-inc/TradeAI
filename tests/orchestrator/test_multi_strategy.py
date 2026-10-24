@@ -95,17 +95,19 @@ def test_second_position_under_the_same_key_is_a_protocol_error_but_a_free_key_i
     assert tr.submit(mk(A, direction=Direction.LONG, bar=3), 3000).accepted  # ключ освободился
 
 
-def test_every_strategy_gets_the_same_single_take_profit_plan_on_the_same_coin():
+def test_every_strategy_gets_the_same_scale_out_plan_on_the_same_coin():
     tr, _ = make()
     tr.submit(mk(A, kind=Kind.MARKET, bar=1), 1000)
     tr.submit(mk(B, kind=Kind.MARKET, bar=1), 1000)
     tr.on_tick(tick(100.0, 10))  # MARKET исполнены по первому тику
     ta, tb = tr.trades
-    assert ta.plan is SMC_PRO_PLAN and tb.plan is SCALP_1R_PLAN and tr.plan_for(E) is VWAP_PLAN and tr.plan_for("неизвестная") is DEFAULT_PLAN
-    tr.on_tick(tick(94.9, 20))  # +1R: частичных закрытий нет ни у кого
-    assert ta.status == OPEN and tb.status == OPEN and ta.remaining == 1.0 and tb.remaining == 1.0
-    tr.on_tick(tick(79.9, 30))  # +4R (R = 5, вход 100): единственный тейк обеих
-    assert ta.status == CLOSED and tb.status == CLOSED and ta.exit_reason == tb.exit_reason == "tp" and len(tb.legs) == 1
+    from orchestrator.registry import SCALE_PLAN
+
+    assert ta.plan is SCALE_PLAN and tb.plan is SCALE_PLAN and tr.plan_for(E) is VWAP_PLAN and tr.plan_for("неизвестная") is DEFAULT_PLAN  # 1.6.0: Scale Out 50% на +1R
+    tr.on_tick(tick(94.9, 20))  # +1R: у обеих «сейф» - закрыто 50%
+    assert ta.status == OPEN and tb.status == OPEN and ta.remaining == 0.5 and tb.remaining == 0.5
+    tr.on_tick(tick(79.9, 30))  # +4R (R = 5, вход 100): финальный тейк обеих
+    assert ta.status == CLOSED and tb.status == CLOSED and ta.exit_reason == tb.exit_reason == "tp" and len(tb.legs) == 2
 
 
 def test_gap_and_bar_close_touch_every_position_of_the_coin_independently():
@@ -183,7 +185,10 @@ def test_registry_builds_the_nine_strategies_with_unique_ids_and_individual_plan
     assert names == expected == list(SHADOW_STRATEGIES) and len(set(names)) == 9
     plans = plans_for(names)
     # у всех стратегий один план - единственный тейк 1:4 на весь объём; кроме VWAP_Reversion (2026-10-23): тейк на линии VWAP (цена сигнала)
-    assert all(plans[n] is DEFAULT_PLAN for n in names if n != VWAP_REVERSION) and plans[VWAP_REVERSION] is VWAP_PLAN
+    from orchestrator.registry import SCALE_PLAN
+
+    assert all(plans[n] is SCALE_PLAN for n in names if n != VWAP_REVERSION) and plans[VWAP_REVERSION] is VWAP_PLAN  # 1.6.0: Scale Out
+    assert SCALE_PLAN.levels == ((1.0, 0.5), (4.0, 0.5))
     assert VWAP_PLAN.tp_anchor == "price" and VWAP_PLAN.levels == ((1.0, 1.0),)
     assert DEFAULT_PLAN.levels == ((4.0, 1.0),) and SMC_PRO_PLAN is DEFAULT_PLAN and DEFAULT_PLAN.tp_anchor == "fill"
     assert SCALP_1R_PLAN is LEVEL_BREAKOUT_PLAN is DEFAULT_PLAN  # старые имена планов - псевдонимы

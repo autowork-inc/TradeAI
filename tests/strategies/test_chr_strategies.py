@@ -389,7 +389,7 @@ def test_strategies_wrap_detectors_into_market_signals_with_squeeze_geometry():
 def test_chr_strategies_are_registered_shadow_only_with_htf_and_static_plan():
     for name in (HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR):
         assert name in SHADOW_STRATEGIES and name in SHADOW_ONLY_STRATEGIES and name in config.SHADOW_ONLY_STRATEGIES and name in NEEDS_HTF
-        assert plans_for([name])[name] is CHR_PLAN
+        assert plans_for([name])[name].levels == ((1.0, 0.5), (4.0, 0.5))  # 1.6.0: Scale Out, финальный тейк подбирает авто-TP
         assert all(strategy_allowed(name, s) for s in config.SHADOW_SYMBOLS)
     built = {s.name: s for s in build_strategies(SHADOW_STRATEGIES, mtf=True, interval="15m")}
     assert built[HORIZONTAL_BREAKOUT_CHR].interval == built[TRENDLINE_BREAKOUT_CHR].interval == "15m"
@@ -414,7 +414,7 @@ def test_chr_plan_has_one_take_profit_no_partials_no_runner_no_trailing_no_break
 
 @pytest.mark.parametrize("name", [HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR])
 def test_stop_is_never_moved_to_break_even_after_mark_plus_1r(name):
-    """Лонг MARKET: вход 100, SL 95 (R = 5). Mark +1.2R, затем частичный фикс 50% на +1R, откат к входу и ниже: стоп остаётся 95,
+    """Лонг MARKET: вход 100, SL 95 (R = 5). Mark +1.2R, затем частичный фикс 50% на +1R (1.6.0), откат к входу и ниже: стоп остаётся 95,
     остаток закрывается по исходному SL с убытком, а не в безубыток."""
     tr = VirtualTracker(MemoryEventLog(), equity=10_000.0, recorder=MemoryRecorder(), plans=plans_for([name]))
     sig = mk(strategy=name, direction=Direction.LONG, kind=Kind.MARKET, entry=100.0, sl=95.0)
@@ -425,30 +425,30 @@ def test_stop_is_never_moved_to_break_even_after_mark_plus_1r(name):
     stop0, kind0 = t.stop_m, t.stop_kind
     tr.on_tick(tick(106.0, 20, kind="mark"))  # mark price +1.2R
     assert (t.stop_m, t.stop_kind) == (stop0, kind0) and not t.be_armed
-    tr.on_tick(tick(105.1, 30))  # +1.02R: частичных фиксаций нет
-    assert t.levels_done == 0 and t.remaining == 1.0
+    tr.on_tick(tick(105.1, 30))  # +1.02R: «сейф» - 50% закрыто на +1R
+    assert t.levels_done == 1 and t.remaining == pytest.approx(0.5)
     assert (t.stop_m, t.stop_kind) == (stop0, kind0) and not t.be_armed
     tr.on_tick(tick(100.0, 40))  # возврат к входу: в безубыток не закрылась
     tr.on_tick(tick(97.0, 50))
     assert t.status == OPEN
     tr.on_tick(tick(94.9, 60))  # исходный SL
-    assert t.status == CLOSED and [g.reason for g in t.legs] == ["sl"] and t.legs[-1].price == 94.9
-    assert t.legs[-1].gross_r == pytest.approx((94.9 - 100.0) / 5.0)
+    assert t.status == CLOSED and [g.reason for g in t.legs] == ["scale_1r", "sl"] and t.legs[-1].price == 94.9
+    assert t.legs[-1].gross_r == pytest.approx(0.5 * (94.9 - 100.0) / 5.0)
 
 
 @pytest.mark.parametrize("name", [HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR])
-def test_chr_trade_risks_5_usdt_and_takes_whole_position_at_exactly_1_to_4(name):
-    """Лонг MARKET: вход 100, SL 95 (R = 5): объём = 5 USDT / 5 = 1.0; тейк 120 (1:4) закрывает ВЕСЬ объём одной частью, прибыль ~ +4R."""
+def test_chr_trade_risks_5_usdt_takes_half_at_1r_and_the_rest_at_1_to_4(name):
+    """Лонг MARKET: вход 100, SL 95 (R = 5): объём = 5 USDT / 5 = 1.0; 50% закрывается на +1R (105), остаток - на тейке 120 (1:4): итог ~ +2.5R."""
     tr = VirtualTracker(MemoryEventLog(), equity=10_000.0, recorder=MemoryRecorder(), plans=plans_for([name]))
     assert tr.submit(mk(strategy=name, direction=Direction.LONG, kind=Kind.MARKET, entry=100.0, sl=95.0), 1000).accepted
     t = tr.trades[-1]
     tr.on_tick(tick(100.0, 10))
     assert t.status == OPEN and t.sizing.risk_amount == pytest.approx(5.0) and t.sizing.qty == pytest.approx(1.0)
-    tr.on_tick(tick(119.9, 20))  # чуть не дошла до 1:4 - позиция жива, ничего не закрыто
-    assert t.status == OPEN and t.remaining == 1.0 and not t.legs
+    tr.on_tick(tick(119.9, 20))  # чуть не дошла до 1:4 - закрыта только «сейф»-половина на +1R
+    assert t.status == OPEN and t.remaining == pytest.approx(0.5) and [g.reason for g in t.legs] == ["scale_1r"]
     tr.on_tick(tick(120.0, 30))
-    assert t.status == CLOSED and [g.reason for g in t.legs] == ["tp"] and t.legs[0].frac == pytest.approx(1.0) and t.legs[0].price == 120.0
-    assert t.legs[0].gross_r == pytest.approx(4.0)
+    assert t.status == CLOSED and [g.reason for g in t.legs] == ["scale_1r", "tp"] and t.legs[1].frac == pytest.approx(0.5) and t.legs[1].price == 120.0
+    assert sum(g.gross_r for g in t.legs) == pytest.approx(0.5 * (119.9 - 100.0) / 5.0 + 0.5 * 4.0)  # «сейф» исполнен первым тиком за +1R (119.9)
 
 
 def test_calibration_constants_are_the_defaults_of_params_and_classes():

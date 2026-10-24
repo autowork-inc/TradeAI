@@ -24,9 +24,11 @@ from tests.orchestrator.test_live_engine import NOW, Env, run
 # ------------------------------------------------------------------------------------------ 1. якорь TP
 
 
-def test_every_plan_including_smc_pro_trend_is_anchored_to_the_actual_fill_for_a_strict_1_to_4():
-    assert plans_for([SMC_PRO_TREND])[SMC_PRO_TREND] is SMC_PRO_PLAN and SMC_PRO_PLAN.tp_anchor == "fill"  # 2026-10-19: якорь `signal` отменён
-    assert SMC_PRO_PLAN.levels == DEFAULT_PLAN.levels == ((4.0, 1.0),) and SMC_PRO_PLAN.describe()["tp_anchor"] == "fill"
+def test_every_plan_including_smc_pro_trend_is_anchored_to_the_actual_fill_with_scale_out():
+    """1.6.0: план стратегии - Scale Out (50% на +1R, остаток на тейке 1:4, пока авто-TP не подобрал другой), уровни - от фактического входа."""
+    plan = plans_for([SMC_PRO_TREND])[SMC_PRO_TREND]
+    assert plan.tp_anchor == "fill" and plan.levels == ((1.0, 0.5), (4.0, 0.5))
+    assert SMC_PRO_PLAN.levels == DEFAULT_PLAN.levels == ((4.0, 1.0),)  # прежние имена - псевдонимы DEFAULT_PLAN (записи состояния, старые тесты)
 
 
 def test_level_price_uses_signal_prices_and_falls_back_to_the_fill_when_slipped_past_the_level():
@@ -55,10 +57,10 @@ def test_tracker_market_fill_with_slippage_puts_the_take_profit_exactly_4r_from_
     assert t.sizing.qty == pytest.approx(5.0 / 6.0)  # потеря на стопе (101 -> 95) = 5 USDT
 
 
-def test_live_engine_places_the_single_take_profit_exactly_4r_from_the_fill(tmp_path):
+def test_live_engine_places_half_at_1r_and_the_rest_at_4r_from_the_fill(tmp_path):
     env = Env(tmp_path, price=100.5, risk_kw={"plans": plans_for([SMC_PRO_TREND])})
     run(env.engine.execute(signal(entry=100.0, sl=98.0), NOW))
-    assert [a["triggerPrice"] for a in env.algos()] == ["98", "110.5"]  # 100.5 + 4 * 2.5 от факта
+    assert [a["triggerPrice"] for a in env.algos()] == ["98", "103", "110.5"]  # стоп, +1R (50%), +4R (остаток) от факта 100.5
     assert env.trade().risk == pytest.approx(2.5)
 
 

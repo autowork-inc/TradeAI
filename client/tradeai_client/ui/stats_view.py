@@ -44,6 +44,30 @@ class StatsView:
                               spacing=12, run_spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
              self._body], expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
         self.apply_profile()
+        self.restore_state(getattr(host, "view_state", lambda _n: None)("stats"))
+
+    # ------------------------------------------------------------------------------------------ память фильтров (1.6.0)
+
+    def state(self) -> dict:
+        return {"mode": self._mode.state(), "coin": self._coin.state(), "strategy": self._strategy.state(), "side": self._side.state(),
+                "period": self._period.value, "multi": bool(self._bar.switch.value)}
+
+    def restore_state(self, st: dict | None) -> None:
+        if not isinstance(st, dict):
+            return
+        self._bar.set(bool(st.get("multi")))
+        for key, f in (("coin", self._coin), ("strategy", self._strategy), ("side", self._side)):
+            f.restore(st.get(key))
+        if isinstance(st.get("mode"), dict) and self._mode.visible:
+            self._mode.restore(st["mode"])
+            self._mode_touched = True
+        if st.get("period") in PERIODS:
+            self._period.value = st["period"]
+
+    def _remember(self) -> None:
+        remember = getattr(self.host, "remember_view", None)
+        if remember is not None:
+            remember("stats", self.state())
 
     # ------------------------------------------------------------------------------------------ профиль и фильтры
 
@@ -68,6 +92,7 @@ class StatsView:
             self._coin.set_options([(c, fmt.coin_short(c)) for c in self._all_coins()])
 
     async def _changed(self, _=None) -> None:
+        self._remember()
         await self.refresh()
 
     def _mode_choice(self) -> str:
@@ -78,6 +103,7 @@ class StatsView:
     async def _mode_changed(self, _=None) -> None:
         self._mode_touched = True
         self.host.remember_mode(self._mode_choice())
+        self._remember()
         await self.refresh()
 
     def follow_default_mode(self, mode: str) -> bool:

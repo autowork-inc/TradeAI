@@ -10,6 +10,9 @@ COPY api/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY api ./api
+# предложения/шаблоны стратегий и одобренные изменения - только для показа во вкладке MFE Simulator (бот их не читает отсюда)
+COPY strategy_lab ./strategy_lab
+COPY orchestrator/strategy_overrides.json ./strategy_lab/strategy_overrides.json
 
 # не root: даже при уязвимости в веб-слое у процесса нет прав на запись в файловую систему образа
 RUN useradd --system --uid 10001 --no-create-home app

@@ -53,7 +53,7 @@ from orchestrator.microstructure import DepthFeed, MicroStructure
 from orchestrator.minute_bars import MarketEntryGuard, MinuteBars
 from orchestrator.news_calendar import NewsCalendar, fetch_calendar, weekend_gate
 from orchestrator.mtf import MtfState
-from orchestrator.registry import NEEDS_MICRO, OBI_BREAKOUT, SHADOW_STRATEGIES, build_strategies, ensure_history_depth, plans_for, strategy_allowed
+from orchestrator.registry import AUTO_TP_SKIP, NEEDS_MICRO, OBI_BREAKOUT, SHADOW_STRATEGIES, build_strategies, ensure_history_depth, plans_for, strategy_allowed
 from orchestrator.strategies import SMC_PRO_TREND
 from orchestrator.tick_feed import TickFeed
 from orchestrator.tracker import VirtualTracker
@@ -63,7 +63,7 @@ from persistence.db import Database, check_dsn
 from persistence.pg import PgRecorder, PgResyncStore, fetch_open_live, fetch_resync_candidates
 from persistence.recorder import RecordingEventLog
 from utils import ban_lock
-from utils.binance_rest import BinanceRest
+from utils.binance_rest import BinanceRest, klines_weight
 from utils.errors import ConfigError
 from utils.instance_lock import InstanceLock
 from utils.runner import run
@@ -103,7 +103,7 @@ class ShadowRun:
     def __init__(self, feed, orchestrator: Orchestrator, tracker: VirtualTracker, tick_feed=None, *,
                  heartbeat: Path | None = None, clock=time.monotonic, recorder: PgRecorder | None = None,
                  htf_feed=None, htf: MtfState | None = None, micro: MicroStructure | None = None, depth_feed: DepthFeed | None = None, live=None,
-                 universe: UniverseManager | None = None, news: NewsCalendar | None = None):
+                 universe: UniverseManager | None = None, news: NewsCalendar | None = None, auto_tp=None):
         if (htf_feed is None) != (htf is None):
             raise ConfigError("HTF: htf_feed и htf задаются вместе (фид H4 без таблицы bias, как и наоборот, бессмыслен)")
         if (micro is None) != (depth_feed is None):
@@ -112,6 +112,7 @@ class ShadowRun:
         self._htf_feed, self._htf = htf_feed, htf
         self._micro, self._depth = micro, depth_feed
         self._universe = universe  # автоселектор монет (orchestrator/universe.py): фоновая задача, ошибка роняет процесс
+        self._auto_tp = auto_tp  # авто-TP: сбой сети задача переживает сама, ошибка кода роняет процесс
         self._news = news  # календарь новостей: сбой сети он переживает сам; упавшая задача (ошибка кода) роняет процесс
         self._live = live  # LiveExecutionEngine при TRADE_MODE=live, иначе None (боевой код не импортируется)
         self._recorder = recorder
@@ -128,6 +129,8 @@ class ShadowRun:
             self._universe.check()
         if self._news is not None:
             self._news.check_task()
+        if self._auto_tp is not None:
+            self._auto_tp.check_task()
         if self._live is not None:
             self._live.check()  # упал боевой исполнитель -> падаем вместе с ним (R1); Safe Mode к этому моменту уже включён
         if self._recorder is not None:
@@ -157,6 +160,40 @@ class ShadowRun:
     def log_summary(self) -> None:
         for name, row in sorted(self._tracker.summary().items()):
             log.info("СВОДКА %s: %s", name, row)
+
+
+
+REPLAY_MAX_MS = 7 * 86_400_000  # дальше тайм-аут сделки (48 ч) всё равно закроет её
+
+
+async def replay_downtime(api: BinanceRest, tracker: VirtualTracker, restored: Sequence, now_ms: int) -> None:
+    """Восстановленные теневые сделки по крипте: 1m-свечи Binance с момента входа (лимитка - с сигнала) до текущей минуты прогоняются через трекер
+    (`VirtualTracker.replay_bars`): стоп или тейк, задетые за время простоя, закрывают сделку по своей цене и времени. MT5 - без свечей (только предупреждение)."""
+    by_symbol: dict[str, int] = {}
+    for t in restored:
+        if t.status not in ("open", "pending_limit"):
+            continue
+        if not t.signal.symbol.endswith("USDT"):
+            log.warning("Простой сделки %s (%s) не доигран: минутных свечей Forex/металлов нет", t.trade_id, t.signal.symbol)
+            continue
+        start = (t.fill_ts or t.signal.bar_close_ms) // 60_000 * 60_000 + 60_000  # минута входа могла быть до исполнения - со следующей
+        by_symbol[t.signal.symbol] = min(by_symbol.get(t.signal.symbol, start), start)
+    end = now_ms // 60_000 * 60_000  # текущая минута не закрыта
+    for symbol, start in by_symbol.items():
+        start = max(start, end - REPLAY_MAX_MS)
+        bars: list[tuple[int, float, float, float]] = []
+        cur = start
+        while cur < end:
+            rows = await api.get("/fapi/v1/klines", {"symbol": symbol, "interval": "1m", "startTime": cur, "endTime": end - 1, "limit": 1000},
+                                 weight=klines_weight(1000))
+            if not rows:
+                break
+            bars += [(int(r[0]), float(r[2]), float(r[3]), float(r[4])) for r in rows]
+            cur = int(rows[-1][0]) + 60_000
+        n = tracker.replay_bars(symbol, bars)
+        still = [t.trade_id for t in restored if t.signal.symbol == symbol and t.status in ("open", "pending_limit")]
+        log.warning("State Recovery (shadow): простой %s доигран по %d минутным свечам; открытыми остались %s, закрыты %s", symbol, n, still,
+                    [t.trade_id for t in restored if t.signal.symbol == symbol and t.trade_id not in still])
 
 
 async def shadow_main(opts: Options) -> None:
@@ -214,6 +251,7 @@ async def shadow_main(opts: Options) -> None:
                 if recorder is not None:  # State Recovery теневых сделок: до потоков, до первого тика и до поиска новых сигналов
                     restored, unreadable = tracker.restore(recorder.restorable, int(time.time() * 1000))
                     log.info("State Recovery (shadow): восстановлено %d сделок %s, нечитаемых (aborted) %d", len(restored), [t.trade_id for t in restored], len(unreadable))
+                    await replay_downtime(api, tracker, restored, int(time.time() * 1000))  # стоп/тейк, задетые, пока бот лежал (иначе «зомби-сделка»)
                 universe = Universe(state_path=config.DATA_DIR / config.UNIVERSE_STATE_NAME) if config.UNIVERSE_AUTO else None
                 subscribed = universe.subscribed if universe is not None else set(crypto)  # монеты с запущенными потоками (в т.ч. подключённые на лету)
                 live = None
@@ -238,6 +276,23 @@ async def shadow_main(opts: Options) -> None:
                         log.warning("State Recovery: подписка на потоки монет с открытыми боевыми позициями %s", list(held))
                         crypto = (*crypto, *held)
                         subscribed.update(held)
+                auto_tp = None
+                if config.AUTO_TP_ENABLED and db is not None:  # авто-подстройка финального тейка по каждой стратегии (orchestrator/auto_tp.py)
+                    from orchestrator import overrides
+                    from orchestrator.auto_tp import SQL as AUTO_TP_SQL, AutoTpTuner, since_from
+
+                    manual = {n for n, e in overrides.load().items() if e.get("tp_r") is not None}  # ручной тейк пользователя важнее подстройки
+
+                    def apply_plan(name, plan, _live=live):
+                        tracker.set_plan(name, plan)
+                        if _live is not None:
+                            _live.set_plan(name, plan)
+
+                    auto_tp = AutoTpTuner(lambda since: db.fetch(AUTO_TP_SQL, since), api, names, apply_plan, state_path=config.DATA_DIR / config.AUTO_TP_STATE_NAME,
+                                          since=since_from(config.AUTO_TP_SINCE), min_trades=config.AUTO_TP_MIN_TRADES, default_r=config.AUTO_TP_DEFAULT_R,
+                                          skip=set(AUTO_TP_SKIP) | manual)
+                    auto_tp.apply_saved()  # до первой сделки: последние подобранные тейки
+                    auto_tp.start()  # пересчёт сразу и раз в сутки
                 shadow_held = tuple(sorted({t.signal.symbol for t in restored} - set(crypto) - set(mt5_wanted)))
                 if shadow_held:  # теневая сделка по монете вне стартового набора: потоки свечей и тиков нужны сразу (сопровождение), новых сигналов по ней нет
                     log.warning("State Recovery (shadow): подписка на потоки монет с восстановленными сделками %s", list(shadow_held))
@@ -253,9 +308,9 @@ async def shadow_main(opts: Options) -> None:
                 if weekend is not None:
                     gates.append(weekend)  # суббота 00:00 - воскресенье 23:59 UTC: новых сигналов нет, открытые сделки ведутся как обычно
                 news = None
-                if config.NEWS_FILTER_ENABLED:  # High Impact ForexFactory: +-15 минут вокруг события новые сигналы по затронутым валютам не принимаются
+                if config.NEWS_FILTER_ENABLED:  # High Impact ForexFactory: +-5 минут вокруг события - метка meta.news (NEWS_FILTER_MODE=tag) или отказ (block)
                     news = NewsCalendar(lambda: fetch_calendar(session, config.NEWS_CALENDAR_URL, config.NEWS_TIMEOUT_S),
-                                        cache_path=config.DATA_DIR / config.NEWS_CACHE_NAME)
+                                        cache_path=config.DATA_DIR / config.NEWS_CACHE_NAME, tag_only=config.NEWS_FILTER_MODE != "block")
                     gates.append(news)
                 # новые сигналы - только по отслеживаемым монетам (live-уровень, Binance Test, MT5); OBI_Breakout - ещё и только где есть стакан (live-уровень), см. config.STRATEGY_SYMBOLS
                 orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder, signal_gates=gates,
@@ -349,7 +404,7 @@ async def shadow_main(opts: Options) -> None:
                                                                    add_book=add_book if micro is not None else None,
                                                                    open_symbols=live.open_symbols if live is not None else None))
                 runner = ShadowRun(feed, orch, tracker, ticks, heartbeat=config.DATA_DIR / HEARTBEAT_NAME, recorder=recorder,
-                                 htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live, universe=manager, news=news)
+                                 htf_feed=htf_feed, htf=htf, micro=micro, depth_feed=depth_feed, live=live, universe=manager, news=news, auto_tp=auto_tp)
                 log.info("Версия бота %s", config.BOT_VERSION)
                 log.info("Shadow Mode: %s %s%s, стратегии %s, HTF-фильтр %s, микроструктура %s, эквити %.0f, журнал %s, БД %s, TRADE_MODE=%s, автоселектор монет %s",
                          all_symbols, opts.interval, f" + SMC_Pro_Trend {D.MTF_BIAS_INTERVAL}->{D.MTF_STRUCT_INTERVAL}->{D.MTF_BASE_INTERVAL}" if mtf else "",

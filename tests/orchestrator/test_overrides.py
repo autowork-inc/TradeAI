@@ -27,14 +27,14 @@ def ict():
 
 def test_no_file_means_defaults(ovr):
     assert ict().params.require_htf_trend is True
-    assert plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((4.0, 1.0),)
+    assert plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((1.0, 0.5), (4.0, 0.5))  # 1.6.0: Scale Out - 50% на +1R, остаток 1:4
 
 
 def test_params_and_take_profit_are_applied(ovr):
     write(ovr, {"ICT_Killzones": {"params": {"require_htf_trend": False, "sl_buffer_atr": 0.5}, "tp_r": 2.5}})
     p = ict().params
     assert p.require_htf_trend is False and p.sl_buffer_atr == 0.5 and p.min_wick_frac == 0.55  # остальное - как в коде
-    assert plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((2.5, 1.0),)
+    assert plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((1.0, 0.5), (2.5, 0.5))  # ручной тейк - тот же Scale Out
     vwap = plans_for(["VWAP_Reversion"])["VWAP_Reversion"]  # без записи в overrides - план из кода (тейк на линии VWAP)
     assert vwap.tp_anchor == "price" and vwap.levels == ((1.0, 1.0),)
 
@@ -84,13 +84,13 @@ def test_apply_saves_snapshot_then_rollback_restores_previous_version(lab, ovr):
     assert sp.main(["apply", "p1"]) == 0
     assert ict().params.require_htf_trend is False and status("p1") == "applied"
     assert sp.main(["apply", "p2"]) == 0  # второе изменение копится поверх первого
-    assert ict().params.require_htf_trend is False and plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((2.0, 1.0),)
+    assert ict().params.require_htf_trend is False and plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((1.0, 0.5), (2.0, 0.5))
     snaps = sp.snapshots("ICT_Killzones")
     assert len(snaps) == 2
     first = sp.read_json(snaps[0])
     assert first["override_entry"] is None and first["effective_params"]["require_htf_trend"] is True and first["git_commit"] == "abc1234"
     assert sp.main(["rollback", "ICT_Killzones"]) == 0  # к последнему снимку: до p2
-    assert ict().params.require_htf_trend is False and plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((4.0, 1.0),)
+    assert ict().params.require_htf_trend is False and plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((1.0, 0.5), (4.0, 0.5))
     assert status("p2") == "rolled_back" and status("p1") == "applied"
     assert sp.main(["rollback", "ICT_Killzones", "--to", snaps[0].name]) == 0  # к исходной версии кода
     assert ict().params.require_htf_trend is True and status("p1") == "rolled_back"

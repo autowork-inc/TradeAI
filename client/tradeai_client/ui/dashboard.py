@@ -24,10 +24,34 @@ class DashboardView:
         self._events = ft.Column(spacing=2, tight=True)
         self._head = ft.Row(spacing=12)
         self._error = ft.Container(visible=False)
+        self._news = ft.Column(spacing=4, tight=True)
+        self._news_box = ft.Column([w.title("Важные новости недели", 15), w.card(self._news, padding=10)], spacing=8, visible=False)
         self.control = ft.Column(
-            [self._head, self._error, self._cards, ft.Container(height=6), w.title("События", 15), w.card(self._events, padding=10)],
+            [self._head, self._error, self._cards, ft.Container(height=6), self._news_box, w.title("События", 15), w.card(self._events, padding=10)],
             expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
         self.show_placeholder("Ожидание данных от сервера…")
+
+    # ------------------------------------------------------------------------------------------ новости
+
+    def set_news(self, data: dict | None, now_iso: str | None = None) -> None:
+        """Ближайшие и недавние (сутки) High Impact новости из календаря бота. В окне ±5 минут бот помечает сигналы (meta.news), а не блокирует."""
+        from datetime import datetime, timedelta, timezone
+
+        events = (data or {}).get("events") or []
+        now = datetime.fromisoformat(now_iso.replace("Z", "+00:00")) if now_iso else datetime.now(timezone.utc)
+        keep = [e for e in events if datetime.fromisoformat(e["ts"].replace("Z", "+00:00")) >= now - timedelta(days=1)]
+        rows = []
+        for e in keep[:12]:
+            ts = datetime.fromisoformat(e["ts"].replace("Z", "+00:00"))
+            past = ts < now
+            rows.append(ft.Row([ft.Text(fmt.fmt_local(e["ts"]), size=12, color=w.MUTED, width=90), w.pill(e["currency"], w.MUTED if past else w.AMBER),
+                                ft.Text(e["title"], size=12, color=w.MUTED if past else w.TEXT, expand=True, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)],
+                               spacing=8))
+        self._news.controls = rows or [w.label("На этой неделе важных новостей больше нет", size=12)]
+        self._news.controls.append(w.label("±5 минут вокруг новости бот торгует, но помечает такие сделки (чтобы потом сравнить результат).", size=11))
+        self._news_box.visible = True
+        if w.attached(self.control):
+            self.control.update()
 
     # ------------------------------------------------------------------------------------------ состояние
 
@@ -56,10 +80,16 @@ class DashboardView:
         strategies = getattr(self.host, "profile_strategies", lambda: None)()
         pool = getattr(self.host, "profile_coins", lambda: None)()
         shown = [c for c in s["coins"] if pool is None or c["coin"] in pool]
-        if strategies is not None:  # профиль со своим набором стратегий: автомат SMC (S0..S4) и чужие позиции не показываются
+        if strategies is not None:  # профиль со своим набором стратегий (CHR): только монеты, где у него есть сделки; автомат SMC (S0..S4) не показывается
             shown = [{**c, "setups": [], "positions": [p for p in c["positions"] if p["strategy_name"] in strategies]} for c in shown]
+            shown = [c for c in shown if c["positions"]]
         crypto, mt5 = split_coins(shown)
         self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (cTrader)", mt5, MT5_COL)]
+        if strategies is not None and not shown:
+            names = ", ".join(fmt.STRATEGY_RU.get(x, x) for x in strategies)
+            self._cards.controls = [w.card(ft.Column([w.title("Открытых сделок сейчас нет", 15),
+                                                      w.label(f"{names}: бот ищет сигналы на всех {len(s['coins'])} монетах пула. Как только появится вход, "
+                                                              "здесь будет карточка монеты; история - во вкладке History.", size=13)], spacing=6))]
         events = [e for e in s["events"] if (pool is None or e["coin"] in pool) and (strategies is None or e.get("strategy_id") in strategies or e.get("strategy") in strategies)]
         self._events.controls = [self._event_row(e) for e in events] or [w.label("Событий пока нет")]
 

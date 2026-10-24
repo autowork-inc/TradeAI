@@ -35,6 +35,7 @@ from orchestrator.multi_strategies import (
     StrategyVwapReversion,
 )
 from orchestrator import overrides
+from orchestrator.auto_tp import scale_plan
 from orchestrator.strategies import SMC_PRO_TREND, Strategy, StrategySMC
 from orchestrator.tracker import DEFAULT_PLAN, ScaleOutPlan
 from strategies.smc_setups import SmcSetupParams
@@ -69,9 +70,14 @@ SCALP_1R_PLAN = LEVEL_BREAKOUT_PLAN = CHR_PLAN = STRICT_PLAN
 VWAP_PLAN = ScaleOutPlan(((1.0, 1.0),), tp_anchor="price")
 # SMC_Pro_Trend (2026-10-19): тейк строго 1:4 от ФАКТИЧЕСКОЙ цены входа (якорь `fill`; прежний якорь `signal` от цены сигнала отменён).
 SMC_PRO_PLAN = STRICT_PLAN
-STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_PRO_TREND: SMC_PRO_PLAN, SMC_COUNTER_TREND: SCALP_1R_PLAN, VWAP_REVERSION: VWAP_PLAN,
-                                           HORIZONTAL_BREAKOUT: LEVEL_BREAKOUT_PLAN, TRENDLINE_BREAKOUT: LEVEL_BREAKOUT_PLAN,
-                                           HORIZONTAL_BREAKOUT_CHR: CHR_PLAN, TRENDLINE_BREAKOUT_CHR: CHR_PLAN}
+# 2026-10-24 (задание пользователя): у всех R-стратегий Scale Out - 50% объёма на +1R («сейф»), остаток на финальном тейке; финальный тейк
+# подбирает авто-TP (orchestrator/auto_tp.py) по доигрыванию сделок стратегии, до первого подбора - 1:AUTO_TP_DEFAULT_R. Имена выше - прежние
+# псевдонимы DEFAULT_PLAN (на них ссылаются тесты и записи состояния), реальные планы стратегий - здесь.
+SCALE_PLAN = scale_plan(config.AUTO_TP_DEFAULT_R)
+STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_PRO_TREND: SCALE_PLAN, SMC_COUNTER_TREND: SCALE_PLAN, OBI_BREAKOUT: SCALE_PLAN, ICT_KILLZONES: SCALE_PLAN,
+                                           VWAP_REVERSION: VWAP_PLAN, HORIZONTAL_BREAKOUT: SCALE_PLAN, TRENDLINE_BREAKOUT: SCALE_PLAN,
+                                           HORIZONTAL_BREAKOUT_CHR: SCALE_PLAN, TRENDLINE_BREAKOUT_CHR: SCALE_PLAN}
+AUTO_TP_SKIP = frozenset({VWAP_REVERSION})  # тейк по линии VWAP (tp_anchor='price') - логика стратегии, авто-TP его не трогает
 
 
 def plans_for(names: Sequence[str]) -> Mapping[str, ScaleOutPlan]:
@@ -83,7 +89,7 @@ def plans_for(names: Sequence[str]) -> Mapping[str, ScaleOutPlan]:
         plan = STRATEGY_PLANS.get(n, DEFAULT_PLAN)
         tp_r = (table.get(n) or {}).get("tp_r")
         if tp_r is not None:
-            plan = ScaleOutPlan(((tp_r, 1.0),), plan.tp_anchor)
+            plan = scale_plan(tp_r)  # ручной тейк пользователя: тот же Scale Out (50% на +1R), авто-TP эту стратегию не трогает
             log.warning("Стратегия %s: одобренный тейк 1:%g (предложение %s)", n, tp_r, table[n].get("proposal_id"))
         out[n] = plan
     return out
