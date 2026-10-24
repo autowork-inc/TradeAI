@@ -191,6 +191,8 @@ def get_params(argv: list[str] | None = None) -> argparse.Namespace:
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", a.remote_dir) or a.remote_dir.startswith("/") or ".." in a.remote_dir:
         fail("--remote-dir: только относительный путь из латиницы, цифр и ._/-")
     a.ctrader = {**validate_ctrader(a.ctrader_client_id, a.ctrader_client_secret, a.ctrader_account, a.ctrader_token, a.ctrader_refresh), **validate_web(a.web_login, a.web_password)}
+    if a.key:
+        a.key = os.path.expanduser(a.key)  # PowerShell не раскрывает «~» в аргументах: без этого ~/.ssh/id_ed25519 - «No such file or directory»
     if not a.key and not a.password:
         a.password = getpass.getpass(f"Пароль {a.user}@{a.host}: ")
     return a
