@@ -19,6 +19,7 @@ from tradeai_client.api import ApiClient, ApiError, LiveStateStream
 from tradeai_client.chart_spec import ChartDataError, build_chart_spec
 from tradeai_client.settings import ClientSettings
 from tradeai_client.ui import widgets as w
+from tradeai_client.ui.mfe_view import MfeView
 from tradeai_client.ui.dashboard import DashboardView
 from tradeai_client.ui.history_view import HistoryView
 from tradeai_client.ui.stats_view import StatsView
@@ -27,7 +28,7 @@ from tradeai_client.web import auth, charts
 log = logging.getLogger("tradeai.web")
 TOKEN_KEY = "tradeai_web_token"
 NARROW_PX = 700  # уже этого - телефон: компактные отступы
-TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_FAVORITES = range(4)
+TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_MFE, TAB_FAVORITES = range(5)
 STATUS_COLORS = {"ok": w.GREEN, "live": w.GREEN, "connecting": w.AMBER, "error": w.RED, "auth": w.RED, "throttled": w.RED}
 
 
@@ -70,6 +71,7 @@ class WebShell:
         self._launcher = ft.UrlLauncher()
         page.services.append(self._launcher)
         self.dashboard, self.stats, self.history = DashboardView(self), StatsView(self), HistoryView(self)
+        self.mfe = MfeView(self)
         self.favorites = HistoryView(self, favorites=True)
         self._dot, self._status_text = w.dot(w.MUTED, 12), ft.Text("Подключение…", size=12, color=w.MUTED)
         self._account = ft.Text("", size=12, color=w.AMBER, weight=ft.FontWeight.W_600)
@@ -85,10 +87,12 @@ class WebShell:
                        spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         status = ft.Row([self._dot, self._status_text, self._account], spacing=8, wrap=True, run_spacing=2, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         header = ft.Column([title, status], spacing=0)
-        labels = [("Dashboard", ft.Icons.DASHBOARD), ("Statistics", ft.Icons.BAR_CHART), ("History", ft.Icons.HISTORY), ("Favorites", ft.Icons.STAR)]
-        tabs = ft.Tabs(length=4, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
+        labels = [("Dashboard", ft.Icons.DASHBOARD), ("Statistics", ft.Icons.BAR_CHART), ("History", ft.Icons.HISTORY), ("MFE Simulator", ft.Icons.SCIENCE),
+                  ("Favorites", ft.Icons.STAR)]
+        tabs = ft.Tabs(length=5, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label=t, icon=i) for t, i in labels], scrollable=True),
-            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.favorites.control], expand=True)], expand=True))
+            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.mfe.control, self.favorites.control],
+                          expand=True)], expand=True))
         return ft.Column([header, tabs], expand=True, spacing=6)
 
     def run(self, coro) -> None:
@@ -173,6 +177,8 @@ class WebShell:
             await self.stats.refresh()
         elif self._tab == TAB_HISTORY:
             await self.history.refresh()
+        elif self._tab == TAB_MFE:
+            await self.mfe.refresh()
         elif self._tab == TAB_FAVORITES:
             await self.favorites.refresh()
 

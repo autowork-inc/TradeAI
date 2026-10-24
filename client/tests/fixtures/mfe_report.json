@@ -1,0 +1,583 @@
+{
+ "since": "2026-10-20",
+ "generated_at": "2026-10-25T10:00:00+00:00",
+ "counts": {
+  "rows": 7,
+  "live_duplicates": 0,
+  "bad_stop": 0,
+  "with_entry": 7,
+  "simulated": 6,
+  "no_candles": 1,
+  "no_candles_symbols": [
+   "EURUSD"
+  ],
+  "statuses": {
+   "aborted": 3,
+   "closed": 2,
+   "open": 2
+  },
+  "modes": {
+   "shadow": 6,
+   "live": 0
+  },
+  "binance_requests": 2
+ },
+ "tp_matrix": [
+  {
+   "tp": 1.0,
+   "n": 6,
+   "wins": 0,
+   "win_rate": 0.0,
+   "sum_r": -6.597,
+   "mean_r": -1.0995,
+   "usd": -32.98,
+   "pf": 0.0,
+   "unfinished": 0
+  },
+  {
+   "tp": 1.5,
+   "n": 6,
+   "wins": 0,
+   "win_rate": 0.0,
+   "sum_r": -6.597,
+   "mean_r": -1.0995,
+   "usd": -32.98,
+   "pf": 0.0,
+   "unfinished": 0
+  },
+  {
+   "tp": 2.0,
+   "n": 6,
+   "wins": 0,
+   "win_rate": 0.0,
+   "sum_r": -6.597,
+   "mean_r": -1.0995,
+   "usd": -32.98,
+   "pf": 0.0,
+   "unfinished": 0
+  },
+  {
+   "tp": 2.5,
+   "n": 6,
+   "wins": 0,
+   "win_rate": 0.0,
+   "sum_r": -6.597,
+   "mean_r": -1.0995,
+   "usd": -32.98,
+   "pf": 0.0,
+   "unfinished": 0
+  },
+  {
+   "tp": 3.0,
+   "n": 6,
+   "wins": 0,
+   "win_rate": 0.0,
+   "sum_r": -6.597,
+   "mean_r": -1.0995,
+   "usd": -32.98,
+   "pf": 0.0,
+   "unfinished": 0
+  },
+  {
+   "tp": 4.0,
+   "n": 6,
+   "wins": 0,
+   "win_rate": 0.0,
+   "sum_r": -6.597,
+   "mean_r": -1.0995,
+   "usd": -32.98,
+   "pf": 0.0,
+   "unfinished": 0
+  }
+ ],
+ "verdict": {
+  "n": 6,
+  "best_tp": 1.0,
+  "best_usd": -32.98,
+  "best_mean_r": -1.0995,
+  "current_usd": -32.98,
+  "reliable": false,
+  "text": "На основе 6 сделок оптимальный математический Take-Profit для текущего рынка составляет 1:1 (-32.98 $, -1.099 R на сделку; сейчас 1:4 даёт -32.98 $). Сделок меньше 30 - это ориентир, не вывод."
+ },
+ "squeeze": {
+  "stopped": 6,
+  "checked": 6,
+  "back_to_entry": 6,
+  "reach1": 6,
+  "reach2": 6,
+  "rate": 1.0,
+  "overshoot_atr_median": 0.2
+ },
+ "padding": {
+  "rows": [
+   {
+    "pad_atr": 0.0,
+    "cells": {
+     "1.0": {
+      "n": 6,
+      "wins": 0,
+      "win_rate": 0.0,
+      "sum_r": -6.597,
+      "mean_r": -1.0995,
+      "usd": -32.98,
+      "pf": 0.0
+     },
+     "1.5": {
+      "n": 6,
+      "wins": 0,
+      "win_rate": 0.0,
+      "sum_r": -6.597,
+      "mean_r": -1.0995,
+      "usd": -32.98,
+      "pf": 0.0
+     },
+     "2.0": {
+      "n": 6,
+      "wins": 0,
+      "win_rate": 0.0,
+      "sum_r": -6.597,
+      "mean_r": -1.0995,
+      "usd": -32.98,
+      "pf": 0.0
+     },
+     "2.5": {
+      "n": 6,
+      "wins": 0,
+      "win_rate": 0.0,
+      "sum_r": -6.597,
+      "mean_r": -1.0995,
+      "usd": -32.98,
+      "pf": 0.0
+     },
+     "3.0": {
+      "n": 6,
+      "wins": 0,
+      "win_rate": 0.0,
+      "sum_r": -6.597,
+      "mean_r": -1.0995,
+      "usd": -32.98,
+      "pf": 0.0
+     },
+     "4.0": {
+      "n": 6,
+      "wins": 0,
+      "win_rate": 0.0,
+      "sum_r": -6.597,
+      "mean_r": -1.0995,
+      "usd": -32.98,
+      "pf": 0.0
+     }
+    }
+   },
+   {
+    "pad_atr": 0.25,
+    "cells": {
+     "1.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 5.464,
+      "mean_r": 0.9106,
+      "usd": 27.32,
+      "pf": null
+     },
+     "1.5": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 8.462,
+      "mean_r": 1.4104,
+      "usd": 42.31,
+      "pf": null
+     },
+     "2.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 11.461,
+      "mean_r": 1.9101,
+      "usd": 57.3,
+      "pf": null
+     },
+     "2.5": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 14.459,
+      "mean_r": 2.4099,
+      "usd": 72.3,
+      "pf": null
+     },
+     "3.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 17.458,
+      "mean_r": 2.9096,
+      "usd": 87.29,
+      "pf": null
+     },
+     "4.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 23.455,
+      "mean_r": 3.9091,
+      "usd": 117.27,
+      "pf": null
+     }
+    }
+   },
+   {
+    "pad_atr": 0.5,
+    "cells": {
+     "1.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 5.517,
+      "mean_r": 0.9195,
+      "usd": 27.59,
+      "pf": null
+     },
+     "1.5": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 8.515,
+      "mean_r": 1.4192,
+      "usd": 42.58,
+      "pf": null
+     },
+     "2.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 11.514,
+      "mean_r": 1.919,
+      "usd": 57.57,
+      "pf": null
+     },
+     "2.5": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 14.513,
+      "mean_r": 2.4188,
+      "usd": 72.56,
+      "pf": null
+     },
+     "3.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 17.511,
+      "mean_r": 2.9185,
+      "usd": 87.55,
+      "pf": null
+     },
+     "4.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 23.508,
+      "mean_r": 3.918,
+      "usd": 117.54,
+      "pf": null
+     }
+    }
+   },
+   {
+    "pad_atr": 0.75,
+    "cells": {
+     "1.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 5.561,
+      "mean_r": 0.9268,
+      "usd": 27.8,
+      "pf": null
+     },
+     "1.5": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 8.559,
+      "mean_r": 1.4265,
+      "usd": 42.8,
+      "pf": null
+     },
+     "2.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 11.558,
+      "mean_r": 1.9263,
+      "usd": 57.79,
+      "pf": null
+     },
+     "2.5": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 14.556,
+      "mean_r": 2.426,
+      "usd": 72.78,
+      "pf": null
+     },
+     "3.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 17.555,
+      "mean_r": 2.9258,
+      "usd": 87.77,
+      "pf": null
+     },
+     "4.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 23.552,
+      "mean_r": 3.9253,
+      "usd": 117.76,
+      "pf": null
+     }
+    }
+   },
+   {
+    "pad_atr": 1.0,
+    "cells": {
+     "1.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 5.597,
+      "mean_r": 0.9328,
+      "usd": 27.98,
+      "pf": null
+     },
+     "1.5": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 8.595,
+      "mean_r": 1.4326,
+      "usd": 42.98,
+      "pf": null
+     },
+     "2.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 11.594,
+      "mean_r": 1.9323,
+      "usd": 57.97,
+      "pf": null
+     },
+     "2.5": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 14.593,
+      "mean_r": 2.4321,
+      "usd": 72.96,
+      "pf": null
+     },
+     "3.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 17.591,
+      "mean_r": 2.9318,
+      "usd": 87.96,
+      "pf": null
+     },
+     "4.0": {
+      "n": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "sum_r": 16.591,
+      "mean_r": 2.7652,
+      "usd": 82.96,
+      "pf": null
+     }
+    }
+   }
+  ],
+  "suggest": {
+   "pad_atr": 0.75,
+   "tp": 4.0,
+   "usd": 117.76,
+   "mean_r": 3.9253
+  },
+  "text": "Рекомендуется отодвинуть стоп ещё на 0.75 ATR (риск тот же $5): с тейком 1:4 - +117.76 $ против -32.98 $ с текущим стопом.",
+  "with_atr": 6
+ },
+ "by_strategy": [
+  {
+   "strategy": "ICT_Killzones",
+   "n": 3,
+   "rows": [
+    {
+     "tp": 1.0,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 1.5,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 2.0,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 2.5,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 3.0,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 4.0,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    }
+   ],
+   "best_tp": 1.0,
+   "best_usd": -16.49,
+   "squeeze": {
+    "stopped": 3,
+    "reach1": 3
+   },
+   "mfe_median": 0.0
+  },
+  {
+   "strategy": "VWAP_Reversion",
+   "n": 3,
+   "rows": [
+    {
+     "tp": 1.0,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 1.5,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 2.0,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 2.5,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 3.0,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    },
+    {
+     "tp": 4.0,
+     "n": 3,
+     "wins": 0,
+     "win_rate": 0.0,
+     "sum_r": -3.298,
+     "mean_r": -1.0995,
+     "usd": -16.49,
+     "pf": 0.0,
+     "unfinished": 0
+    }
+   ],
+   "best_tp": 1.0,
+   "best_usd": -16.49,
+   "squeeze": {
+    "stopped": 3,
+    "reach1": 3
+   },
+   "mfe_median": 0.0
+  }
+ ],
+ "mfe": {
+  "median": 0.0,
+  "reach1": 0,
+  "mae_median": 1.0
+ }
+}

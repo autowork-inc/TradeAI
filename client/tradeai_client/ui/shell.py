@@ -16,6 +16,7 @@ from tradeai_client.golden_image import render_png
 from tradeai_client.settings import ClientSettings, SettingsError, load_settings, save_settings, settings_exist, upgrade_to_https
 from tradeai_client.ui import widgets as w
 from tradeai_client.ui.analysis_view import AnalysisView
+from tradeai_client.ui.mfe_view import MfeView
 from tradeai_client.ui.changelog_view import change_row, release_card, releases_list
 from tradeai_client.ui.dashboard import DashboardView
 from tradeai_client.ui.history_view import HistoryView
@@ -23,7 +24,7 @@ from tradeai_client.ui.stats_view import StatsView
 
 log = logging.getLogger("tradeai_client")
 STATUS_COLORS = {"connected": w.GREEN, "connecting": w.AMBER, "reconnecting": w.AMBER, "auth": w.RED, "throttled": w.RED, "error": w.RED, "idle": w.MUTED}
-TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS, TAB_FAVORITES = 0, 1, 2, 3, 4
+TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS, TAB_MFE, TAB_FAVORITES = 0, 1, 2, 3, 4, 5
 ACCOUNT_REFRESH_S = 30.0  # как часто обновлять баланс в шапке (движок пишет снимок счёта раз в ~30 с)
 POST_BARS_MARGIN = 5  # свечей после выхода, которые показываем за последним маркером
 
@@ -54,6 +55,7 @@ class Shell:
         self._last_state: dict | None = None  # последнее состояние Dashboard (перерисовывается при смене профиля)
         self._chr_pnl: float | None = None  # баланс профиля CHR: накопленный PnL его сделок от нуля
         self.dashboard, self.stats, self.history, self.analysis = DashboardView(self), StatsView(self), HistoryView(self), AnalysisView(self)
+        self.mfe = MfeView(self)
         self.favorites = HistoryView(self, favorites=True)
         page.on_resize = lambda e: [v.relayout() for v in (self.history, self.favorites)]  # узкое окно - карточки вместо таблицы
         self._profile_btn = ft.TextButton(f"Пользователь: {self.settings.profile}", icon=ft.Icons.PERSON, tooltip="Сменить пользователя (SANTA / CHR)", on_click=lambda e: self.show_profile_dialog())
@@ -78,10 +80,12 @@ class Shell:
         header = ft.Row([ft.Icon(ft.Icons.CANDLESTICK_CHART, color=w.ACCENT), ft.Text(APP_NAME, size=20, weight=ft.FontWeight.W_700), ft.Container(expand=True),
                          self._profile_btn, self._account, self._eye, ft.VerticalDivider(width=12, color=w.BORDER), self._dot, self._status_text, ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="Настройки подключения", on_click=lambda e: self.show_settings())],
                         spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-        tabs = ft.Tabs(length=5, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
+        tabs = ft.Tabs(length=6, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label="Dashboard", icon=ft.Icons.DASHBOARD), ft.Tab(label="Statistics", icon=ft.Icons.BAR_CHART),
-                            ft.Tab(label="History", icon=ft.Icons.HISTORY), ft.Tab(label="Analysis", icon=ft.Icons.ANALYTICS), ft.Tab(label="Favorites", icon=ft.Icons.STAR)]),
-            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control, self.favorites.control], expand=True)], expand=True))
+                            ft.Tab(label="History", icon=ft.Icons.HISTORY), ft.Tab(label="Analysis", icon=ft.Icons.ANALYTICS),
+                            ft.Tab(label="MFE Simulator", icon=ft.Icons.SCIENCE), ft.Tab(label="Favorites", icon=ft.Icons.STAR)]),
+            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control, self.mfe.control,
+                                    self.favorites.control], expand=True)], expand=True))
         p.add(header, ft.Container(height=6), tabs)
 
     def run(self, coro) -> None:
@@ -280,6 +284,8 @@ class Shell:
             await self.history.refresh()
         elif self._tab == TAB_ANALYSIS:
             await self.analysis.refresh()
+        elif self._tab == TAB_MFE:
+            await self.mfe.refresh()
         elif self._tab == TAB_FAVORITES:
             await self.favorites.refresh()
 

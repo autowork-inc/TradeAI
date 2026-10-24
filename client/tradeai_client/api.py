@@ -160,6 +160,14 @@ class ApiClient:
         except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
             raise ApiError("network", _HINTS["network"]) from exc
 
+    # ---- MFE Simulator (api/mfe_sim.py): доигрывание всех сделок с входом по 1m-свечам Binance на сервере
+
+    async def mfe_run(self, since: str) -> dict[str, Any]:
+        return await self._request("POST", "/api/mfe/run", [("since", since)])
+
+    async def mfe_status(self) -> dict[str, Any]:
+        return await self._get("/api/mfe/status")
+
     # ---- Strategy Quant Analyzer (через прокси основного API: /api/analysis/*)
 
     async def analysis_status(self) -> dict[str, Any]:
