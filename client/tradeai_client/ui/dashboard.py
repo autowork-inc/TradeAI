@@ -85,8 +85,12 @@ class DashboardView:
             shown += [{"coin": coin, "setups": [], "positions": []} for coin in getattr(self.host, "shared_coins", lambda: [])() if coin not in known]
         if strategies is not None:  # профиль со своим набором стратегий (CHR, 1.6.2): карточки ВСЕХ монет его пула, позиции - только его стратегий; автомат SMC (S0..S4) не показывается
             by_coin = {c["coin"]: c for c in s["coins"]}
-            shown = [{**by_coin.get(coin, {"coin": coin, "positions": []}), "setups": [],
-                      "positions": [p for p in by_coin.get(coin, {}).get("positions", []) if p["strategy_name"] in strategies]} for coin in (pool or [])]
+            shown = []
+            for coin in pool or []:
+                own = [p for p in by_coin.get(coin, {}).get("positions", []) if p["strategy_name"] in strategies]
+                # у CHR нет автомата S0..S4: строки «Шорт / Лонг» показывают, есть ли у стратегий CHR сделка по стороне (как у SANTA - по сторонам)
+                sides = [{"side": side, "state": 0, "since": None, "chr_positions": [p for p in own if p["side"] == side]} for side in ("short", "long")]
+                shown.append({**by_coin.get(coin, {"coin": coin}), "coin": coin, "setups": sides, "positions": own})
         crypto, mt5 = split_coins(shown)
         self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (cTrader)", mt5, MT5_COL)]
         events = [e for e in s["events"] if (pool is None or e["coin"] in pool) and (strategies is None or e.get("strategy_id") in strategies or e.get("strategy") in strategies)]
@@ -107,21 +111,36 @@ class DashboardView:
                 ft.ResponsiveRow(cards, spacing=14, run_spacing=14, vertical_alignment=ft.CrossAxisAlignment.START)]
 
     def _coin_card(self, c: dict) -> ft.Control:
-        active = max((x["state"] for x in c["setups"]), default=0)
+        active = max((x["state"] for x in c["setups"] if "chr_positions" not in x), default=0)
         rows = [ft.Row([ft.Text(fmt.coin_short(c["coin"]), size=20, weight=ft.FontWeight.W_700, color=w.TEXT),
                         ft.Text(c["coin"], size=11, color=w.MUTED)], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END)]
         for s in c["setups"]:
+            if "chr_positions" in s:  # профиль CHR: строка стороны по его сделкам
+                rows.append(self._chr_side_row(s))
+                continue
             color = fmt.STATE_COLORS[s["state"]]
             rows.append(ft.Row([w.dot(color), ft.Text(f"{SIDE_ARROW[s['side']]} {fmt.SIDE_RU[s['side']]}", size=12, color=w.MUTED, width=64),
                                 ft.Column([ft.Text(fmt.setup_text(s), size=13, color=w.TEXT if s["state"] else w.MUTED, weight=ft.FontWeight.W_600 if s["state"] else None),
                                            ft.Text(f"с {fmt.fmt_local(s['since'])}" if s["since"] else "", size=11, color=w.MUTED, visible=bool(s["since"]))],
                                           spacing=0, expand=True)], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
-        if not c["setups"] and not c["positions"]:
-            rows.append(ft.Text("Открытых сделок нет", size=12, color=w.MUTED))
         for p in c["positions"]:
             rows.append(ft.Divider(height=8, color=w.BORDER))
             rows.append(self._position(p))
         return w.card(ft.Column(rows, spacing=8), border_color=fmt.STATE_COLORS[active] if active else w.BORDER)
+
+    @staticmethod
+    def _chr_side_row(s: dict) -> ft.Control:
+        pos = s["chr_positions"]
+        if not pos:
+            text, color, bold = "нет сделки", fmt.STATE_COLORS[0], False
+        else:
+            p = pos[0]
+            text, bold = fmt.STATUS_RU.get(p["status"], p["status"]), True
+            color = fmt.STATE_COLORS[4] if p["status"] == "open" else fmt.STATE_COLORS[2]
+            text = f"{fmt.STRATEGY_RU.get(p['strategy_name'], p['strategy_name'])} · {text.lower()}"
+        return ft.Row([w.dot(color), ft.Text(f"{SIDE_ARROW[s['side']]} {fmt.SIDE_RU[s['side']]}", size=12, color=w.MUTED, width=64),
+                       ft.Text(text, size=13, color=w.TEXT if bold else w.MUTED, weight=ft.FontWeight.W_600 if bold else None, expand=True)],
+                      spacing=8, vertical_alignment=ft.CrossAxisAlignment.START)
 
     @staticmethod
     def _position(p: dict) -> ft.Control:

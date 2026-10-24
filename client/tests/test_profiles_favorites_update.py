@@ -285,7 +285,7 @@ def test_dashboard_for_chr_shows_its_coin_pool_and_only_its_trades(fx):
     chr_dash.on_message(msg)
     chr_text = [x.value for x in _walk(chr_dash._cards) if isinstance(x, ft.Text) and x.value]
     assert all(fmt.coin_short(c) in chr_text for c in profiles.CHR_DEFAULT_COINS)  # карточки всего пула CHR, даже без сделок и без данных сервера
-    assert "DOGE" not in chr_text and "Открытых сделок нет" in chr_text
+    assert "DOGE" not in chr_text and "нет сделки" in chr_text and "▼ Шорт" in chr_text and "▲ Лонг" in chr_text  # как у SANTA: строки по сторонам
     btc = next(c for c in msg["coins"] if c["coin"] == "BTCUSDT")
     btc["positions"] = [{**next(c for c in msg["coins"] if c["positions"])["positions"][0], "strategy_name": "Horizontal_Breakout_CHR"}]
     doge = next(c for c in msg["coins"] if c["coin"] == "DOGEUSDT")
