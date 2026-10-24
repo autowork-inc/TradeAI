@@ -312,6 +312,7 @@ services:
     environment:
       BINANCE_PROFILE: mainnet
       PLAYGROUND_DIR: /app/data/playground
+      POLARS_MAX_THREADS: "1"  # окна по 300 свечей: пул потоков Polars только мешает (и не отнимает ядра у бота)
       TRADING_DATA_DIR: /app/data/playground
       TRADING_LOG_DIR: /tmp
     volumes:

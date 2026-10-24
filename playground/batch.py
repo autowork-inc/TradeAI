@@ -37,7 +37,9 @@ def main() -> None:
             cmd = [sys.executable, "-X", "utf8", "-m", "playground.cli", "run", "--symbol", sym, "--from", a.start, "--group", group, "--batch", a.batch,
                    "--label", f"{a.batch}: {sym} {group}"] + (["--to", a.end] if a.end else [])
             out = open(logs / f"{name}.log", "w", encoding="utf-8")
-            running.append((subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT), name))
+            # каждый процесс - на одном потоке Polars: окна по 300 свечей мелкие, а пул потоков на все ядра в каждом из N процессов душит машину (замер 2026-10-24: в разы медленнее)
+            env = {**os.environ, "POLARS_MAX_THREADS": os.environ.get("POLARS_MAX_THREADS", "1")}
+            running.append((subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, env=env), name))
             print(time.strftime("%H:%M:%S"), "старт", name, flush=True)
         time.sleep(5)
         for proc, name in list(running):
