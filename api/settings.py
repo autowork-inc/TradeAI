@@ -36,6 +36,7 @@ class Settings:
     analyzer_url: str = ""  # http://analyzer:8000 (внутренняя сеть compose); пусто - прокси /api/analysis/* отвечает 503 analyzer_not_configured
     analyzer_token: str = ""  # общий секрет с анализатором (X-Analyzer-Token); пусто - берётся api_key
     golden_set_dir: Path | None = None  # куда звёздочка пишет эталонные сетапы (json + png); None - файлы не пишутся, звёздочка живёт только в БД
+    watch_url: str = ""  # Live-Dashboard: сервис watch (контейнер профиля playground); пусто - /api/watch/* отвечает 503
     playground_dir: Path | None = None  # Playground: SQLite прогонов по истории (общий каталог с контейнером playground); None - /api/playground/* отвечает 503
     update_dir: Path | None = None  # откуда раздаются version.json и TradeAI-Monitor.exe (монтируется только для чтения); None - /api/update/* отвечает 404
 
@@ -73,5 +74,6 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         golden_set_dir=Path(e["GOLDEN_SET_DIR"]) if e.get("GOLDEN_SET_DIR") else None,
         update_dir=Path(e["UPDATE_DIR"]) if e.get("UPDATE_DIR") else None,
         playground_dir=Path(e["PLAYGROUND_DIR"]) if e.get("PLAYGROUND_DIR") else None,
+        watch_url=e.get("WATCH_URL", ""),
         host=e.get("API_HOST", "0.0.0.0"),  # в контейнере - все интерфейсы (наружу порт публикует compose); локально задайте 127.0.0.1
     )

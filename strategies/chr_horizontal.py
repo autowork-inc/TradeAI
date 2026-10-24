@@ -137,7 +137,7 @@ def _stage_side(p: ChrHorizontalParams, side: str) -> list[pl.Expr]:
             comp["rub_atr"].alias(pre + "comp_rub_atr"), comp["height_atr"].alias(pre + "comp_height_atr"), extreme.alias(pre + "sl_extreme")]
 
 
-def detect_chr_horizontal(df: pl.DataFrame, params: ChrHorizontalParams | None = None) -> pl.DataFrame:
+def detect_chr_horizontal(df: pl.DataFrame, params: ChrHorizontalParams | None = None, *, keep_internal: bool = False) -> pl.DataFrame:
     """Кадр с признаками (features.smc.add_features + htf_bias) -> тот же кадр + chh_long_* / chh_short_* (signal_columns; значения - только в строке сигнала)."""
     p = params or ChrHorizontalParams()
     missing = [c for c in (*_REQUIRED, BIAS_COLUMN) if c not in df.columns]
@@ -158,4 +158,6 @@ def detect_chr_horizontal(df: pl.DataFrame, params: ChrHorizontalParams | None =
         for name in _SIGNAL_FIELDS:
             src = _c(f"{side}_{name}")
             exprs.append((signal if name == "signal" else pl.when(signal).then(src)).alias(f"chh_{side}_{name}"))
-    return work.with_columns(exprs).drop([c for c in work.columns if c.startswith(_T)])
+    out = work.with_columns(exprs)
+    # keep_internal: промежуточные колонки (линия, касания, поджатие до сигнала) - только для показа «что видит стратегия» (Live-Dashboard); бот их не читает
+    return out if keep_internal else out.drop([c for c in work.columns if c.startswith(_T)])

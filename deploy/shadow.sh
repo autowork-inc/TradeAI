@@ -220,7 +220,7 @@ case "$cmd" in
         check_docker; ensure_env
         svc="${2:-shadow-run}"
         case "$svc" in
-            shadow-run|shadow-live|api|postgres|analyzer|web|nginx|playground) ;;
+            shadow-run|shadow-live|api|postgres|analyzer|web|nginx|playground|watch) ;;
             *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | shadow-live | api | postgres | analyzer | web | nginx | playground)" >&2; exit 2 ;;
         esac
         $DC --profile live --profile analytics --profile web --profile playground logs -f --tail 50 "$svc"
@@ -312,15 +312,17 @@ case "$cmd" in
         check_docker; ensure_env
         mkdir -p data/playground; chmod 777 data/playground  # SQLite пишут и воркер (root), и API (uid 10001)
         echo "== Сборка и запуск Playground (воркер прогонов по истории; бот не перезапускается)"
-        $DC --profile playground up -d --build --force-recreate --no-deps playground
+        $DC --profile playground up -d --build --force-recreate --no-deps playground watch
         sleep 5
-        $DC --profile playground ps --format '{{.Service}} {{.State}}' 2>/dev/null | grep -q '^playground running' || { echo "ОШИБКА: playground не работает:" >&2; $DC --profile playground logs --tail 40 playground >&2; exit 1; }
-        $DC --profile playground ps playground
+        for svc in playground watch; do
+            $DC --profile playground ps --format '{{.Service}} {{.State}}' 2>/dev/null | grep -q "^$svc running" || { echo "ОШИБКА: $svc не работает:" >&2; $DC --profile playground logs --tail 40 "$svc" >&2; exit 1; }
+        done
+        $DC --profile playground ps playground watch
         echo "Готово. Monitor -> вкладка Playground. Лог: ./deploy/shadow.sh logs playground"
         ;;
     playground-down)
         check_docker; ensure_env
-        $DC --profile playground stop playground
+        $DC --profile playground stop playground watch
         echo "Playground остановлен (история прогонов в ./data/playground сохранена)."
         ;;
     web-down)

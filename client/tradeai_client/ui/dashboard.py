@@ -4,11 +4,17 @@ import flet as ft
 
 from tradeai_client import fmt
 from tradeai_client.ui import widgets as w
+from tradeai_client.ui.live_board import LiveBoard
 
 SIDE_ARROW = {"short": "▼", "long": "▲"}
 # колонок на ширине окна (ResponsiveRow, 12 колонок): крипта 4 в ряд (4x2 для 8 монет), MT5 - 3 в ряд; узкое окно - 2 / 1
 CRYPTO_COL = {"xs": 12, "sm": 6, "md": 3}
 MT5_COL = {"xs": 12, "sm": 6, "md": 4}
+
+
+# коротко по каждой стратегии на карточке SANTA: чип «имя ▲/▼» - серый, пока сделки нет, зелёный/красный (лонг/шорт), когда есть позиция или заявка
+SHORT = {"SMC_Pro_Trend": "SMC", "SMC_Counter_Trend": "Counter", "OBI_Breakout": "OBI", "ICT_Killzones": "ICT", "VWAP_Reversion": "VWAP",
+         "Horizontal_Breakout": "Horiz", "Trendline_Breakout": "Trend", "Horizontal_Breakout_CHR": "Horiz·CHR", "Trendline_Breakout_CHR": "Trend·CHR"}
 
 
 def split_coins(coins: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -26,8 +32,13 @@ class DashboardView:
         self._error = ft.Container(visible=False)
         self._news = ft.Column(spacing=4, tight=True)
         self._news_box = ft.Column([w.title("Важные новости недели", 15), w.card(self._news, padding=10)], spacing=8, visible=False)
+        # Live-Dashboard (1.8.0, только SANTA): LIVE-графики боевых стратегий и окно остальных стратегий - над карточками монет
+        self.live = LiveBoard(host) if host is not None and hasattr(host, "client") and hasattr(host, "run") else None
+        self._live_started = False
+        if self.live is not None:
+            self.live.control.visible = False
         self.control = ft.Column(
-            [self._head, self._error, self._cards, ft.Container(height=6), self._news_box, w.title("События", 15), w.card(self._events, padding=10)],
+            [self._head, self._error, *([self.live.control] if self.live is not None else []), self._cards, ft.Container(height=6), self._news_box, w.title("События", 15), w.card(self._events, padding=10)],
             expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
         self.show_placeholder("Ожидание данных от сервера…")
 
@@ -91,6 +102,12 @@ class DashboardView:
                 # у CHR нет автомата S0..S4: строки «Шорт / Лонг» показывают, есть ли у стратегий CHR сделка по стороне (как у SANTA - по сторонам)
                 sides = [{"side": side, "state": 0, "since": None, "chr_positions": [p for p in own if p["side"] == side]} for side in ("short", "long")]
                 shown.append({**by_coin.get(coin, {"coin": coin}), "coin": coin, "setups": sides, "positions": own})
+        if self.live is not None:
+            self.live.control.visible = strategies is None
+            self.live.on_state(s)
+            if strategies is None and not self._live_started and getattr(self.host, "client", None) is not None:
+                self._live_started = True
+                self.host.run(self.live.refresh())
         crypto, mt5 = split_coins(shown)
         self._cards.controls = [*self._section("Крипта (Binance)", crypto, CRYPTO_COL), *self._section("Форекс / Металлы (cTrader)", mt5, MT5_COL)]
         events = [e for e in s["events"] if (pool is None or e["coin"] in pool) and (strategies is None or e.get("strategy_id") in strategies or e.get("strategy") in strategies)]
@@ -123,10 +140,29 @@ class DashboardView:
                                 ft.Column([ft.Text(fmt.setup_text(s), size=13, color=w.TEXT if s["state"] else w.MUTED, weight=ft.FontWeight.W_600 if s["state"] else None),
                                            ft.Text(f"с {fmt.fmt_local(s['since'])}" if s["since"] else "", size=11, color=w.MUTED, visible=bool(s["since"]))],
                                           spacing=0, expand=True)], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+        if not any("chr_positions" in x for x in c["setups"]):  # SANTA: чипы всех стратегий; у CHR свои строки по сторонам
+            rows.append(self._strategy_chips(c))
         for p in c["positions"]:
             rows.append(ft.Divider(height=8, color=w.BORDER))
             rows.append(self._position(p))
         return w.card(ft.Column(rows, spacing=8), border_color=fmt.STATE_COLORS[active] if active else w.BORDER)
+
+    @staticmethod
+    def _strategy_chips(c: dict) -> ft.Control:
+        by = {p["strategy_name"]: p for p in c["positions"]}
+        chips = []
+        for name, short in SHORT.items():
+            p = by.get(name)
+            if p is None:
+                chips.append(ft.Container(content=ft.Text(short, size=10, color=w.MUTED), padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                                          border=ft.Border.all(1, w.BORDER), border_radius=10, tooltip=f"{fmt.STRATEGY_RU.get(name, name)}: нет сделки"))
+                continue
+            color = w.GREEN if p["side"] == "long" else w.RED
+            state = fmt.STATUS_RU.get(p["status"], p["status"]).lower()
+            chips.append(ft.Container(content=ft.Text(f"{short} {SIDE_ARROW[p['side']]}", size=10, color=color, weight=ft.FontWeight.W_700),
+                                      padding=ft.Padding.symmetric(horizontal=6, vertical=1), border=ft.Border.all(1, color), border_radius=10,
+                                      bgcolor=w.CARD_HI, tooltip=f"{fmt.STRATEGY_RU.get(name, name)}: {fmt.SIDE_RU[p['side']].lower()}, {state}"))
+        return ft.Row(chips, spacing=4, run_spacing=4, wrap=True)
 
     @staticmethod
     def _chr_side_row(s: dict) -> ft.Control:

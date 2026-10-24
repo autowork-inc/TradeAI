@@ -129,6 +129,14 @@ class ApiClient:
             return await self._get(f"/api/playground/runs/{quote(run_id, safe='')}/trades/{quote(trade_id, safe=':')}/snapshot")
         return await self._get(f"/api/trades/{quote(trade_id, safe=':')}/snapshot")
 
+    # ---- Live-Dashboard (1.8.0): «что видит стратегия» на свежих свечах (сервис watch через прокси API)
+
+    async def watch_meta(self) -> dict[str, Any]:
+        return await self._get("/api/watch/meta")
+
+    async def watch_view(self, strategy: str, symbol: str) -> dict[str, Any]:
+        return await self._get("/api/watch/view", [("strategy", strategy), ("symbol", symbol)])
+
     # ---- Playground: прогоны стратегий по истории (считает сервер, контейнер playground)
 
     async def playground_meta(self) -> dict[str, Any]:

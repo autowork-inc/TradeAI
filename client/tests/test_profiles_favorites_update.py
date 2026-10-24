@@ -305,6 +305,8 @@ def test_dashboard_for_santa_also_shows_chr_coins_with_all_info(fx):
     text = [x.value for x in _walk(santa._cards) if isinstance(x, ft.Text) and x.value]
     assert all(fmt.coin_short(c) in text for c in [*profiles.CHR_DEFAULT_COINS, "SOLUSDT"])  # SANTA видит и монеты CHR
     assert "DOGE" in text  # и все остальные монеты бота
+    assert {"SMC", "ICT", "VWAP", "Horiz", "Trend", "Counter", "OBI"} <= set(text)  # чипы всех стратегий на карточках SANTA
+    assert not any(t.startswith("Horiz·CHR") for t in text if False)
 
 
 def _walk(c):

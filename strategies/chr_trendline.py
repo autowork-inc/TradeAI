@@ -178,7 +178,7 @@ def _stage_side(p: ChrTrendlineParams, side: str, iv: int) -> list[pl.Expr]:
             comp["rub_atr"].alias(pre + "comp_rub_atr"), comp["height_atr"].alias(pre + "comp_height_atr"), extreme.alias(pre + "sl_extreme")]
 
 
-def detect_chr_trendline(df: pl.DataFrame, interval_ms: int, params: ChrTrendlineParams | None = None) -> pl.DataFrame:
+def detect_chr_trendline(df: pl.DataFrame, interval_ms: int, params: ChrTrendlineParams | None = None, *, keep_internal: bool = False) -> pl.DataFrame:
     """Кадр с признаками (features.smc.add_features + htf_bias) -> тот же кадр + cht_long_* / cht_short_* (signal_columns; значения - только в строке сигнала)."""
     p = params or ChrTrendlineParams()
     if isinstance(interval_ms, bool) or not isinstance(interval_ms, int) or interval_ms <= 0:
@@ -203,4 +203,6 @@ def detect_chr_trendline(df: pl.DataFrame, interval_ms: int, params: ChrTrendlin
         for name in _SIGNAL_FIELDS:
             src = _c(f"{side}_{name}")
             exprs.append((signal if name == "signal" else pl.when(signal).then(src)).alias(f"cht_{side}_{name}"))
-    return work.with_columns(exprs).drop([c for c in work.columns if c.startswith(_T)])
+    out = work.with_columns(exprs)
+    # keep_internal: промежуточные колонки (линия, касания, поджатие до сигнала) - только для показа «что видит стратегия» (Live-Dashboard); бот их не читает
+    return out if keep_internal else out.drop([c for c in work.columns if c.startswith(_T)])

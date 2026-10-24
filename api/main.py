@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, WebSo
 from fastapi.responses import JSONResponse
 from pydantic import StringConstraints
 
-from api import analysis_proxy, candles, favorites, mfe_sim, playground, updates
+from api import analysis_proxy, candles, favorites, mfe_sim, playground, updates, watch_proxy
 from api.livestate import SETUP_STRATEGIES, LiveStateHub, current_coins, freshest_heartbeat_age_s, read_account
 from api.reason import build_reason
 from api.security import FailureThrottle, check_key
@@ -152,6 +152,7 @@ def create_app(settings: Settings, *, analyzer_transport: httpx.AsyncBaseTranspo
 
     favorites.install(app, settings, auth, pool, lambda: state["write_pool"])  # PUT/DELETE /api/favorites/{id}: единственная запись API в БД
     updates.install(app, settings.update_dir, auth)  # /api/update/version.json, /api/update/TradeAI-Monitor.exe
+    watch_proxy.install(app, settings, auth)  # /api/watch/*: Live-Dashboard - «что видит стратегия» (сервис watch)
     playground.install(app, auth, settings.playground_dir)  # /api/playground/*: прогоны стратегий по истории (считает контейнер playground)
     analysis_proxy.install(app, settings, auth, analyzer_transport)  # /api/analysis/* -> Strategy Quant Analyzer (отдельный контейнер, наружу не публикуется)
     app.state.mfe_jobs = mfe_sim.install(app, auth, pool, mfe_transport, data_dirs=[d for d in (settings.live_data_dir, settings.shadow_data_dir) if d],

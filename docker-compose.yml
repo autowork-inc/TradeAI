@@ -230,6 +230,7 @@ services:
       ANALYZER_URL: http://analyzer:8000  # прокси /api/analysis/* -> Strategy Quant Analyzer (профиль analytics); контейнера нет - прокси отвечает 503 analyzer_unavailable
       ANALYZER_TOKEN: ${API_KEY:-}  # общий секрет API и анализатора (заголовок X-Analyzer-Token); анализатор наружу не публикуется
       GOLDEN_SET_DIR: /app/data/golden_set  # эталонные сетапы по звёздочке клиента (json + png)
+      WATCH_URL: http://watch:8000  # Live-Dashboard: /api/watch/* -> сервис watch (профиль playground); нет контейнера - 503 watch_unavailable
       PLAYGROUND_DIR: /app/data/playground  # Playground: очередь и история прогонов по истории (SQLite; считает контейнер playground)
       UPDATE_DIR: /app/data/updates  # version.json и TradeAI-Monitor.exe (кладёт client/build_exe.ps1 -Publish)
     ports:
@@ -326,6 +327,35 @@ services:
       - no-new-privileges:true
     mem_limit: 2g
     cpus: 1.5
+
+  # Live-Dashboard (1.8.0): сервис watch - «что видит стратегия» на свежих свечах Binance (playground/watch_server.py). Тот же образ бота без ключей и БД,
+  # публичный REST Binance; наружу не публикуется - его зовёт api (/api/watch/*) с общим секретом. Профиль playground (поднимается вместе с ним).
+  watch:
+    build: .
+    command: ["python", "-m", "playground.watch_server"]
+    profiles: ["playground"]
+    restart: unless-stopped
+    stop_grace_period: 5s
+    environment:
+      BINANCE_PROFILE: mainnet
+      WATCH_TOKEN: ${API_KEY:-}
+      APPROVED_STRATEGIES: ${APPROVED_STRATEGIES:-SMC_Pro_Trend}  # те же live-стратегии, что у боевого контура
+      WATCH_BOT_DIRS: /botdata/live,/botdata/shadow  # снимок автоселектора бота (.symbol_universe.json): какие монеты отслеживаются
+      POLARS_MAX_THREADS: "1"
+      TRADING_DATA_DIR: /tmp
+      TRADING_LOG_DIR: /tmp
+    volumes:
+      - ./data/live:/botdata/live:ro
+      - ./data/shadow:/botdata/shadow:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    cpus: 1.0
 
   # Веб-версия клиента для телефона (2026-10-20, профиль web; не входит в up / up-live: падение или пересборка веба не трогают бота. Запуск: ./deploy/shadow.sh web-up,
   # его же вызывает apply.sh после обновления). web - Flet web (без ключей биржи; ключ API бота - из окружения, в браузер не попадает), вход по WEB_LOGIN / WEB_PASSWORD

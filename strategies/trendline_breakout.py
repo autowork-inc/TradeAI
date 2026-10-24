@@ -228,7 +228,7 @@ def _stage_candidates(p: TrendlineParams, has_bias: bool) -> list[pl.Expr]:
     return out
 
 
-def detect_trendline_breakout(df: pl.DataFrame, interval_ms: int, params: TrendlineParams | None = None) -> pl.DataFrame:
+def detect_trendline_breakout(df: pl.DataFrame, interval_ms: int, params: TrendlineParams | None = None, *, keep_internal: bool = False) -> pl.DataFrame:
     """Кадр с признаками (features.smc.add_features [+ htf_bias]) -> тот же кадр + tl_long_* / tl_short_* (signal_columns)."""
     p = params or TrendlineParams()
     if isinstance(interval_ms, bool) or not isinstance(interval_ms, int) or interval_ms <= 0:
@@ -267,4 +267,6 @@ def detect_trendline_breakout(df: pl.DataFrame, interval_ms: int, params: Trendl
             **{k: pick(_c(f"{kb}_{v}"), _c(f"{ks}_{v}")) for k, v in _PER_LINE.items()},
         }
         exprs += [values[n].alias(f"tl_{side}_{n}") for n in _SIGNAL_FIELDS]
-    return work.with_columns(exprs).drop([c for c in work.columns if c.startswith(_T)])
+    out = work.with_columns(exprs)
+    # keep_internal: промежуточные колонки (линия, касания, поджатие до сигнала) - только для показа «что видит стратегия» (Live-Dashboard); бот их не читает
+    return out if keep_internal else out.drop([c for c in work.columns if c.startswith(_T)])
