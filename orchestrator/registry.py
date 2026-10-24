@@ -76,8 +76,9 @@ SMC_PRO_PLAN = STRICT_PLAN
 SCALE_PLAN = scale_plan(config.AUTO_TP_DEFAULT_R)
 STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_PRO_TREND: SCALE_PLAN, SMC_COUNTER_TREND: SCALE_PLAN, OBI_BREAKOUT: SCALE_PLAN, ICT_KILLZONES: SCALE_PLAN,
                                            VWAP_REVERSION: VWAP_PLAN, HORIZONTAL_BREAKOUT: SCALE_PLAN, TRENDLINE_BREAKOUT: SCALE_PLAN,
-                                           HORIZONTAL_BREAKOUT_CHR: SCALE_PLAN, TRENDLINE_BREAKOUT_CHR: SCALE_PLAN}
-AUTO_TP_SKIP = frozenset({VWAP_REVERSION})  # тейк по линии VWAP (tp_anchor='price') - логика стратегии, авто-TP его не трогает
+                                           HORIZONTAL_BREAKOUT_CHR: CHR_PLAN, TRENDLINE_BREAKOUT_CHR: CHR_PLAN}  # CHR: всегда один тейк 1:4 на весь объём (решение пользователя 2026-10-24)
+# авто-TP не трогает: VWAP (тейк по линии VWAP, tp_anchor='price') и CHR (тейк всегда 1:4 на весь объём, без «сейфа» - решение пользователя 2026-10-24)
+AUTO_TP_SKIP = frozenset({VWAP_REVERSION, HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR})
 
 
 def plans_for(names: Sequence[str]) -> Mapping[str, ScaleOutPlan]:

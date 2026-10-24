@@ -187,7 +187,8 @@ def test_registry_builds_the_nine_strategies_with_unique_ids_and_individual_plan
     # у всех стратегий один план - единственный тейк 1:4 на весь объём; кроме VWAP_Reversion (2026-10-23): тейк на линии VWAP (цена сигнала)
     from orchestrator.registry import SCALE_PLAN
 
-    assert all(plans[n] is SCALE_PLAN for n in names if n != VWAP_REVERSION) and plans[VWAP_REVERSION] is VWAP_PLAN  # 1.6.0: Scale Out
+    assert all(plans[n] is SCALE_PLAN for n in names if n not in (VWAP_REVERSION, HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR))  # 1.6.0: Scale Out
+    assert plans[VWAP_REVERSION] is VWAP_PLAN and plans[HORIZONTAL_BREAKOUT_CHR].levels == plans[TRENDLINE_BREAKOUT_CHR].levels == ((4.0, 1.0),)  # CHR: всегда 1:4
     assert SCALE_PLAN.levels == ((1.0, 0.5), (4.0, 0.5))
     assert VWAP_PLAN.tp_anchor == "price" and VWAP_PLAN.levels == ((1.0, 1.0),)
     assert DEFAULT_PLAN.levels == ((4.0, 1.0),) and SMC_PRO_PLAN is DEFAULT_PLAN and DEFAULT_PLAN.tp_anchor == "fill"

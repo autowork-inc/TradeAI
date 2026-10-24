@@ -289,12 +289,20 @@ def build_report(trades: list[SimTrade], paths: dict[str, dict[float, PathResult
     verdict: dict[str, Any] = {"n": len(sim), "best_tp": None, "text": "Нет сделок с путём цены для симуляции."}
     if best_scale is not None and best_plain is not None:
         reliable = len(sim) >= MIN_TRADES_FOR_VERDICT
-        verdict = {"n": len(sim), "best_tp": best_scale["tp"], "best_usd": best_scale["usd"], "best_mean_r": best_scale["mean_r"],
-                   "best_plain": best_plain, "current_usd": current["usd"] if current else None, "reliable": reliable,
-                   "text": (f"На основе {len(sim)} сделок оптимальный математический Take-Profit для текущего рынка составляет 1:{best_scale['tp']:g} "
-                            f"при плане бота (50% на +1R, остаток на тейке): {best_scale['usd']:+.2f} $, {best_scale['mean_r']:+.3f} R на сделку. "
-                            f"Без частичной фиксации лучший тейк 1:{best_plain['tp']:g}: {best_plain['usd']:+.2f} $."
-                            + ("" if reliable else f" Сделок меньше {MIN_TRADES_FOR_VERDICT} - это ориентир, не вывод."))}
+        tail = "" if reliable else f" Сделок меньше {MIN_TRADES_FOR_VERDICT} - это ориентир, не вывод."
+        if scope == "chr":  # CHR торгует весь объём на одном тейке (всегда 1:4, без «сейфа» и авто-TP) - вердикт по этому плану
+            at4 = next((r for r in tp_rows if r["tp"] == 4.0), None)
+            verdict = {"n": len(sim), "best_tp": best_plain["tp"], "best_usd": best_plain["usd"], "best_mean_r": best_plain["mean_r"], "plan": "plain",
+                       "best_plain": best_plain, "current_usd": at4["usd"] if at4 else None, "reliable": reliable,
+                       "text": (f"На основе {len(sim)} сделок CHR (весь объём на одном тейке): лучший Take-Profit 1:{best_plain['tp']:g} - "
+                                f"{best_plain['usd']:+.2f} $, {best_plain['mean_r']:+.3f} R на сделку; действующий 1:4 дал бы {at4['usd'] if at4 else 0:+.2f} $. "
+                                "Тейк CHR закреплён на 1:4 - это справка, бот его не меняет." + tail)}
+        else:
+            verdict = {"n": len(sim), "best_tp": best_scale["tp"], "best_usd": best_scale["usd"], "best_mean_r": best_scale["mean_r"], "plan": "scale",
+                       "best_plain": best_plain, "current_usd": current["usd"] if current else None, "reliable": reliable,
+                       "text": (f"На основе {len(sim)} сделок оптимальный математический Take-Profit для текущего рынка составляет 1:{best_scale['tp']:g} "
+                                f"при плане бота (50% на +1R, остаток на тейке): {best_scale['usd']:+.2f} $, {best_scale['mean_r']:+.3f} R на сделку. "
+                                f"Без частичной фиксации лучший тейк 1:{best_plain['tp']:g}: {best_plain['usd']:+.2f} $." + tail)}
 
     stopped = [t for t in sim if base[t.id].stopped]
     sq = [hunts[t.id] for t in stopped if t.id in hunts]
@@ -500,7 +508,7 @@ def read_strategy_state(data_dirs: Sequence[Path], lab_dir: Path | None, scope: 
             if in_scope(d.get("strategy", ""), scope):
                 proposals.append({k: d.get(k) for k in ("id", "strategy", "title", "status", "kind", "created_at", "applied_at", "rationale", "change",
                                                         "how_to_apply", "risks")})
-    return {"auto_tp": {"updated_ms": auto.get("updated_ms"), "since": auto.get("since"), "strategies": strategies},
+    return {"scope": scope, "auto_tp": {"updated_ms": auto.get("updated_ms"), "since": auto.get("since"), "strategies": strategies},
             "overrides": overrides, "proposals": proposals,
             "how_to": "Откат и применение шаблонов: python -X utf8 -m scripts.manage_snapshots (список снимков и откат по номеру), "
                       "python -X utf8 -m scripts.strategy_proposals apply <id> (применить шаблон), затем выкатка."}

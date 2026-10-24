@@ -208,6 +208,8 @@ class MfeView:
                 rows.append(ft.Row([ft.Text(fmt.STRATEGY_RU.get(name, name), size=12, color=w.TEXT, expand=True, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
                                     ft.Text(f"1:{v.get('tp_r'):g}", size=13, weight=ft.FontWeight.W_700, color=w.ACCENT)], spacing=6,
                                    tooltip=f"сделок {v.get('n', 0)}, Σ {v.get('sum_r', '—')} R; прежний 1:{v.get('prev_r', '—')}"))
+        elif st.get("scope") == "chr":
+            rows.append(w.label("CHR: тейк всегда 1:4 на весь объём (без «сейфа» и авто-подстройки), стоп статичный.", size=12))
         else:
             rows.append(w.label("Бот ещё не подобрал тейки (нужно 5+ завершённых сделок стратегии): действует 1:4 и 50% на +1R.", size=12))
         overrides = st.get("overrides") or {}
@@ -235,8 +237,10 @@ class MfeView:
     # ------------------------------------------------------------------------------------------ отчёт
 
     def _show(self, rep: dict[str, Any]) -> None:
-        self._body.controls = [self._verdict(rep), self._coverage(rep), self._tp_matrix(rep, "scale_matrix", "План бота: 50% на +1R, остаток на тейке"),
-                               self._tp_matrix(rep, "tp_matrix", "Без частичной фиксации: весь объём на тейке"), self._stops(rep), self._strategies(rep)]
+        scale = self._tp_matrix(rep, "scale_matrix", "50% на +1R, остаток на тейке" + ("" if rep.get("scope") == "chr" else " (план бота)"))
+        plain = self._tp_matrix(rep, "tp_matrix", "весь объём на тейке" + (" (план CHR, тейк закреплён 1:4)" if rep.get("scope") == "chr" else ""))
+        matrices = [plain, scale] if rep.get("scope") == "chr" else [scale, plain]
+        self._body.controls = [self._verdict(rep), self._coverage(rep), *matrices, self._stops(rep), self._strategies(rep)]
         self._update()
 
     def _verdict(self, rep: dict[str, Any]) -> ft.Control:
@@ -278,7 +282,8 @@ class MfeView:
 
     def _tp_matrix(self, rep: dict[str, Any], key: str, title: str) -> ft.Control:
         rows = rep.get(key) or []
-        best = (rep.get("verdict") or {}).get("best_tp") if key == "scale_matrix" else ((rep.get("verdict") or {}).get("best_plain") or {}).get("tp")
+        v = rep.get("verdict") or {}
+        best = ((v.get("best_plain") or {}).get("tp") if key == "tp_matrix" else (v.get("best_tp") if v.get("plan") != "plain" else None))
         head = w.table_row([w.cell(t, color=w.MUTED, size=12) for t in ("Тейк", "Сделок", "Побед", "Винрейт", "Σ R", "E[R]/сделку", "Заработок", "PF")],
                            widths=TP_COLS, bgcolor=w.BG)
         lines = [head]
