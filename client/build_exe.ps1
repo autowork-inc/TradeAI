@@ -10,10 +10,11 @@
 #   -Version 0.3.0      сменить версию клиента (tradeai_client\__init__.py); без параметра берётся текущая. Клиенты обновляются, только если версия на сервере НОВЕЕ.
 #   -Notes "..."        краткий текст в version.json (по умолчанию - изменения версии из tradeai_client\changelog.json). История версий (changelog.json) уходит на сервер целиком.
 #                       Перед сборкой добавьте запись новой версии в НАЧАЛО tradeai_client\changelog.json: без неё скрипт остановится.
+#   -PublishOnly        не собирать: выложить уже собранный dist\TradeAI-Monitor.exe (например, если публикация прервалась)
 #   -PublishHost/-PublishUser/-PublishKey/-PublishDir  куда класть (по умолчанию хост из адреса сервера, root, ~/.ssh/id_ed25519, trading/data/updates)
 # Публикуется только сборка в один файл (без -OneDir). Ключ API, зашитый в .exe (-ApiKey), попадёт на сервер вместе с файлом; отдаётся он только по ключу API.
 param([switch]$OneDir, [switch]$SkipTests, [string]$ServerUrl = "", [string]$ApiKey = $env:TRADEAI_BUILD_API_KEY,
-      [switch]$Publish, [string]$Version = "", [string]$Notes = "", [string]$PublishHost = "", [string]$PublishUser = "root",
+      [switch]$Publish, [switch]$PublishOnly, [string]$Version = "", [string]$Notes = "", [string]$PublishHost = "", [string]$PublishUser = "root",
       [string]$PublishKey = (Join-Path $env:USERPROFILE ".ssh\id_ed25519"), [string]$PublishDir = "trading/data/updates")
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -41,6 +42,9 @@ if (-not (Test-Path .venv\Scripts\python.exe)) {
     python -m venv .venv
     if ($LASTEXITCODE -ne 0) { throw "Не удалось создать .venv (нужен Python 3.12)" }
 }
+$defaultsFile = Join-Path $PSScriptRoot "tradeai_client\build_defaults.py"
+if ($PublishOnly) { $Publish = $true }
+if (-not $PublishOnly) {
 Write-Host "== Устанавливаю зависимости"
 .\.venv\Scripts\python.exe -m pip install --quiet --upgrade pip
 .\.venv\Scripts\python.exe -m pip install --quiet -r requirements-build.txt
@@ -76,6 +80,8 @@ try {
     [System.IO.File]::WriteAllText($defaultsFile, $defaultsOriginal, (New-Object System.Text.UTF8Encoding($false)))
 }
 
+}  # конец сборки (-PublishOnly её пропускает)
+
 $exe = if ($OneDir) { "dist\TradeAI-Monitor\TradeAI-Monitor.exe" } else { "dist\TradeAI-Monitor.exe" }
 if (-not (Test-Path $exe)) { throw "Сборка завершилась, но $exe не найден" }
 Write-Host ("== Готово: {0} ({1:N1} МБ)" -f (Resolve-Path $exe), ((Get-Item $exe).Length / 1MB))
@@ -93,15 +99,18 @@ if ($Publish) {
     $payload = [ordered]@{ version = $appVersion; sha256 = $hash; size = $size; notes = $Notes; built_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"); changelog = @($changelog.versions) }
     [System.IO.File]::WriteAllText($versionJson, ($payload | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     $target = "$PublishUser@$PublishHost"
-    $sshOpts = @("-i", $PublishKey, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new")
-    & ssh @sshOpts $target "mkdir -p $PublishDir"
+    # таймауты: без них зависшее соединение вешает скрипт навсегда; ssh - с -n (ввод из NUL): Windows-ssh из PowerShell иначе может не завершиться после команды
+    $sshOpts = @("-i", $PublishKey, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4")
+    Write-Host "   ssh: каталог обновлений"
+    & ssh -n @sshOpts $target "mkdir -p $PublishDir"
     if ($LASTEXITCODE -ne 0) { throw "ssh: не удалось создать $PublishDir на $PublishHost" }
     # сначала .exe, потом version.json (и через временные имена): клиент не должен увидеть новую версию раньше файла и не должен скачать недописанный файл
+    Write-Host ("   scp: .exe ({0:N1} МБ) - минута-другая в зависимости от канала" -f ($size / 1MB))
     & scp @sshOpts $exe "${target}:$PublishDir/TradeAI-Monitor.exe.part"
     if ($LASTEXITCODE -ne 0) { throw "scp .exe не удался" }
     & scp @sshOpts $versionJson "${target}:$PublishDir/version.json.part"
     if ($LASTEXITCODE -ne 0) { throw "scp version.json не удался" }
-    & ssh @sshOpts $target "cd $PublishDir && chmod 644 TradeAI-Monitor.exe.part version.json.part && mv -f TradeAI-Monitor.exe.part TradeAI-Monitor.exe && mv -f version.json.part version.json"
+    & ssh -n @sshOpts $target "cd $PublishDir && chmod 644 TradeAI-Monitor.exe.part version.json.part && mv -f TradeAI-Monitor.exe.part TradeAI-Monitor.exe && mv -f version.json.part version.json"
     if ($LASTEXITCODE -ne 0) { throw "ssh: не удалось подменить файлы обновления" }
     Remove-Item $versionJson -ErrorAction SilentlyContinue
     Write-Host ("== Опубликовано: версия {0}, {1:N1} МБ, sha256 {2}..." -f $appVersion, ($size / 1MB), $hash.Substring(0, 12))
