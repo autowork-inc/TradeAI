@@ -36,7 +36,7 @@ POST_BARS_MARGIN = 5  # свечей после выхода, которые п�
 @dataclass
 class Entry:
     spec: dict
-    trade_id: str
+    trade_id: str | None  # None - сделка прогона Playground (её нет в БД бота, звёздочки нет)
     coin: str
     is_favorite: bool
     expires: float = field(default_factory=lambda: time.monotonic() + TTL_S)
@@ -53,7 +53,7 @@ def register(spec: dict, trade: dict, *, now: float | None = None) -> str:
     while len(REGISTRY) >= MAX_CHARTS:
         REGISTRY.pop(next(iter(REGISTRY)))
     cid = secrets.token_urlsafe(24)
-    REGISTRY[cid] = Entry(spec=spec, trade_id=trade["id"], coin=trade["coin"], is_favorite=bool(trade.get("is_favorite")), expires=t + TTL_S)
+    REGISTRY[cid] = Entry(spec=spec, trade_id=None if trade.get("playground_run") else trade["id"], coin=trade["coin"], is_favorite=bool(trade.get("is_favorite")), expires=t + TTL_S)
     return cid
 
 
@@ -70,7 +70,7 @@ def lookup(cid: str, *, now: float | None = None) -> Entry | None:
 
 async def build_spec(client: ApiClient, settings: ClientSettings, trade: dict) -> dict:
     """Снапшот + свечи после сигнала -> spec. Ошибки: ApiError, ChartDataError (chart_spec)."""
-    snap = await client.snapshot(trade["id"])
+    snap = await client.snapshot(trade["id"], trade.get("playground_run"))  # сделка прогона Playground - из истории прогонов
     iv = interval_to_ms((snap.get("meta") or {}).get("interval", ""))
     now_ms = int(time.time() * 1000)
     post, note = None, None
@@ -124,7 +124,7 @@ SHIM = """(function () {
 
 def page_html(entry: Entry) -> str:
     cfg = build_config(entry.spec, [])
-    cfg["favorite"] = {"is_favorite": entry.is_favorite}
+    cfg["favorite"] = None if entry.trade_id is None else {"is_favorite": entry.is_favorite}  # сделка Playground: звёздочки нет (её нет в БД бота)
     return build_html(cfg, shim=SHIM % {"coin": json.dumps(entry.coin).replace("<", "\\u003c")})
 
 
@@ -154,6 +154,8 @@ def make_app(settings: ClientSettings) -> web.Application:
         entry = lookup(request.match_info["cid"])
         if entry is None:
             return web.json_response({"ok": False, "error": "ссылка устарела"}, status=404)
+        if entry.trade_id is None:
+            return web.json_response({"ok": False, "error": "у сделок Playground нет звёздочки"}, status=400)
         try:
             add = bool((await request.json()).get("add"))
         except (ValueError, json.JSONDecodeError):

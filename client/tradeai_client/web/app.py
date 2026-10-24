@@ -21,6 +21,7 @@ from tradeai_client.chart_spec import ChartDataError, build_chart_spec
 from tradeai_client.settings import ClientSettings
 from tradeai_client.ui import widgets as w
 from tradeai_client.ui.mfe_view import MfeView
+from tradeai_client.ui.playground_view import PlaygroundView
 from tradeai_client.ui.dashboard import DashboardView
 from tradeai_client.ui.history_view import HistoryView
 from tradeai_client.ui.stats_view import StatsView
@@ -29,7 +30,7 @@ from tradeai_client.web import auth, charts
 log = logging.getLogger("tradeai.web")
 TOKEN_KEY = "tradeai_web_token"
 NARROW_PX = 700  # уже этого - телефон: компактные отступы
-TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_MFE = range(4)  # «Избранное» - кнопка в History (1.6.0)
+TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_MFE, TAB_PLAYGROUND = range(5)  # «Избранное» - кнопка в History (1.6.0)
 UI_KEY = "tradeai_ui_state"
 STATUS_COLORS = {"ok": w.GREEN, "live": w.GREEN, "connecting": w.AMBER, "error": w.RED, "auth": w.RED, "throttled": w.RED}
 
@@ -76,6 +77,7 @@ class WebShell:
         self.save_ui = None  # функция записи в браузер (ставит WebApp)
         self.dashboard, self.stats, self.history = DashboardView(self), StatsView(self), HistoryView(self)
         self.mfe = MfeView(self)
+        self.playground = PlaygroundView(self)
         self._dot, self._status_text = w.dot(w.MUTED, 12), ft.Text("Подключение…", size=12, color=w.MUTED)
         self._account = ft.Text("", size=12, color=w.AMBER, weight=ft.FontWeight.W_600)
         self.control = self._build()
@@ -90,10 +92,11 @@ class WebShell:
                        spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         status = ft.Row([self._dot, self._status_text, self._account], spacing=8, wrap=True, run_spacing=2, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         header = ft.Column([title, status], spacing=0)
-        labels = [("Dashboard", ft.Icons.DASHBOARD), ("Statistics", ft.Icons.BAR_CHART), ("History", ft.Icons.HISTORY), ("MFE Simulator", ft.Icons.SCIENCE)]
-        self._tabs_ctl = tabs = ft.Tabs(length=4, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
+        labels = [("Dashboard", ft.Icons.DASHBOARD), ("Statistics", ft.Icons.BAR_CHART), ("History", ft.Icons.HISTORY), ("MFE Simulator", ft.Icons.SCIENCE),
+                  ("Playground", ft.Icons.SLOW_MOTION_VIDEO)]
+        self._tabs_ctl = tabs = ft.Tabs(length=5, selected_index=0, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label=t, icon=i) for t, i in labels], scrollable=True),
-            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.mfe.control],
+            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.mfe.control, self.playground.control],
                           expand=True)], expand=True))
         return ft.Column([header, tabs], expand=True, spacing=6)
 
@@ -199,7 +202,7 @@ class WebShell:
         for name, view in (("history", self.history), ("stats", self.stats)):
             view.restore_state(self.view_state(name))
         tab = self.ui_state.get("tab")
-        if isinstance(tab, int) and 0 <= tab < 4:
+        if isinstance(tab, int) and 0 <= tab < 5:
             self._tab = tab
             self._tabs_ctl.selected_index = tab
 
@@ -210,6 +213,8 @@ class WebShell:
             await self.history.refresh()
         elif self._tab == TAB_MFE:
             await self.mfe.refresh()
+        elif self._tab == TAB_PLAYGROUND:
+            await self.playground.refresh()
 
     def remember_mode(self, mode: str | None) -> None:
         if mode not in fmt.MODE_KEYS:
@@ -267,7 +272,7 @@ class WebShell:
         if client is None:
             return
         try:
-            snap = await client.snapshot(trade["id"])
+            snap = await client.snapshot(trade["id"], trade.get("playground_run"))
             spec = build_chart_spec(snap, None, now_ms=int(time.time() * 1000))
         except (ApiError, ChartDataError, ValueError) as exc:
             self.notify(f"Карточка недоступна: {exc}", error=True)

@@ -24,6 +24,8 @@ COPY orchestrator ./orchestrator
 # Этап 5: запись сделок в PostgreSQL (asyncpg из requirements.txt).
 COPY persistence ./persistence
 COPY scripts ./scripts
+# Playground (2026-10-24): прогон стратегий по истории (контейнер playground, профиль compose `playground`)
+COPY playground ./playground
 # Веса модели запечены в образ; compose дополнительно монтирует ./out поверх (можно подменить без пересборки).
 COPY out ./out
 

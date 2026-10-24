@@ -10,6 +10,9 @@ COPY api/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY api ./api
+# Playground: только хранилище прогонов (stdlib sqlite3) - ставит прогон в очередь и читает историю; считает контейнер playground
+COPY playground/__init__.py ./playground/__init__.py
+COPY playground/store.py ./playground/store.py
 # предложения/шаблоны стратегий и одобренные изменения - только для показа во вкладке MFE Simulator (бот их не читает отсюда)
 COPY strategy_lab ./strategy_lab
 COPY orchestrator/strategy_overrides.json ./strategy_lab/strategy_overrides.json

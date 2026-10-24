@@ -123,8 +123,31 @@ class ApiClient:
         params += [("strategy", s) for s in strategies or []] + [("side", s) for s in sides or []]
         return await self._get("/api/trades", params)
 
-    async def snapshot(self, trade_id: str) -> dict[str, Any]:
+    async def snapshot(self, trade_id: str, run_id: str | None = None) -> dict[str, Any]:
+        """Снапшот сделки для графика; run_id - сделка прогона Playground (тот же формат ответа)."""
+        if run_id:
+            return await self._get(f"/api/playground/runs/{quote(run_id, safe='')}/trades/{quote(trade_id, safe=':')}/snapshot")
         return await self._get(f"/api/trades/{quote(trade_id, safe=':')}/snapshot")
+
+    # ---- Playground: прогоны стратегий по истории (считает сервер, контейнер playground)
+
+    async def playground_meta(self) -> dict[str, Any]:
+        return await self._get("/api/playground/meta")
+
+    async def playground_runs(self, scope: str = "santa") -> dict[str, Any]:
+        return await self._get("/api/playground/runs", [("scope", scope)])
+
+    async def playground_create(self, symbol: str, strategies: list[str], start: str, end: str, profile: str) -> dict[str, Any]:
+        return await self._request("POST", "/api/playground/runs", json_body={"symbol": symbol, "strategies": strategies, "start": start, "end": end, "profile": profile})
+
+    async def playground_run(self, run_id: str) -> dict[str, Any]:
+        return await self._get(f"/api/playground/runs/{quote(run_id, safe='')}")
+
+    async def playground_trades(self, run_id: str) -> dict[str, Any]:
+        return await self._get(f"/api/playground/runs/{quote(run_id, safe='')}/trades")
+
+    async def playground_delete(self, run_id: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/api/playground/runs/{quote(run_id, safe='')}")
 
     # ---- Избранное (Golden Set): звёздочка хранится на сервере и общая для профилей
 

@@ -230,6 +230,7 @@ services:
       ANALYZER_URL: http://analyzer:8000  # прокси /api/analysis/* -> Strategy Quant Analyzer (профиль analytics); контейнера нет - прокси отвечает 503 analyzer_unavailable
       ANALYZER_TOKEN: ${API_KEY:-}  # общий секрет API и анализатора (заголовок X-Analyzer-Token); анализатор наружу не публикуется
       GOLDEN_SET_DIR: /app/data/golden_set  # эталонные сетапы по звёздочке клиента (json + png)
+      PLAYGROUND_DIR: /app/data/playground  # Playground: очередь и история прогонов по истории (SQLite; считает контейнер playground)
       UPDATE_DIR: /app/data/updates  # version.json и TradeAI-Monitor.exe (кладёт client/build_exe.ps1 -Publish)
     ports:
       - "${API_BIND:-0.0.0.0}:${API_PORT:-8001}:8000"
@@ -237,6 +238,7 @@ services:
       - ./data/shadow:/app/data/shadow:ro
       - ./data/live:/app/data/live:ro
       - ./data/updates:/app/data/updates:ro
+      - ./data/playground:/app/data/playground  # Playground: API ставит прогон в очередь (запись в SQLite) и читает историю; свечи считает воркер
       - ./data/golden_set:/app/data/golden_set  # единственное место, куда API пишет файлы (shadow.sh создаёт каталог с правом записи)
     read_only: true
     tmpfs:
@@ -297,6 +299,32 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  # Playground (2026-10-24): прогон стратегий бота по истории свеча за свечой (тем же кодом, что Shadow; playground/engine.py). Образ бота, но БЕЗ ключей
+  # биржи и БД: только публичные свечи Binance (минутки, кэш в ./data/playground/klines) и свой SQLite. Профиль playground (не входит в up / up-live:
+  # падение или пересборка не трогают бота; запуск - ./deploy/shadow.sh playground-up, его же вызывает apply.sh). Один прогон за раз, nice 19, лимиты CPU/RAM.
+  playground:
+    build: .
+    command: ["python", "-m", "playground.worker"]
+    profiles: ["playground"]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    environment:
+      BINANCE_PROFILE: mainnet
+      PLAYGROUND_DIR: /app/data/playground
+      TRADING_DATA_DIR: /app/data/playground
+      TRADING_LOG_DIR: /tmp
+    volumes:
+      - ./data/playground:/app/data/playground
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 1.5
 
   # Веб-версия клиента для телефона (2026-10-20, профиль web; не входит в up / up-live: падение или пересборка веба не трогают бота. Запуск: ./deploy/shadow.sh web-up,
   # его же вызывает apply.sh после обновления). web - Flet web (без ключей биржи; ключ API бота - из окружения, в браузер не попадает), вход по WEB_LOGIN / WEB_PASSWORD

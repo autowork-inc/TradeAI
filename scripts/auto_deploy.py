@@ -338,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
 
         step(8, "Веб-версия (web + nginx) и PostgreSQL с миграциями")
         run(cli, f"cd {d} && ./deploy/shadow.sh web-up", "запуск веб-версии (shadow.sh web-up)")
+        run(cli, f"cd {d} && ./deploy/shadow.sh playground-up", "запуск Playground (shadow.sh playground-up)", check=False)  # изолированный сервис: сбой не срывает деплой
         run(cli, f"cd {d} && {DC} exec -T postgres pg_isready -U tradeai -d tradeai", "PostgreSQL не готов")
         applied = ""
         for _ in range(12):  # миграции применяет shadow-run при старте — даём до минуты

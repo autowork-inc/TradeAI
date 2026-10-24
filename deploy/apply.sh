@@ -121,6 +121,15 @@ deploy_web() {  # изолированный сервис: любой сбой -
     return 0
 }
 
+deploy_playground() {  # изолированный сервис: любой сбой - предупреждение, бот и его откат не затрагиваются
+    flag="${APPLY_PLAYGROUND:-$(env_value APPLY_PLAYGROUND)}"
+    case "${flag:-true}" in false|0|no|off) log "playground: автоуправление выключено (APPLY_PLAYGROUND)"; return 0 ;; esac
+    [ -d playground ] || { log "playground: в архиве нет каталога playground - пропуск"; return 0; }
+    log "playground: сборка и запуск (shadow.sh playground-up)"
+    if ./deploy/shadow.sh playground-up; then log "playground запущен"; else log "ПРЕДУПРЕЖДЕНИЕ: playground не запустился (бот работает; ./deploy/shadow.sh logs playground)" >&2; fi
+    return 0
+}
+
 unpack() {  # $1 = архив
     tar --force-local -xzf "$1" -C "$ROOT"
     chmod +x deploy/shadow.sh deploy/apply.sh
@@ -187,6 +196,7 @@ apply_archive() {  # $1 = архив, $2 = force|normal
         log "ГОТОВО: версия ${sha%"${sha#????????????}"} применена, контур $contour"
         deploy_analyzer
         deploy_web
+        deploy_playground
         return 0
     fi
     log "ПРОВАЛ применения: откат на прежнюю версию" >&2

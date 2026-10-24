@@ -403,6 +403,36 @@ class VirtualTracker:
             n += 1
         return n
 
+    def replay_minute(self, symbol: str, open_ms: int, o: float, h: float, lo: float, c: float) -> None:
+        """Playground (2026-10-24, прогон по истории): 1m-свеча -> тики тем же путём, что живые. Первый тик - open в начале минуты (по нему исполняется
+        MARKET, поданный на закрытии предыдущей свечи), затем для каждой сделки путь open -> неблагоприятный экстремум -> благоприятный -> close (как
+        `replay_bars`: стоп раньше тейка) в конце минуты. Цена внутри минуты непрерывна: на каждом отрезке пути сначала идут тики ровно на уровнях сделки
+        (стоп, заявка, уровни плана), попавших в отрезок, - стоп и тейк исполняются по своей цене, а не по экстремуму минуты; гэп на open - по open."""
+        if not self._active.get(symbol):
+            return
+        self.on_tick(Tick(symbol, o, open_ms, "trade"))
+        ts = open_ms + 59_999
+        for t in list(self._active.get(symbol, {}).values()):
+            worst, best = (h, lo) if t.sgn > 0 else (lo, h)
+            for a, b in ((o, worst), (worst, best), (best, c)):
+                if t.status not in (OPEN, PENDING_LIMIT):
+                    break
+                lo_, hi_ = min(a, b), max(a, b)
+                inside = sorted((p for p in self._path_levels(t) if lo_ < p < hi_), reverse=b < a)
+                for price in (*inside, b):
+                    if t.status in (OPEN, PENDING_LIMIT):
+                        self._on_trade(t, Tick(symbol, price, ts, "trade"))
+
+    @staticmethod
+    def _path_levels(t: VirtualTrade) -> list[float]:
+        """Цены, на которых у сделки что-то происходит: стоп, цена лимитной заявки, оставшиеся уровни плана."""
+        out = [t.stop_m * t.sgn]
+        if t.status == PENDING_LIMIT:
+            out.append(t.entry_m * t.sgn)
+        if t.entry_m is not None and t.risk:
+            out += [t.level_q(r) * t.sgn for r, _ in t.plan.levels[t.levels_done:]]
+        return [p for p in out if p > 0]
+
     def on_tick(self, tick: Tick) -> None:
         by_strategy = self._active.get(tick.symbol)
         if not by_strategy:

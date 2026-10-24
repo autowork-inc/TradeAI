@@ -148,7 +148,7 @@ case "$cmd" in
         check_docker
         [ -f docker-compose.yml ] && [ -f Dockerfile ] || { echo "ОШИБКА: запускайте из каталога проекта (нет docker-compose.yml / Dockerfile)." >&2; exit 1; }
         ensure_env
-        mkdir -p data/shadow logs/shadow data/live logs/live data/updates data/golden_set backups; chmod 777 data/golden_set  # golden_set: пишет API (uid 10001)
+        mkdir -p data/shadow logs/shadow data/live logs/live data/updates data/golden_set data/playground backups; chmod 777 data/golden_set data/playground  # golden_set, playground: пишет API (uid 10001)
         # shadow-run и shadow-live не должны работать вместе (общая БД): режим Shadow сначала гасит боевой контур
         # (открытые позиции остаются на бирже под защитой стоп-ордеров, но без сопровождения - безубыток/трейлинг не двигаются)
         if $DC --profile live ps --status running --services 2>/dev/null | grep -qx shadow-live; then
@@ -188,7 +188,7 @@ case "$cmd" in
                 [ "$answer" = "REAL" ] || { echo "Отменено." >&2; exit 1; }
             fi
         fi
-        mkdir -p data/shadow logs/shadow data/live logs/live data/updates data/golden_set backups; chmod 777 data/golden_set  # golden_set: пишет API (uid 10001)
+        mkdir -p data/shadow logs/shadow data/live logs/live data/updates data/golden_set data/playground backups; chmod 777 data/golden_set data/playground  # golden_set, playground: пишет API (uid 10001)
         echo "== Останавливаю shadow-run (shadow-live заменяет его: общая БД, двух процессов быть не должно)"
         $DC stop shadow-run 2>/dev/null || true
         echo "== Сборка и запуск: postgres api shadow-live"
@@ -220,10 +220,10 @@ case "$cmd" in
         check_docker; ensure_env
         svc="${2:-shadow-run}"
         case "$svc" in
-            shadow-run|shadow-live|api|postgres|analyzer|web|nginx) ;;
-            *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | shadow-live | api | postgres | analyzer | web | nginx)" >&2; exit 2 ;;
+            shadow-run|shadow-live|api|postgres|analyzer|web|nginx|playground) ;;
+            *) echo "ОШИБКА: неизвестный сервис '$svc' (shadow-run | shadow-live | api | postgres | analyzer | web | nginx | playground)" >&2; exit 2 ;;
         esac
-        $DC --profile live --profile analytics --profile web logs -f --tail 50 "$svc"
+        $DC --profile live --profile analytics --profile web --profile playground logs -f --tail 50 "$svc"
         ;;
     apikey)
         check_docker; ensure_env
@@ -308,6 +308,21 @@ case "$cmd" in
         port="$(grep '^WEB_PUBLIC_PORT=' "$ENV_FILE" | tail -n1 | cut -d= -f2)"
         echo "Готово: веб-версия на порту ${port:-8080} сервера (http://<IP сервера>:${port:-8080}). Лог: ./deploy/shadow.sh logs web"
         ;;
+    playground-up)
+        check_docker; ensure_env
+        mkdir -p data/playground; chmod 777 data/playground  # SQLite пишут и воркер (root), и API (uid 10001)
+        echo "== Сборка и запуск Playground (воркер прогонов по истории; бот не перезапускается)"
+        $DC --profile playground up -d --build --force-recreate --no-deps playground
+        sleep 5
+        $DC --profile playground ps --format '{{.Service}} {{.State}}' 2>/dev/null | grep -q '^playground running' || { echo "ОШИБКА: playground не работает:" >&2; $DC --profile playground logs --tail 40 playground >&2; exit 1; }
+        $DC --profile playground ps playground
+        echo "Готово. Monitor -> вкладка Playground. Лог: ./deploy/shadow.sh logs playground"
+        ;;
+    playground-down)
+        check_docker; ensure_env
+        $DC --profile playground stop playground
+        echo "Playground остановлен (история прогонов в ./data/playground сохранена)."
+        ;;
     web-down)
         check_docker; ensure_env
         $DC --profile web stop web nginx
@@ -319,7 +334,7 @@ case "$cmd" in
         echo "Остановлено. Данные БД (том pgdata) и журнал ./data/shadow сохранены. Запуск: ./deploy/shadow.sh up"
         ;;
     *)
-        echo "Использование: $0 {up|up-live|status|api|logs [сервис]|stats|backup|psql|apikey|analyzer-init|analyzer-up|analyzer-down|web-up|web-down|down}" >&2
+        echo "Использование: $0 {up|up-live|status|api|logs [сервис]|stats|backup|psql|apikey|analyzer-init|analyzer-up|analyzer-down|web-up|web-down|playground-up|playground-down|down}" >&2
         exit 2
         ;;
 esac

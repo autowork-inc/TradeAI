@@ -17,6 +17,7 @@ from tradeai_client.settings import ClientSettings, SettingsError, load_settings
 from tradeai_client.ui import widgets as w
 from tradeai_client.ui.analysis_view import AnalysisView
 from tradeai_client.ui.mfe_view import MfeView
+from tradeai_client.ui.playground_view import PlaygroundView
 from tradeai_client.ui.changelog_view import change_row, release_card, releases_list
 from tradeai_client.ui.dashboard import DashboardView
 from tradeai_client.ui.history_view import HistoryView
@@ -24,8 +25,8 @@ from tradeai_client.ui.stats_view import StatsView
 
 log = logging.getLogger("tradeai_client")
 STATUS_COLORS = {"connected": w.GREEN, "connecting": w.AMBER, "reconnecting": w.AMBER, "auth": w.RED, "throttled": w.RED, "error": w.RED, "idle": w.MUTED}
-TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS, TAB_MFE = 0, 1, 2, 3, 4  # 1.6.0: «Избранное» - кнопка во вкладке History, не отдельная вкладка
-TAB_COUNT = 5
+TAB_DASHBOARD, TAB_STATS, TAB_HISTORY, TAB_ANALYSIS, TAB_MFE, TAB_PLAYGROUND = 0, 1, 2, 3, 4, 5  # 1.7.0: Playground; 1.6.0: «Избранное» - кнопка во вкладке History, не отдельная вкладка
+TAB_COUNT = 6
 ACCOUNT_REFRESH_S = 30.0  # как часто обновлять баланс в шапке (движок пишет снимок счёта раз в ~30 с)
 POST_BARS_MARGIN = 5  # свечей после выхода, которые показываем за последним маркером
 
@@ -57,6 +58,7 @@ class Shell:
         self._chr_pnl: float | None = None  # баланс профиля CHR: накопленный PnL его сделок от нуля
         self.dashboard, self.stats, self.history, self.analysis = DashboardView(self), StatsView(self), HistoryView(self), AnalysisView(self)
         self.mfe = MfeView(self)
+        self.playground = PlaygroundView(self)
         page.on_resize = lambda e: self.history.relayout()  # узкое окно - карточки вместо таблицы
         self._profile_btn = ft.TextButton(f"Пользователь: {self.settings.profile}", icon=ft.Icons.PERSON, tooltip="Сменить пользователя (SANTA / CHR)", on_click=lambda e: self.show_profile_dialog())
         self._dot = w.dot(w.MUTED, 12)
@@ -86,8 +88,9 @@ class Shell:
         tabs = ft.Tabs(length=TAB_COUNT, selected_index=self._tab, expand=True, on_change=self._tab_changed, content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label="Dashboard", icon=ft.Icons.DASHBOARD), ft.Tab(label="Statistics", icon=ft.Icons.BAR_CHART),
                             ft.Tab(label="History", icon=ft.Icons.HISTORY), ft.Tab(label="Analysis", icon=ft.Icons.ANALYTICS),
-                            ft.Tab(label="MFE Simulator", icon=ft.Icons.SCIENCE)]),
-            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control, self.mfe.control],
+                            ft.Tab(label="MFE Simulator", icon=ft.Icons.SCIENCE), ft.Tab(label="Playground", icon=ft.Icons.SLOW_MOTION_VIDEO)]),
+            ft.TabBarView(controls=[self.dashboard.control, self.stats.control, self.history.control, self.analysis.control, self.mfe.control,
+                                    self.playground.control],
                           expand=True)], expand=True))
         p.add(header, ft.Container(height=6), tabs)
 
@@ -137,6 +140,7 @@ class Shell:
             view.apply_profile()
             view.restore_state(self.view_state(name))  # у каждого профиля свои сохранённые фильтры
         self.mfe.reset()
+        self.playground.reset()
         self.analysis.reset()
         if self._last_state is not None:
             self.dashboard.on_message(self._last_state)
@@ -317,6 +321,8 @@ class Shell:
             await self.analysis.refresh()
         elif self._tab == TAB_MFE:
             await self.mfe.refresh()
+        elif self._tab == TAB_PLAYGROUND:
+            await self.playground.refresh()
 
     # ------------------------------------------------------------------------------------------ настройки
 
@@ -676,7 +682,8 @@ class Shell:
         client = self.client
         if client is None:
             raise ApiError("network", "Нет подключения к серверу")
-        snap = await client.snapshot(trade["id"])
+        run_id = trade.get("playground_run")  # сделка прогона Playground: снапшот из истории прогонов, звёздочки нет (сделки нет в БД бота)
+        snap = await client.snapshot(trade["id"], run_id)
         iv = interval_to_ms((snap.get("meta") or {}).get("interval", ""))
         now_ms = int(time.time() * 1000)
         post, note = None, None
@@ -686,8 +693,8 @@ class Shell:
         coin = trade["coin"]  # источник живых свечей: Binance Futures для крипты, сервер мониторинга (кэш бота из cTrader) для Forex/металлов
         spec["source"] = ({"kind": "binance", "symbol": coin, "rest": self.settings.binance_rest} if coin.endswith("USDT")
                           else {"kind": "server", "symbol": coin, "url": self.settings.normalized_url, "key": self.settings.api_key})
-        spec["favorite"] = {"url": self.settings.normalized_url, "key": self.settings.api_key, "trade_id": trade["id"], "profile": self.settings.profile,
-                            "is_favorite": bool(snap["trade"].get("is_favorite"))}  # окно графика (отдельный процесс) ставит звёздочку само
+        spec["favorite"] = None if run_id else {"url": self.settings.normalized_url, "key": self.settings.api_key, "trade_id": trade["id"], "profile": self.settings.profile,
+                                                "is_favorite": bool(snap["trade"].get("is_favorite"))}  # окно графика (отдельный процесс) ставит звёздочку само
         return spec
 
     async def _post_candles(self, snap: dict, iv: int, now_ms: int) -> tuple[list[dict] | None, str | None]:
