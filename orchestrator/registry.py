@@ -63,7 +63,10 @@ def strategy_allowed(name: str, symbol: str) -> bool:
 # 2026-10-19: у ВСЕХ стратегий один план - единственный тейк на весь объём, строго 1:4 (DEFAULT_PLAN); частичных фиксаций, безубытка и трейлинга нет.
 # Прежние имена планов оставлены как псевдонимы (на них ссылаются тесты и запись состояния).
 STRICT_PLAN = DEFAULT_PLAN
-SCALP_1R_PLAN = VWAP_PLAN = LEVEL_BREAKOUT_PLAN = CHR_PLAN = STRICT_PLAN
+SCALP_1R_PLAN = LEVEL_BREAKOUT_PLAN = CHR_PLAN = STRICT_PLAN
+# VWAP_Reversion (2026-10-23, решение пользователя по анализу scripts/analyze_tp): тейк = возврат к линии VWAP (цена в Signal.tp), а не 1:4 - на 8 сделках
+# 1:4 дал -1.135R/сделку, тейк на VWAP +0.147R. Запасной уровень 1R - только если VWAP уже не в прибыли относительно факта входа (проскальзывание).
+VWAP_PLAN = ScaleOutPlan(((1.0, 1.0),), tp_anchor="price")
 # SMC_Pro_Trend (2026-10-19): тейк строго 1:4 от ФАКТИЧЕСКОЙ цены входа (якорь `fill`; прежний якорь `signal` от цены сигнала отменён).
 SMC_PRO_PLAN = STRICT_PLAN
 STRATEGY_PLANS: dict[str, ScaleOutPlan] = {SMC_PRO_TREND: SMC_PRO_PLAN, SMC_COUNTER_TREND: SCALP_1R_PLAN, VWAP_REVERSION: VWAP_PLAN,

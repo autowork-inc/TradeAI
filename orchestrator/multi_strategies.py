@@ -42,10 +42,12 @@ HORIZONTAL_BREAKOUT_CHR = "Horizontal_Breakout_CHR"
 TRENDLINE_BREAKOUT_CHR = "Trendline_Breakout_CHR"
 
 
-def _market_signal(name: str, ctx: FeatureContext, direction: Direction, sl: float, geo: tuple[dict[str, Any], ...], meta: dict[str, Any]) -> Signal:
+def _market_signal(name: str, ctx: FeatureContext, direction: Direction, sl: float, geo: tuple[dict[str, Any], ...], meta: dict[str, Any],
+                   tp: float | None = None) -> Signal:
+    """tp - цена тейка из логики стратегии (у VWAP_Reversion - линия VWAP, план с tp_anchor='price'); None - тейк считается планом в R от входа."""
     return Signal(
         signal_id=_signal_id(name, ctx, direction), strategy=name, symbol=ctx.symbol, interval=ctx.interval, direction=direction,
-        kind=Kind.MARKET, bar_open_time=ctx.bar_open_time, bar_close_ms=ctx.bar_close_ms, entry=ctx.last_close, sl=sl, tp=None, inval=None,
+        kind=Kind.MARKET, bar_open_time=ctx.bar_open_time, bar_close_ms=ctx.bar_close_ms, entry=ctx.last_close, sl=sl, tp=tp, inval=None,
         geometry=geo, meta=meta,
     )
 
@@ -175,7 +177,8 @@ class StrategyVwapReversion:
                 "vwap": vwap, "sd": last["vw_sd"], "band": band, "sd_mult": self.params.sd_mult,
                 "target_vwap_r": abs(ctx.last_close - vwap) / abs(sl - ctx.last_close), "atr": last["atr"],
                 "entry_to_ext_atr": last[f"vw_{side}_ext_atr"], "stop_atr": last[f"vw_{side}_stop_atr"],
-                "band_dist_atr": last[f"vw_{side}_band_atr"], "vwap_dist_atr": last[f"vw_{side}_vwap_atr"], **_htf_meta(last)}))
+                "band_dist_atr": last[f"vw_{side}_band_atr"], "vwap_dist_atr": last[f"vw_{side}_vwap_atr"], **_htf_meta(last)},
+                tp=float(vwap)))  # тейк = возврат к VWAP (VWAP_PLAN, tp_anchor='price'; 2026-10-23)
         return tuple(out)
 
 

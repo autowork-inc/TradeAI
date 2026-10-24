@@ -589,7 +589,7 @@ class LiveExecutionEngine:
         risk = abs(fill - p.sl)
         levels: list[Level] = []
         for i, (r, lvl_qty) in enumerate(split):  # якорь плана: от факта входа или от цен сигнала (SMC_Pro_Trend) - та же функция, что у VirtualTracker
-            price = self.client.round_price(p.symbol, p.exit_plan.level_price(r, side_sgn=sgn, fill=fill, sl=p.sl, signal_entry=p.entry))
+            price = self.client.round_price(p.symbol, p.exit_plan.level_price(r, side_sgn=sgn, fill=fill, sl=p.sl, signal_entry=p.entry, signal_tp=p.tp))
             if not sgn * price < sgn * fill:
                 await self._emergency(trade, DataError(f"уровень {r}R: цена {price} не по ту сторону входа {fill}"), "bad_level")
             levels.append(Level(r, lvl_qty, price, client_id(self.client.id_prefix, f"T{i}", p.signal_id)))

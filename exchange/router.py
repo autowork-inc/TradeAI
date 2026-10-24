@@ -261,6 +261,8 @@ class ExecutionRouter:
                 return RouteRejected("price_deviation", {"broker_price": entry, "signal_entry": signal.entry, "deviation": dev, "max": self._max_dev})
         sl = _snap(signal.sl, spec)
         exit_plan = self._plans.get(signal.strategy, DEFAULT_PLAN)
+        if exit_plan.tp_anchor == "price":  # тейк по цене сигнала (VWAP) сопровождение MT5 не умеет: торговать другой математикой, чем Shadow, нельзя (R8)
+            return RouteRejected("plan_not_representable", {"tp_anchor": "price", "why": "MT5-сопровождение считает уровни только в R"})
         tp = mt5_exit.broker_tp(exit_plan, entry, sl, signal.direction.sgn, spec)
         margin_1lot = await self.mt5.calculate_margin(broker, side, 1.0, entry)
         sized = size_position(spec, side=side, entry=entry, sl=sl, tp=tp, equity=info.equity, free_margin=info.free_margin,

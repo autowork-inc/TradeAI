@@ -182,9 +182,11 @@ def test_registry_builds_the_nine_strategies_with_unique_ids_and_individual_plan
                 HORIZONTAL_BREAKOUT_CHR, TRENDLINE_BREAKOUT_CHR]
     assert names == expected == list(SHADOW_STRATEGIES) and len(set(names)) == 9
     plans = plans_for(names)
-    assert all(plans[n] is DEFAULT_PLAN for n in names)  # у ВСЕХ стратегий один план: единственный тейк 1:4 на весь объём
+    # у всех стратегий один план - единственный тейк 1:4 на весь объём; кроме VWAP_Reversion (2026-10-23): тейк на линии VWAP (цена сигнала)
+    assert all(plans[n] is DEFAULT_PLAN for n in names if n != VWAP_REVERSION) and plans[VWAP_REVERSION] is VWAP_PLAN
+    assert VWAP_PLAN.tp_anchor == "price" and VWAP_PLAN.levels == ((1.0, 1.0),)
     assert DEFAULT_PLAN.levels == ((4.0, 1.0),) and SMC_PRO_PLAN is DEFAULT_PLAN and DEFAULT_PLAN.tp_anchor == "fill"
-    assert SCALP_1R_PLAN is VWAP_PLAN is LEVEL_BREAKOUT_PLAN is DEFAULT_PLAN  # старые имена планов - псевдонимы
+    assert SCALP_1R_PLAN is LEVEL_BREAKOUT_PLAN is DEFAULT_PLAN  # старые имена планов - псевдонимы
     assert build_strategies()[0].params.htf_filter is True  # Pro_Trend - только по тренду H4
 
 

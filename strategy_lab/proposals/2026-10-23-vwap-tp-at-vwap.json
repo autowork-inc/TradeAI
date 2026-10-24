@@ -45,7 +45,9 @@
   ],
   "risks": "Меняет выход у стратегии, которая торгует РЕАЛЬНЫМИ деньгами (APPROVED_STRATEGIES): нужна отдельная доработка трекера и боевого движка с тестами паритета.",
   "how_to_apply": "Отдельная задача разработки (тип выхода «тейк по цене сигнала»); параметром не применяется",
-  "status": "manual",
+  "status": "applied",
   "decision": "approved_for_development",
-  "decided_at": "2026-10-23T21:03:16Z"
+  "decided_at": "2026-10-23T21:03:16Z",
+  "applied_at": "2026-10-24T08:13:09Z",
+  "applied_how": "код: ScaleOutPlan(tp_anchor='price'), VWAP_PLAN, Signal.tp = VWAP; откат - git revert этого коммита (до него VWAP_PLAN = 1:4)"
 }

@@ -81,8 +81,10 @@ class ScaleOutPlan:
     tp_anchor: str = "fill"
 
     def __post_init__(self) -> None:
-        if self.tp_anchor not in ("fill", "signal"):
-            raise ConfigError(f"ScaleOutPlan: tp_anchor 'fill' или 'signal', получено {self.tp_anchor!r}")
+        if self.tp_anchor not in ("fill", "signal", "price"):
+            raise ConfigError(f"ScaleOutPlan: tp_anchor 'fill', 'signal' или 'price', получено {self.tp_anchor!r}")
+        if self.tp_anchor == "price" and len(self.levels) != 1:
+            raise ConfigError("ScaleOutPlan: tp_anchor 'price' (тейк = цена из сигнала) - только один уровень на весь объём")
         if not self.levels:
             raise ConfigError("ScaleOutPlan: нужен хотя бы один уровень")
         prev = 0.0
@@ -110,10 +112,14 @@ class ScaleOutPlan:
             raise ConfigError(f"ScaleOutPlan: не читается запись уровней {levels!r}")
         return cls(tuple((r, f / total) for r, f in parsed), tp_anchor)
 
-    def level_price(self, r: float, *, side_sgn: float, fill: float, sl: float, signal_entry: float | None) -> float:
+    def level_price(self, r: float, *, side_sgn: float, fill: float, sl: float, signal_entry: float | None, signal_tp: float | None = None) -> float:
         """Цена уровня `r` (реальная, не q-мир). side_sgn - Direction.sgn (+1 шорт, -1 лонг). Якорь "signal": от входа и SL сигнала; уровень не в прибыли
-        относительно фактического входа (проскальзывание за уровень) - от фактического входа, как "fill". Одна функция для VirtualTracker и боевого движка (R8)."""
+        относительно фактического входа (проскальзывание за уровень) - от фактического входа, как "fill". Якорь "price" (2026-10-23, VWAP_Reversion):
+        тейк = цена из сигнала (`signal_tp`, у VWAP - сама линия VWAP); нет её или она не в прибыли относительно факта входа - запасной уровень `r`
+        от факта. Одна функция для VirtualTracker и боевого движка (R8)."""
         by_fill = fill - side_sgn * r * abs(fill - sl)
+        if self.tp_anchor == "price":
+            return signal_tp if signal_tp is not None and side_sgn * signal_tp < side_sgn * fill else by_fill
         if self.tp_anchor != "signal" or signal_entry is None:
             return by_fill
         anchored = signal_entry - side_sgn * r * abs(signal_entry - sl)
@@ -221,7 +227,7 @@ class VirtualTrade:
     def level_q(self, r: float) -> float:
         """Уровень `r` в «шортовом мире» (ScaleOutPlan.level_price: якорь - факт входа или цены сигнала)."""
         s = self.signal
-        return self.sgn * self.plan.level_price(r, side_sgn=self.sgn, fill=self.entry_m * self.sgn, sl=s.sl, signal_entry=s.entry)
+        return self.sgn * self.plan.level_price(r, side_sgn=self.sgn, fill=self.entry_m * self.sgn, sl=s.sl, signal_entry=s.entry, signal_tp=s.tp)
 
     def record(self) -> dict[str, Any]:
         s = self.signal

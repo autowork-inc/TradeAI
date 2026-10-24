@@ -15,7 +15,7 @@ import pytest
 from exchange.ctrader import CTraderTradeError
 from exchange.router import ExecutionRouter, Mt5Tracked, RouteRejected
 from orchestrator.journal import MemoryEventLog
-from orchestrator.registry import SCALP_1R_PLAN, VWAP_PLAN
+from orchestrator.registry import LEVEL_BREAKOUT_PLAN, SCALP_1R_PLAN
 from orchestrator.tracker import CLOSED, DEFAULT_PLAN, ScaleOutPlan, VirtualTracker
 from orchestrator.types import BarInfo, Direction, Kind, Tick
 from tests.exchange.fake_mt5 import FakeMt5Rpc, make_client, make_mapper, trade_error
@@ -23,7 +23,7 @@ from tests.orchestrator.live_helpers import BAR, STRATEGY, T0, signal
 from exchange.mt5_risk import Mt5RiskParams
 
 SYM = "XAUUSD"
-PLANS = {"default": DEFAULT_PLAN, "scalp": SCALP_1R_PLAN, "vwap": VWAP_PLAN}
+PLANS = {"default": DEFAULT_PLAN, "scalp": SCALP_1R_PLAN, "level": LEVEL_BREAKOUT_PLAN}  # VWAP_PLAN (тейк по цене сигнала) MT5 отклоняет: test_tp_at_signal_price
 STEPS, BAR_EVERY = 170, 6
 QTY0 = 2.5  # лоты в паритетных траекториях
 
@@ -227,7 +227,7 @@ def test_single_take_profit_covers_all_lots_and_the_stop_never_moves():
 
 def test_every_plan_puts_the_take_profit_on_the_broker_at_4r():
     async def body():
-        router, rpc, _, t = await opened(VWAP_PLAN)
+        router, rpc, _, t = await opened(LEVEL_BREAKOUT_PLAN)
         await router.poll_mt5()
         assert t.exit.tp_price == 2008.0 and rpc.positions[0]["takeProfit"] == 2008.0  # +4R от фактического входа
     asyncio.run(body())

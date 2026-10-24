@@ -35,7 +35,8 @@ def test_params_and_take_profit_are_applied(ovr):
     p = ict().params
     assert p.require_htf_trend is False and p.sl_buffer_atr == 0.5 and p.min_wick_frac == 0.55  # остальное - как в коде
     assert plans_for(["ICT_Killzones"])["ICT_Killzones"].levels == ((2.5, 1.0),)
-    assert plans_for(["VWAP_Reversion"])["VWAP_Reversion"].levels == ((4.0, 1.0),)
+    vwap = plans_for(["VWAP_Reversion"])["VWAP_Reversion"]  # без записи в overrides - план из кода (тейк на линии VWAP)
+    assert vwap.tp_anchor == "price" and vwap.levels == ((1.0, 1.0),)
 
 
 @pytest.mark.parametrize("entry", [
