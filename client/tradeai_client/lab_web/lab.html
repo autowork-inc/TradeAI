@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradeAI · Create Strategy</title>
+<style>/*__CSS__*/</style>
+</head>
+<body>
+<div id="app">
+  <div id="top">
+    <span id="title">Create Strategy</span>
+    <input id="coin" list="coins" placeholder="Монета" title="Монета (топ по объёму в списке; можно вписать любую USDT)" spellcheck="false">
+    <datalist id="coins"></datalist>
+    <span id="tfs"></span>
+    <input id="date" type="datetime-local" title="Момент на графике (ваше время): всё после него скрыто до реплея">
+    <button class="btn" id="b-go" title="Открыть монету, таймфрейм и момент">Перейти</button>
+    <button class="btn" id="b-rand" title="Случайная монета из топ-15, случайный таймфрейм и дата">🎲 Случайный</button>
+    <span class="sep"></span>
+    <button class="btn" id="b-play" title="Реплей: свечи идут дальше (пробел)">▶ Play</button>
+    <button class="btn" id="b-step" title="Одна свеча вперёд (→)">⏭ Свеча</button>
+    <select id="speed" title="Скорость реплея">
+      <option value="0.25">x0.25</option><option value="0.5">x0.5</option><option value="1" selected>x1</option>
+      <option value="2">x2</option><option value="4">x4</option><option value="8">x8</option>
+    </select>
+    <label class="chk" title="Бот смотрит рынок на каждой свече реплея: подсказки и сигналы"><input type="checkbox" id="bot-live" checked> бот в реплее</label>
+    <span id="clock" title="Последняя открытая свеча (ваше время)"></span>
+    <span id="status"><span id="dot"></span><span id="stext">загрузка…</span></span>
+  </div>
+  <div id="main">
+    <div id="tools">
+      <button class="btn on" data-tool="cursor" title="Курсор: выбор, перемещение, правка (Esc)">↖</button>
+      <button class="btn" data-tool="trend" title="Линия / наклонка (две точки)">╱</button>
+      <button class="btn" data-tool="hline" title="Горизонтальный уровень (клик)">━</button>
+      <button class="btn" data-tool="ray" title="Луч (вправо через вторую точку)">➚</button>
+      <button class="btn" data-tool="rect" title="Зона / область (две точки)">▭</button>
+      <button class="btn" data-tool="point" title="Метка (клик): хай, лой, пробой, разворот, вход…">◉</button>
+      <span class="sep" style="width:100%;height:1px"></span>
+      <button class="btn long" data-tool="long" title="Сделка ЛОНГ: клик - цена входа, затем тяните стоп и тейк">L</button>
+      <button class="btn short" data-tool="short" title="Сделка ШОРТ: клик - цена входа, затем тяните стоп и тейк">S</button>
+      <span class="sep" style="width:100%;height:1px"></span>
+      <button class="btn" id="b-del" title="Удалить выбранное (Delete)">🗑</button>
+      <button class="btn" id="b-clear" title="Удалить всю разметку">✕</button>
+    </div>
+    <div id="chartbox">
+      <div id="chart"></div>
+      <canvas id="ov"></canvas>
+      <div id="badges"></div>
+      <div id="toast"></div>
+    </div>
+    <div id="panel">
+      <div id="tabs">
+        <button class="tab on" data-tab="mark">Разметка</button>
+        <button class="tab" data-tab="bot">Бот</button>
+        <button class="tab" data-tab="trades">Сделки</button>
+        <button class="tab" data-tab="strategy">Стратегия</button>
+      </div>
+      <div class="pane on" id="pane-mark"></div>
+      <div class="pane" id="pane-bot"></div>
+      <div class="pane" id="pane-trades"></div>
+      <div class="pane" id="pane-strategy"></div>
+    </div>
+  </div>
+</div>
+<div id="modal" class="hidden">
+  <div class="mbox">
+    <h3 id="m-title">Что это?</h3>
+    <div id="m-terms"></div>
+    <textarea id="m-note" rows="3" placeholder="Почему вы это так видите: «отскакивала 3 раза», «гэп, заполнен позже», «нет объёма на покупку»…"></textarea>
+    <div class="mrow"><button class="btn on" id="m-ok">Готово</button><button class="btn" id="m-skip">Без подписи</button></div>
+  </div>
+</div>
+<script>/*__LIB__*/</script>
+<script>window.__CFG__ = /*__CFG__*/;</script>
+<script>/*__APP__*/</script>
+</body>
+</html>

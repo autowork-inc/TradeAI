@@ -69,7 +69,8 @@ Write-Host "== flet pack"
 $packArgs = @("pack", "app.py", "--name", "TradeAI-Monitor", "--product-name", "TradeAI Monitor", "--file-description", "TradeAI Monitor",
           "--product-version", $productVersion, "--distpath", "dist", "-y",
           # страница графика (chart_web: html/js/css + библиотека lightweight-charts) и ресурсы pywebview PyInstaller сам не находит
-          "--add-data", "tradeai_client/chart_web:tradeai_client/chart_web", "tradeai_client/changelog.json:tradeai_client",
+          # lab_web - страница полигона Create Strategy (1.9.0)
+          "--add-data", "tradeai_client/chart_web:tradeai_client/chart_web", "tradeai_client/lab_web:tradeai_client/lab_web", "tradeai_client/changelog.json:tradeai_client",
           "--pyinstaller-build-args=--collect-all=webview")
 if ($OneDir) { $packArgs += "-D" }
 try {

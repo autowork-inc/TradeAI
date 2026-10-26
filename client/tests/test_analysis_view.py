@@ -253,6 +253,6 @@ def test_shell_wires_the_analysis_tab_as_the_fourth_tab(monkeypatch):
     sh = shell_mod.Shell(page)
     tabs = page.add.call_args.args[2]
     bar, view = tabs.content.controls
-    assert tabs.length == len(bar.tabs) == len(view.controls) == 6 and bar.tabs[shell_mod.TAB_MFE].label == "MFE Simulator" and bar.tabs[shell_mod.TAB_PLAYGROUND].label == "Playground" and bar.tabs[shell_mod.TAB_ANALYSIS].label == "Analysis"
+    assert tabs.length == len(bar.tabs) == len(view.controls) == 7 and bar.tabs[shell_mod.TAB_MFE].label == "MFE Simulator" and bar.tabs[shell_mod.TAB_PLAYGROUND].label == "Playground" and bar.tabs[shell_mod.TAB_CREATE].label == "Create Strategy" and bar.tabs[shell_mod.TAB_ANALYSIS].label == "Analysis"
     assert "Favorites" not in [t.label for t in bar.tabs]  # 1.6.0: избранное - кнопка в History
     assert view.controls[shell_mod.TAB_ANALYSIS] is sh.analysis.control and view.controls[shell_mod.TAB_MFE] is sh.mfe.control

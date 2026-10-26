@@ -26,12 +26,14 @@ async def flet_main(page: ft.Page) -> None:
 def _shutdown() -> None:
     """Закрыть окна графиков этой сессии и немедленно завершить процесс (os._exit: без ожидания фоновых задач и потоков)."""
     from tradeai_client.chart_window import terminate_all
+    from tradeai_client.lab.lab_window import terminate_all as terminate_labs
     try:
         for task in asyncio.all_tasks():  # опрос API, WebSocket, таймеры: отменяем, чтобы ничто не держало выход (сессии умрут вместе с процессом)
             task.cancel()
     except RuntimeError:  # вызов вне работающего цикла (после ft.run): задач уже нет
         pass
     terminate_all()
+    terminate_labs()  # окна полигона Create Strategy
     logging.shutdown()
     if sys.platform == "win32":  # окно Flet (flet.exe) - дочерний процесс: os._exit его не гасит и оно остаётся висеть с «Working...»
         subprocess.Popen(["taskkill", "/F", "/T", "/PID", str(os.getpid())], creationflags=subprocess.CREATE_NO_WINDOW,

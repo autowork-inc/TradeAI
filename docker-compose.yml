@@ -230,6 +230,7 @@ services:
       ANALYZER_URL: http://analyzer:8000  # прокси /api/analysis/* -> Strategy Quant Analyzer (профиль analytics); контейнера нет - прокси отвечает 503 analyzer_unavailable
       ANALYZER_TOKEN: ${API_KEY:-}  # общий секрет API и анализатора (заголовок X-Analyzer-Token); анализатор наружу не публикуется
       GOLDEN_SET_DIR: /app/data/golden_set  # эталонные сетапы по звёздочке клиента (json + png)
+      LAB_DIR: /app/data/lab  # Create Strategy: уроки, стратегии, словарь трейдеров (API пишет только сюда, кроме избранного и Playground)
       WATCH_URL: http://watch:8000  # Live-Dashboard: /api/watch/* -> сервис watch (профиль playground); нет контейнера - 503 watch_unavailable
       PLAYGROUND_DIR: /app/data/playground  # Playground: очередь и история прогонов по истории (SQLite; считает контейнер playground)
       UPDATE_DIR: /app/data/updates  # version.json и TradeAI-Monitor.exe (кладёт client/build_exe.ps1 -Publish)
@@ -239,6 +240,7 @@ services:
       - ./data/shadow:/app/data/shadow:ro
       - ./data/live:/app/data/live:ro
       - ./data/updates:/app/data/updates:ro
+      - ./data/lab:/app/data/lab  # Create Strategy: уроки трейдеров
       - ./data/playground:/app/data/playground  # Playground: API ставит прогон в очередь (запись в SQLite) и читает историю; свечи считает воркер
       - ./data/golden_set:/app/data/golden_set  # единственное место, куда API пишет файлы (shadow.sh создаёт каталог с правом записи)
     read_only: true
