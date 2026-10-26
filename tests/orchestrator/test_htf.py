@@ -93,7 +93,7 @@ def test_strategy_with_filter_blocks_against_trend_and_records_h4_context_in_sig
     ctx = context(scenario_frame(), 19)
     assert smc.detect(htf_with(BULL).attach(ctx)) == ()  # H4 бычий: шорт M15 не ищем
     (sig,) = smc.detect(htf_with(BEAR).attach(ctx))
-    assert sig.meta["htf_bias"] == -1 and sig.meta["htf_label"] == "Bearish" and sig.meta["htf_interval"] == "4h"
+    assert sig.meta["htf_bias"] == -1 and sig.meta["htf_label"] == "Bearish" and sig.meta["htf_interval"] == "1d"
     assert smc.detect(htf_with(NEUT).attach(ctx)) == ()  # Neutral: сетапы запрещены в обе стороны
     (plain,) = StrategySMC().detect(ctx)  # без фильтра и без присоединённого bias - прежнее поведение, meta без H4
     assert "htf_label" not in plain.meta and plain.entry == sig.entry

@@ -23,8 +23,10 @@ from utils.errors import DataError
 
 BULLISH, BEARISH, NEUTRAL = 1, -1, 0
 BIAS_LABELS = {BULLISH: "Bullish", BEARISH: "Bearish", NEUTRAL: "Neutral"}
-BIAS_COLUMN = "htf_bias"
+BIAS_COLUMN = "htf_bias"  # с 2026-10-26 у рабочих 15m-кадров = дневной тренд (тот же, что `1d_bias`): фильтр тренда всех стратегий - по дневке
 AVAIL_COLUMN = "htf_avail_ms"
+H4_BIAS = "h4_bias"  # 4h-структура: только SMC_Counter_Trend (откат против 4h внутри дневного тренда)
+H4_AVAIL = "h4_avail_ms"
 
 _NEEDED = ("open_time", "atr", "sh1_price", "sh2_price", "sl1_price", "sl2_price")
 

@@ -147,7 +147,8 @@ def build_overlay(snap: dict[str, Any]) -> dict[str, Any] | None:
     if meta.get("sl_extreme") is not None:
         notes.append(f"Стоп за ближайшим локальным свингом {float(meta['sl_extreme']):.6g} (последние 3-8 баров), отступ 0.2 ATR.")
     if bias:
-        notes.append(f"Тренд H4: {bias} (жёсткий фильтр CHR).")
+        tf = str(meta.get("htf_interval") or "4h")  # с 2026-10-26 тренд всех стратегий - дневка; у старых сделок поля нет (H4)
+        notes.append(f"Тренд {('H' + tf[:-1]) if tf.endswith('h') else tf.upper()}: {bias} (жёсткий фильтр: только по тренду).")
     if meta.get("body_frac") is not None:
         notes.append(f"Пробойная свеча полнотелая: тело {float(meta['body_frac']) * 100:.0f}% размаха.")
     notes.append("Точки восстановлены клиентом по свечам снапшота; " + ("совпадают с данными бота." if verified else

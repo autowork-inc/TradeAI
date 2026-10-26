@@ -242,7 +242,7 @@ def test_mtf_state_routes_by_interval_and_rejects_foreign_contexts():
     with pytest.raises(DataError, match="не настроен"):
         state.attach(mk_ctx("1h", 0))
     only_legacy = MtfState(INTERVALS, MemoryEventLog(), base=None)
-    assert only_legacy.state_intervals == ("4h",)
+    assert only_legacy.state_intervals == ("1d", "4h")  # 2026-10-26: дневной тренд нужен и 15m-стратегиям
     with pytest.raises(DataError, match="не относится"):
         only_legacy.update(mk_ctx("1h", 0))
     with pytest.raises(DataError, match="не настроен"):
@@ -253,15 +253,25 @@ def test_mtf_state_routes_by_interval_and_rejects_foreign_contexts():
         MtfState({"5m": M5}, MemoryEventLog())
 
 
-def test_mtf_state_attaches_h4_bias_to_15m_contexts_like_htf_bias():
+def test_mtf_state_attaches_daily_trend_and_h4_structure_to_15m_contexts():
+    """2026-10-26: 15m-стратегии читают в `htf_bias` ДНЕВНОЙ тренд (тот же, что `1d_bias`); 4h-структура - отдельной колонкой `h4_bias` (SMC_Counter_Trend)."""
+    from features.htf import H4_BIAS, htf_bias_table
+
     h4_ms = INTERVALS["4h"]
     h4_df = random_walk(120, 3, 0.02).with_columns((pl.int_range(pl.len(), dtype=pl.Int64) * h4_ms + BASE).alias("open_time"))
-    state = MtfState(INTERVALS, MemoryEventLog())
+    d1_df = random_walk(80, 4, 0.03).with_columns((pl.int_range(pl.len(), dtype=pl.Int64) * D1 + BASE + 19 * D1 - 79 * D1).alias("open_time"))  # последняя 1d закрывается в BASE + 20 суток
+    state = MtfState(INTERVALS, MemoryEventLog(), base=None)
     state.update(feature_ctx("4h", h4_df))
-    assert state.has(SYM) is False  # MTF включён, а 1h/1d ещё нет
-    m15 = random_walk(40, 9, 0.01).with_columns((pl.int_range(pl.len(), dtype=pl.Int64) * M15 + BASE + 120 * h4_ms - 28 * M15).alias("open_time"))  # последняя 15m-свеча - через 11 свечей после закрытия последней 4h
+    assert state.has(SYM) is False  # 4h есть, дневки ещё нет - торговать нельзя
+    m15 = random_walk(40, 9, 0.01).with_columns((pl.int_range(pl.len(), dtype=pl.Int64) * M15 + BASE + 120 * h4_ms - 28 * M15).alias("open_time"))  # последняя 15m - через 11 свечей после закрытия последней 4h
+    with pytest.raises(DataError):
+        state.attach(feature_ctx("15m", m15))
+    d1_ctx = feature_ctx("1d", d1_df)
+    state.update(d1_ctx)
     out = state.attach(feature_ctx("15m", m15))
-    assert BIAS_COLUMN in out.frame.columns and D1_BIAS not in out.frame.columns  # 15m-стратегии читают прежний htf_bias
+    want_d1 = htf_bias_table(d1_ctx.frame, D1)["htf_bias"][-1]
+    assert out.frame[D1_BIAS][-1] == want_d1 and out.frame[BIAS_COLUMN].to_list() == out.frame[D1_BIAS].to_list()
+    assert H4_BIAS in out.frame.columns and out.frame[H4_BIAS][-1] == htf_bias_table(feature_ctx("4h", h4_df).frame, h4_ms)["htf_bias"][-1]
 
 
 def test_the_1d_bias_event_is_logged_with_its_interval():

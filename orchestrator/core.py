@@ -9,7 +9,10 @@
      Docker перезапускает (R1). Закрытия 1h/1d сюда не попадают вовсе: они обновляют состояние старших таймфреймов (orchestrator/mtf.py);
   4. каждый сигнал: «устарел» (свеча закрылась давно: replay после обрыва) -> skipped_stale; фильтр сигналов (`signal_gates`: импульс на 1m для MARKET,
      новости High Impact, выходные) отказал -> skipped_filter (причина и имя фильтра в detail); монета занята -> skipped_due_to_lock (D4); приёмник
-     отказал по риску -> skipped_risk, блокировка снимается; иначе -> signal_accepted. Фильтры касаются только НОВЫХ сигналов: сопровождение и закрытие
+     отказал по риску -> skipped_risk, блокировка снимается; иначе -> signal_accepted.
+     Перед фильтрами - тренд дневки (`trend_column`, 2026-10-26, решение пользователя «торговать только по тренду»): лонг - только при Bullish 1d,
+     шорт - только при Bearish 1d (структура SMC: HH+HL / LH+LL, features/htf.py); Neutral и нет данных - skipped_filter (filter=d1_trend). Тренд берётся из
+     того же кадра, что видела стратегия (последняя дневная свеча, закрывшаяся не позже открытия рабочей свечи) - без заглядывания, Shadow = live = Playground. Фильтры касаются только НОВЫХ сигналов: сопровождение и закрытие
      открытых сделок идёт через приёмники и от них не зависит.
 
 Маршрут задаётся на стратегию: `Route(Mode.SHADOW, VirtualTracker)` или `Route(Mode.LIVE, <LiveBarrier-адаптер, Этап 4>)`.
@@ -22,13 +25,14 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Mapping, Protocol, Sequence
 
+from features.htf import BEARISH, BIAS_LABELS, BULLISH
 from orchestrator.journal import EventLog
 from orchestrator.lock import CoinOwnershipLock, Owner
 from orchestrator.strategies import Strategy
 from orchestrator.tracker import SignalSink, VirtualTrade
 from orchestrator.types import Event, FeatureContext, Mode, Signal
 from persistence.recorder import NullRecorder, TradeRecorder
-from utils.errors import ConfigError, TradingInfraError
+from utils.errors import ConfigError, DataError, TradingInfraError
 
 log = logging.getLogger("orchestrator")
 
@@ -57,7 +61,7 @@ class Orchestrator:
     def __init__(
         self, strategies: Sequence[Strategy], routes: Mapping[str, Route], log_: EventLog, *,
         max_signal_age_ms: int = DEFAULT_MAX_SIGNAL_AGE_MS, recorder: TradeRecorder | None = None, snapshot_bars: int = 100,
-        symbol_filter: Callable[[str, str], bool] | None = None, signal_gates: Sequence[SignalGate] = (),
+        symbol_filter: Callable[[str, str], bool] | None = None, signal_gates: Sequence[SignalGate] = (), trend_column: str | None = None,
     ):
         names = [s.name for s in strategies]
         if len(set(names)) != len(names):
@@ -73,6 +77,7 @@ class Orchestrator:
         self._snapshot_bars = snapshot_bars
         self._symbol_filter = symbol_filter  # (стратегия, символ) -> можно ли; None - всё разрешено
         self._gates = tuple(signal_gates)
+        self._trend_column = trend_column  # колонка дневного тренда в рабочем кадре (`1d_bias`); None - фильтр выключен (тесты отдельных частей)
         self._setup_states: dict[tuple[str, str, str], int] = {}  # (стратегия, монета, сторона) -> последнее состояние автомата
         self._locks: dict[str, CoinOwnershipLock] = {}
         self._held: dict[str, tuple[CoinOwnershipLock, str, Owner]] = {}  # signal_id -> (блокировка, монета, владелец)
@@ -147,6 +152,10 @@ class Orchestrator:
         base = {"mode": route.mode.value, "kind": signal.kind.value, "direction": signal.direction.value}
         if stale:
             return self._event(ctx, "skipped_stale", signal, {**base, "age_ms": age})
+        if self._trend_column is not None:
+            reason = self._against_trend(signal, ctx)
+            if reason is not None:
+                return self._event(ctx, "skipped_filter", signal, {**base, "filter": "d1_trend", "reason": reason})
         for gate in self._gates:
             reason = gate.check(signal, ctx.received_ms)
             if reason is not None and getattr(gate, "tag_only", False):  # фильтр-метка (новости, 2026-10-24): сигнал идёт дальше с пометкой в meta
@@ -171,6 +180,17 @@ class Orchestrator:
                             "geometry": list(signal.geometry), "meta": {**signal.meta, "entry": signal.entry, "sl": signal.sl, "tp": signal.tp,
                                                                          "inval": signal.inval, "interval": signal.interval}})
         return self._event(ctx, "signal_accepted", signal, {**base, "entry": signal.entry, "sl": signal.sl, "tp": signal.tp, "lock": lock.name})
+
+    def _against_trend(self, signal: Signal, ctx: FeatureContext) -> str | None:
+        """None - сигнал по тренду дневки; иначе причина отказа. Нет колонки тренда в кадре - DataError (R1: торговать вслепую без фильтра нельзя)."""
+        if self._trend_column not in ctx.frame.columns:
+            raise DataError(f"{signal.strategy} {ctx.symbol} {ctx.interval}: в кадре нет колонки дневного тренда {self._trend_column!r} (MtfState.attach)")
+        raw = ctx.frame[self._trend_column][-1]
+        want = BULLISH if signal.direction.value == "long" else BEARISH
+        if raw is not None and int(raw) == want:
+            return None
+        have = "нет данных" if raw is None else BIAS_LABELS[int(raw)]
+        return f"тренд 1d: {have} - {'лонг' if want == BULLISH else 'шорт'} только при {BIAS_LABELS[want]}"
 
     def _on_trade_finished(self, trade: VirtualTrade) -> None:
         held = self._held.pop(trade.trade_id, None)

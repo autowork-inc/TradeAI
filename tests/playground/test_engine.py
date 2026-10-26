@@ -62,7 +62,23 @@ def toy(monkeypatch):
         return [holder["s"]]
 
     monkeypatch.setattr(E, "build_strategies", build)
+    # механика исполнения проверяется без фильтра дневного тренда (на случайном блуждании дневка чаще Neutral - сделок не было бы);
+    # сам фильтр в Playground - test_daily_trend_filter_cuts_signals_in_playground
+    monkeypatch.setattr(E.D, "TREND_ONLY", False)
     return holder
+
+
+def test_daily_trend_filter_cuts_signals_in_playground(monkeypatch):
+    """Как в боте (2026-10-26): сигналы против тренда дневки, при Neutral и без данных - skipped_filter d1_trend, сделок по ним нет."""
+    monkeypatch.setattr(E, "build_strategies", lambda names, *, mtf=False, interval=None: [Toy()])
+    on = simulate(RunSpec("TESTUSDT", (SMC_COUNTER_TREND,), START, END), minutes())
+    monkeypatch.setattr(E.D, "TREND_ONLY", False)
+    off = simulate(RunSpec("TESTUSDT", (SMC_COUNTER_TREND,), START, END), minutes())
+    cut = [s for s in on.skipped if (s.get("detail") or {}).get("filter") == "d1_trend"]
+    assert cut, "фильтр дневки должен отсекать сигналы игрушечной стратегии"
+    assert all("тренд 1d" in s["detail"]["reason"] for s in cut)
+    assert not [s for s in off.skipped if (s.get("detail") or {}).get("filter") == "d1_trend"]
+    assert len(on.trades) < len(off.trades)
 
 
 def test_bars_are_closed_candles_and_market_fills_at_next_minute_open(toy):

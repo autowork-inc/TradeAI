@@ -20,6 +20,7 @@ from dataclasses import replace
 
 import polars as pl
 
+from features.htf import AVAIL_COLUMN, BIAS_COLUMN, H4_AVAIL, H4_BIAS
 from features.mtf import D1_AVAIL, D1_BIAS, H1_AVAIL, attach_table, d1_bias_table, h1_table
 from orchestrator.htf import HtfBias
 from orchestrator.journal import EventLog
@@ -33,7 +34,7 @@ class MtfState:
     def __init__(self, interval_ms: dict[str, int], events: EventLog | None = None, *, base: str | None = "5m", struct: str = "1h", bias: str = "1d",
                  legacy: str | None = "15m", legacy_bias: str = "4h"):
         """interval_ms - длительности используемых таймфреймов. base=None выключает MTF (остаётся только legacy), legacy=None выключает 4h-bias."""
-        needed = [x for x in (base, struct if base else None, bias if base else None, legacy, legacy_bias if legacy else None) if x]
+        needed = [x for x in (base, struct if base else None, bias, legacy, legacy_bias if legacy else None) if x]
         unknown = [x for x in needed if x not in interval_ms]
         if unknown:
             raise ConfigError(f"MtfState: нет длительности для таймфреймов {unknown}")
@@ -42,13 +43,14 @@ class MtfState:
         self.base, self.struct, self.bias, self.legacy, self.legacy_bias = base, struct, bias, legacy, legacy_bias
         self._ms = dict(interval_ms)
         self._h1: dict[str, pl.DataFrame] = {}
-        self._d1 = HtfBias(bias, interval_ms[bias], events, bias_column=D1_BIAS, avail_column=D1_AVAIL) if base else None
-        self._h4 = HtfBias(legacy_bias, interval_ms[legacy_bias], events) if legacy else None
+        # 2026-10-26: дневной тренд нужен ВСЕМ рабочим таймфреймам (5m и 15m) - фильтр «только по тренду дневки»; 4h-структура - только SMC_Counter_Trend
+        self._d1 = HtfBias(bias, interval_ms[bias], events, bias_column=D1_BIAS, avail_column=D1_AVAIL)
+        self._h4 = HtfBias(legacy_bias, interval_ms[legacy_bias], events, bias_column=H4_BIAS, avail_column=H4_AVAIL) if legacy else None
 
     @property
     def state_intervals(self) -> tuple[str, ...]:
         """Таймфреймы, контексты которых обновляют состояние (а не идут стратегиям)."""
-        return tuple(x for x in ((self.struct, self.bias) if self.base else ()) + ((self.legacy_bias,) if self.legacy else ()))
+        return tuple(dict.fromkeys(x for x in ((self.struct,) if self.base else ()) + (self.bias,) + ((self.legacy_bias,) if self.legacy else ())))
 
     # ------------------------------------------------------------------------------------------ обновление
 
@@ -58,7 +60,7 @@ class MtfState:
             if ctx.interval_ms != self._ms[self.struct]:
                 raise DataError(f"MtfState: {ctx.symbol} {ctx.interval}: interval_ms={ctx.interval_ms}, ожидалось {self._ms[self.struct]}")
             self._h1[ctx.symbol] = h1_table(ctx.frame, ctx.interval_ms)
-        elif self.base and ctx.interval == self.bias:
+        elif ctx.interval == self.bias:
             self._d1.update(ctx)
         elif self.legacy and ctx.interval == self.legacy_bias:
             self._h4.update(ctx)
@@ -67,16 +69,16 @@ class MtfState:
 
     def has(self, symbol: str) -> bool:
         """Есть состояние всех старших таймфреймов монеты (для рабочих таймфреймов, которые включены)."""
-        ok = True
+        ok = self._d1.has(symbol)
         if self.base:
-            ok = ok and symbol in self._h1 and self._d1.has(symbol)
+            ok = ok and symbol in self._h1
         if self.legacy:
             ok = ok and self._h4.has(symbol)
         return ok
 
     def current(self, symbol: str) -> int | None:
-        """Последний известный bias монеты: 1d (если включён MTF), иначе 4h."""
-        return (self._d1 if self.base else self._h4).current(symbol)
+        """Последний известный дневной тренд монеты (+1 / 0 / -1 / None)."""
+        return self._d1.current(symbol)
 
     # --------------------------------------------------------------------------------------- присоединение
 
@@ -85,8 +87,15 @@ class MtfState:
         if self.base and ctx.interval == self.base:
             return self._attach_mtf(ctx)
         if self.legacy and ctx.interval == self.legacy:
-            return self._h4.attach(ctx)
+            return self._attach_legacy(ctx)
         raise DataError(f"MtfState: рабочий таймфрейм {ctx.interval} не настроен (base={self.base}, legacy={self.legacy})")
+
+    def _attach_legacy(self, ctx: FeatureContext) -> FeatureContext:
+        """15m: дневной тренд (`1d_bias`; он же `htf_bias` - его читают фильтры тренда стратегий) + 4h-структура (`h4_bias`, только SMC_Counter_Trend).
+        Обе проверки «старший таймфрейм не отстаёт» - как раньше (HtfBias.attach)."""
+        with_d1 = self._d1.attach(ctx)
+        frame = with_d1.frame.with_columns(pl.col(D1_BIAS).alias(BIAS_COLUMN), pl.col(D1_AVAIL).alias(AVAIL_COLUMN))
+        return self._h4.attach(replace(ctx, frame=frame))
 
     def _attach_mtf(self, ctx: FeatureContext) -> FeatureContext:
         table = self._h1.get(ctx.symbol)

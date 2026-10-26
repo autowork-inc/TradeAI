@@ -31,8 +31,8 @@ def _signal_id(strategy: str, ctx: FeatureContext, direction: Direction) -> str:
     return f"{strategy}:{ctx.symbol}:{ctx.interval}:{ctx.bar_open_time}:{direction.value}"
 
 
-def _htf_meta(last: dict, column: str = BIAS_COLUMN, interval: str = D.HTF_INTERVAL) -> dict:
-    """Контекст старшего таймфрейма на сигнале (если оркестратор присоединил колонку bias; H4 или, в MTF-режиме, 1d): +1 Bullish / 0 Neutral / -1 Bearish.
+def _htf_meta(last: dict, column: str = BIAS_COLUMN, interval: str = D.TREND_INTERVAL) -> dict:
+    """Тренд старшего таймфрейма на сигнале (с 2026-10-26 - дневка у всех стратегий, MtfState): +1 Bullish / 0 Neutral / -1 Bearish.
     Попадает в снапшот и в причину входа."""
     bias = last.get(column)
     return {} if bias is None else {"htf_interval": interval, "htf_bias": int(bias), "htf_label": BIAS_LABELS[int(bias)]}

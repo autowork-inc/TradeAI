@@ -38,6 +38,12 @@ def _htf(meta: dict[str, Any]) -> tuple[str | None, str | None]:
     return f"{tf}: {label}", label
 
 
+def _tf(meta: dict[str, Any]) -> str:
+    """Таймфрейм тренда в meta сделки: с 2026-10-26 - 1D у всех стратегий; старые сделки - H4 (у них htf_interval нет или 4h)."""
+    raw = str(meta.get("htf_interval", "4h"))
+    return f"H{raw[:-1]}" if raw.endswith("h") and raw[:-1].isdigit() else raw.upper()
+
+
 def _smc(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[str, list[tuple[str, str]]]:
     short = trade["side"] == "short"
     pool, sweep_t, bars = _num(meta, "pool_level"), meta.get("sweep_time"), _num(meta, "bars_since_sweep")
@@ -98,13 +104,16 @@ def _counter_trend(trade: dict[str, Any], meta: dict[str, Any], interval: str) -
     pool, extreme, depth, vol = _num(meta, "pool_level"), _num(meta, "sweep_extreme"), _num(meta, "sweep_depth_atr"), _num(meta, "vol_ratio")
     htf_tag, htf_label = _htf(meta)
     steps = [
-        f"0. Контртренд: {'шорт' if short else 'лонг'} СТРОГО против структуры H4" + ("" if htf_tag is None else f" ({htf_tag})") + ".",
+        (f"0. Тренд {_tf(meta)}: {htf_label or '—'} - {'шорт' if short else 'лонг'} только по нему; откат СТРОГО против структуры H4"
+         + (f" ({meta['h4_label']})" if meta.get("h4_label") else "") + "." if meta.get("h4_label") or _tf(meta) != "H4"
+         else f"0. Контртренд: {'шорт' if short else 'лонг'} СТРОГО против структуры H4" + ("" if htf_tag is None else f" ({htf_tag})") + "."),
         f"1. Глубокий свип: цена {'выше' if short else 'ниже'} уровня {fmt_price(pool)} на {'—' if depth is None else f'{depth:.2f}'} ATR "
         f"(экстремум {fmt_price(extreme)}) и закрытие обратно за уровнем.",
         f"2. Аномальный объём разворотной свечи: ×{'—' if vol is None else f'{vol:.2f}'} от SMA20 предыдущих баров.",
         f"3. {_entry_line(trade)} Цель - скальп 1R.",
     ]
-    facts = [("Таймфрейм", interval)] + ([] if htf_tag is None else [("Тренд H4 (HTF Bias)", htf_label)]) + [
+    facts = [("Таймфрейм", interval)] + ([] if htf_tag is None else [(f"Тренд {_tf(meta)} (HTF Bias)", htf_label)]) + (
+             [("Структура H4 (откат против неё)", meta["h4_label"])] if meta.get("h4_label") else []) + [
              ("Уровень пула ликвидности", fmt_price(pool)), ("Экстремум свипа", fmt_price(extreme)),
              ("Глубина свипа, ATR", "—" if depth is None else f"{depth:.2f}"), ("Объём / SMA20", "—" if vol is None else f"{vol:.2f}"),
              ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
@@ -158,7 +167,7 @@ def _x(v: float | None, fmt: str) -> str:
 
 def _trend_line(meta: dict[str, Any]) -> str:
     label = meta.get("htf_label")
-    return f"старший тренд H4: {label}" if label else "старший тренд H4: —"
+    return f"старший тренд {_tf(meta)}: {label or '—'}"
 
 
 def _horizontal(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[str, list[tuple[str, str]]]:
@@ -202,7 +211,7 @@ def _chr_common(long: bool, meta: dict[str, Any]) -> tuple[str, str]:
     squeeze = (f"локальная база {meta.get('comp_bars') or '—'} баров: волатильность затухает (размах свежей половины = {_x(_num(meta, 'comp_decay'), '.0%')} от старой), "
                f"{'минимумы подтягиваются к уровню' if long else 'максимумы опускаются к уровню'} ({' -> '.join(pts) if pts else '—'}), "
                f"экстремумы трутся об уровень (в среднем {_x(_num(meta, 'comp_rub_atr'), '.2f')} ATR), высота базы {_x(_num(meta, 'comp_height_atr'), '.2f')} ATR")
-    return squeeze, f"{'Bullish' if long else 'Bearish'} (жёсткий фильтр: только по тренду H4)"
+    return squeeze, f"{'Bullish' if long else 'Bearish'} (жёсткий фильтр: только по тренду {_tf(meta)})"
 
 
 def _chr_horizontal(trade: dict[str, Any], meta: dict[str, Any], interval: str) -> tuple[str, list[tuple[str, str]]]:
@@ -210,14 +219,14 @@ def _chr_horizontal(trade: dict[str, Any], meta: dict[str, Any], interval: str) 
     level, touches = _num(meta, "level"), meta.get("touches")
     squeeze, trend = _chr_common(long, meta)
     steps = [
-        f"0. Тренд H4: {meta.get('htf_label') or '—'} - {'лонг' if long else 'шорт'} разрешён только по тренду.",
+        f"0. Тренд {_tf(meta)}: {meta.get('htf_label') or '—'} - {'лонг' if long else 'шорт'} разрешён только по тренду.",
         f"1. {'Сопротивление' if long else 'Поддержка'} {fmt_price(level)}: {touches if touches is not None else '—'} подтверждённых касаний "
         f"за {meta.get('window') or '—'} баров.",
         f"2. Поджатие к уровню: {squeeze}.",
         f"3. Пробой: закрытие {'выше' if long else 'ниже'} уровня полнотелой свечой (тело {_x(_num(meta, 'body_frac'), '.0%')} размаха).",
         f"4. {_entry_line(trade)} Стоп за ближайшим локальным свингом ({fmt_price(_num(meta, 'sl_extreme'))}) − 0.2 ATR, статичный; тейк 1:4 ({fmt_price(trade.get('tp'))}) на весь объём, частичных фиксаций и безубытка нет.",
     ]
-    facts = [("Таймфрейм", interval), ("Тренд H4", trend), ("Уровень", fmt_price(level)), ("Касаний уровня", str(touches if touches is not None else "—")),
+    facts = [("Таймфрейм", interval), (f"Тренд {_tf(meta)}", trend), ("Уровень", fmt_price(level)), ("Касаний уровня", str(touches if touches is not None else "—")),
              ("Поджатие", squeeze), ("Тело пробойной свечи", _x(_num(meta, "body_frac"), ".0%")), ("Риск, ATR", _x(_num(meta, "risk_atr"), ".2f")),
              ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]
     return "\n".join(steps), facts
@@ -229,7 +238,7 @@ def _chr_trendline(trade: dict[str, Any], meta: dict[str, Any], interval: str) -
     squeeze, trend = _chr_common(long, meta)
     line = "сопротивления (нисходящая)" if long else "поддержки (восходящая)"
     steps = [
-        f"0. Тренд H4: {meta.get('htf_label') or '—'} - {'лонг' if long else 'шорт'} разрешён только по тренду.",
+        f"0. Тренд {_tf(meta)}: {meta.get('htf_label') or '—'} - {'лонг' if long else 'шорт'} разрешён только по тренду.",
         f"1. Наклонная линия {line}: {fmt_price(_num(meta, 'anchor1_price'))} -> {fmt_price(_num(meta, 'anchor2_price'))}, "
         f"наклон {_x(_num(meta, 'slope_atr'), '+.3f')} ATR/бар, касаний {touches if touches is not None else '—'}, экстремумы за линию не выходили.",
         f"2. Поджатие к линии: {squeeze}.",
@@ -237,7 +246,7 @@ def _chr_trendline(trade: dict[str, Any], meta: dict[str, Any], interval: str) -
         f"(тело {_x(_num(meta, 'body_frac'), '.0%')} размаха).",
         f"4. {_entry_line(trade)} Стоп за ближайшим локальным свингом ({fmt_price(_num(meta, 'sl_extreme'))}) − 0.2 ATR, статичный; тейк 1:4 ({fmt_price(trade.get('tp'))}) на весь объём, частичных фиксаций и безубытка нет.",
     ]
-    facts = [("Таймфрейм", interval), ("Тренд H4", trend), ("Линия на сигнале", fmt_price(_num(meta, "line_level"))),
+    facts = [("Таймфрейм", interval), (f"Тренд {_tf(meta)}", trend), ("Линия на сигнале", fmt_price(_num(meta, "line_level"))),
              ("Наклон, ATR за бар", _x(_num(meta, "slope_atr"), "+.3f")), ("Касаний линии", str(touches if touches is not None else "—")),
              ("Поджатие", squeeze), ("Тело пробойной свечи", _x(_num(meta, "body_frac"), ".0%")), ("Риск, ATR", _x(_num(meta, "risk_atr"), ".2f")),
              ("ATR(14) на сигнале", fmt_price(_num(meta, "atr")))]

@@ -29,6 +29,7 @@ from orchestrator.core import Orchestrator, Route
 from orchestrator.feature_engine import FeatureEngine
 from orchestrator.journal import MemoryEventLog
 from orchestrator.minute_bars import MarketEntryGuard, MinuteBars
+from features.mtf import D1_BIAS
 from orchestrator.mtf import MtfState
 from orchestrator.multi_strategies import OBI_BREAKOUT
 from orchestrator.registry import AUTO_TP_SKIP, SHADOW_STRATEGIES, build_strategies, ensure_history_depth, plans_for, strategy_allowed
@@ -128,7 +129,8 @@ def simulate(spec: RunSpec, minutes: pl.DataFrame, on_progress: Callable[[float]
     tracker = VirtualTracker(events, equity=10_000.0, recorder=rec, plans=_plans(names, spec.tp_r))
     bars_1m = MinuteBars()
     orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, tracker) for s in strategies}, events, recorder=rec,
-                        signal_gates=[MarketEntryGuard(bars_1m)], symbol_filter=strategy_allowed)
+                        signal_gates=[MarketEntryGuard(bars_1m)], symbol_filter=strategy_allowed,
+                        trend_column=D1_BIAS if D.TREND_ONLY else None)  # как в боте: только по тренду дневки (2026-10-26)
     htf = MtfState(config.INTERVAL_MS, events, base=D.MTF_BASE_INTERVAL if mtf else None, struct=D.MTF_STRUCT_INTERVAL, bias=D.MTF_BIAS_INTERVAL,
                    legacy=WORK_INTERVAL if legacy else None, legacy_bias=D.HTF_INTERVAL)
     state_tfs = list(htf.state_intervals)

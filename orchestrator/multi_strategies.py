@@ -1,7 +1,7 @@
 """Четыре стратегии мульти-стратегийного Shadow (2026-10-11): чистые `detect(FeatureContext) -> tuple[Signal, ...]` поверх векторных детекторов
 пакета `strategies/` (R8: один код для бэктеста и live; берётся только последняя строка).
 
-  SMC_Counter_Trend  strategies/counter_trend.py   контртренд H4: глубокий свип (>= 1.5 ATR) + объём > 1.5 SMA20, скальп 1R
+  SMC_Counter_Trend  strategies/counter_trend.py   откат против 4h-структуры (глубокий свип >= 1.5 ATR + объём > 1.5 SMA20) - с 2026-10-26 только по тренду дневки
   OBI_Breakout       strategies/obi_breakout.py    BOS локального экстремума + дисбаланс стакана / всплеск дельты ленты
   ICT_Killzones      strategies/killzones.py       свип границ Азиатской сессии в killzone Лондона / Нью-Йорка
   VWAP_Reversion     strategies/vwap_reversion.py  возврат от 3-го стандартного отклонения Anchored VWAP (дневной якорь)
@@ -9,6 +9,10 @@
   Trendline_Breakout   strategies/trendline_breakout.py   пробой / свип трендовой линии по двум свингам (2026-10-18, только Shadow)
   Horizontal_Breakout_CHR  strategies/chr_horizontal.py  пробой уровня после поджатия, жёсткий тренд H4, статичный стоп (2026-10-19, только Shadow)
   Trendline_Breakout_CHR   strategies/chr_trendline.py   пробой наклонки после поджатия, жёсткий тренд H4, статичный стоп (2026-10-19, только Shadow)
+
+Тренд (2026-10-26, решение пользователя): все стратегии торгуют ТОЛЬКО по тренду дневки. Колонка `htf_bias` 15m-кадра - дневной тренд (MtfState),
+поэтому встроенные фильтры тренда стратегий работают по 1d; Оркестратор дополнительно отсекает любой сигнал против дневки (trend_column), включая
+стратегии без своего фильтра (OBI_Breakout, ICT_Killzones с выключенным require_htf_trend).
 
 Все четыре входят MARKET (по первому тику после закрытия свечи; R и плечо считаются по факту входа в трекере). Планы управления позицией -
 orchestrator/registry.py. Состояний автомата сетапа (S0..S4) у них нет: решение принимается на одной закрытой свече.
@@ -18,6 +22,7 @@ from typing import Any
 
 import polars as pl
 
+from features.htf import BIAS_COLUMN, BIAS_LABELS, H4_BIAS
 from orchestrator.strategies import _htf_meta, _signal_id
 from orchestrator.types import Direction, FeatureContext, Kind, Signal, geometry
 from strategies.chr_horizontal import ChrHorizontalParams, detect_chr_horizontal
@@ -67,7 +72,13 @@ class StrategyCounterTrend:
         self.params = params or CounterTrendParams()
 
     def detect(self, ctx: FeatureContext) -> tuple[Signal, ...]:
-        det = detect_counter_trend(ctx.frame, self.params)
+        # детектор ищет свип ПРОТИВ структуры, переданной в `htf_bias`: даём ему 4h-структуру (`h4_bias`), а не дневку - это откат против 4h;
+        # направление по дневке проверяет Оркестратор (откат против 4h берётся только тогда, когда он идёт ПО тренду дневки)
+        frame = ctx.frame
+        daily = frame[BIAS_COLUMN][-1] if BIAS_COLUMN in frame.columns else None
+        if H4_BIAS in frame.columns:
+            frame = frame.with_columns(pl.col(H4_BIAS).alias(BIAS_COLUMN))
+        det = detect_counter_trend(frame, self.params)
         last, prev = _last(det), det.row(det.height - 2, named=True)
         out = []
         for side, pool_time_col in (("short", "sh1_time"), ("long", "sl1_time")):
@@ -83,7 +94,8 @@ class StrategyCounterTrend:
             )
             out.append(_market_signal(self.name, ctx, direction, sl, geo, {
                 "pool_level": pool, "sweep_extreme": extreme, "sweep_depth_atr": last[f"ct_{side}_depth_atr"],
-                "vol_ratio": last[f"ct_{side}_vol_ratio"], "atr": last["atr"], **_htf_meta(last)}))
+                "vol_ratio": last[f"ct_{side}_vol_ratio"], "atr": last["atr"], **_htf_meta({BIAS_COLUMN: daily}),
+                **({} if last.get(BIAS_COLUMN) is None or H4_BIAS not in ctx.frame.columns else {"h4_bias": int(last[BIAS_COLUMN]), "h4_label": BIAS_LABELS[int(last[BIAS_COLUMN])]})}))
         return tuple(out)
 
 

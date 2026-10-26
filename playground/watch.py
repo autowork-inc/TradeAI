@@ -13,7 +13,8 @@ from typing import Any, Callable
 
 import polars as pl
 
-from features.htf import BIAS_COLUMN
+from features import defaults as D
+from features.htf import BIAS_COLUMN, H4_BIAS
 from features.mtf import D1_BIAS
 from orchestrator.types import FeatureContext
 from strategies.chr_horizontal import detect_chr_horizontal
@@ -120,19 +121,19 @@ def _smc(s, ctx: FeatureContext) -> tuple[dict, list, str]:
 def _counter(s, ctx: FeatureContext) -> tuple[dict, list, str]:
     f = ctx.frame
     last = f.row(f.height - 1, named=True)
-    bias, atr, close, t, p = last.get(BIAS_COLUMN), _f(last["atr"]), ctx.last_close, ctx.bar_open_time, s.params
+    bias, atr, close, t, p = last.get(H4_BIAS, last.get(BIAS_COLUMN)), _f(last["atr"]), ctx.last_close, ctx.bar_open_time, s.params
     sides, geo = {}, []
     for side, pool_col, time_col in (("short", "sh1_price", "sh1_time"), ("long", "sl1_price", "sl1_time")):
         pool = _f(last.get(pool_col))
-        against = bias == (1 if side == "short" else -1)  # строго против H4
+        against = bias == (1 if side == "short" else -1)  # откат строго против 4h-структуры (направление - по дневке, проверка в view)
         d = _dist(close, pool, atr)
-        checks = [_chk("H4 строго против стороны", against, BIAS_RU.get(bias)), _chk("пул (последний свинг)", pool is not None, "—" if pool is None else f"{pool:g}"),
+        checks = [_chk("4h-структура против стороны (откат)", against, BIAS_RU.get(bias)), _chk("пул (последний свинг)", pool is not None, "—" if pool is None else f"{pool:g}"),
                   _chk(f"свип глубже {p.min_sweep_atr:g} ATR", None, f"до пула {_atr(d)}"),
                   _chk(f"объём > {p.volume_mult:g}×SMA20", None, f"сейчас ×{_f(last.get('vol_ratio')) or 0:.2f}")]
-        text = "ждёт глубокий свип пула и возврат" if against else "H4 не против этой стороны - не торгует"
+        text = "ждёт глубокий свип пула и возврат" if against else "4h не против этой стороны - отката нет"
         sides[side] = _side(checks, pool is not None and against, False, text)
         geo.append(_line(last.get(time_col), t, pool, pool, "пул " + ("сверху" if side == "short" else "снизу"), side))
-    return sides, geo, f"H4: {BIAS_RU.get(bias)} - контртренд"
+    return sides, geo, f"4h: {BIAS_RU.get(bias)} - откат по тренду дневки"
 
 
 def _obi(s, ctx: FeatureContext) -> tuple[dict, list, str]:
@@ -164,7 +165,7 @@ def _ict(s, ctx: FeatureContext) -> tuple[dict, list, str]:
                   _chk("идёт killzone", sess in ("london", "new_york"), sess_ru),
                   _chk(f"прокол ≥ {p.min_sweep_depth_atr:g} ATR и возврат", None, f"до {name}: {_atr(_dist(close, level, atr))}")]
         if p.require_htf_trend:
-            checks.append(_chk("тренд H4 по стороне", _trend_ok(side, last.get(BIAS_COLUMN)), BIAS_RU.get(last.get(BIAS_COLUMN))))
+            checks.append(_chk("тренд 1d по стороне", _trend_ok(side, last.get(BIAS_COLUMN)), BIAS_RU.get(last.get(BIAS_COLUMN))))
         sides[side] = _side(checks, level is not None, bool(last.get(f"kz_{side}_signal")), f"ждёт ложный пробой {name} в killzone")
         geo.append(_line(day0, ctx.bar_close_ms, level, level, name, side))
     return sides, geo, sess_ru
@@ -181,7 +182,7 @@ def _vwap(s, ctx: FeatureContext) -> tuple[dict, list, str]:
     for side, band_col in (("short", "vw_upper"), ("long", "vw_lower")):
         band = _f(last.get(band_col))
         d = _dist(close, band, atr)
-        checks = [_chk("тренд H4 по стороне", _trend_ok(side, bias) if p.require_htf_trend else None, BIAS_RU.get(bias)),
+        checks = [_chk("тренд 1d по стороне", _trend_ok(side, bias) if p.require_htf_trend else None, BIAS_RU.get(bias)),
                   _chk(f"касание полосы {p.sd_mult:g}σ", None if d is None else d <= 0.3, f"до полосы {_atr(d)}"),
                   _chk("разворотная свеча", None, "поглощение / падающая звезда на касании")]
         sides[side] = _side(checks, band is not None, bool(last.get(f"vw_{side}_signal")), "ждёт касание полосы и разворот; тейк - линия VWAP")
@@ -203,7 +204,7 @@ def _horizontal(s, ctx: FeatureContext) -> tuple[dict, list, str]:
     for side, edge in (("long", hi), ("short", lo)):
         checks = [_chk(f"высота коробки {p.min_box_atr:g}-{p.max_box_atr:g} ATR", None if box_atr is None else p.min_box_atr <= box_atr <= p.max_box_atr, _atr(box_atr)),
                   _chk(f"боковик (ER ≤ {p.max_efficiency:g})", None if eff is None else eff <= p.max_efficiency, "—" if eff is None else f"ER {eff:.2f}"),
-                  _chk("H4 не против", None if bias is None else bias != (-1 if side == "long" else 1), BIAS_RU.get(bias)),
+                  _chk("тренд 1d по стороне", _trend_ok(side, bias), BIAS_RU.get(bias)),
                   _chk(f"закрытие за границей ≤ {p.max_extension_atr:g} ATR, объём ≥ {p.volume_mult:g}×", None, f"до границы {_atr(_dist(close, edge, atr))}")]
         sides[side] = _side(checks, box_ok, bool(last.get(f"hb_{side}_signal")), "ждёт пробой коробки" if box_ok else "коробки нет (не боковик или не та высота)")
     return sides, geo, "консолидация найдена" if box_ok else "консолидации нет"
@@ -220,18 +221,18 @@ def _trendline(s, ctx: FeatureContext) -> tuple[dict, list, str]:
         viol, touches = last.get(f"_tl_{k}_viol"), last.get(f"_tl_{k}_touches")
         checks = [_chk("линия по 2 свингам", valid, f"наклон {_f(last.get(f'_tl_{k}_slope_atr')) or 0:.2f} ATR/бар"),
                   _chk("ни одного закрытия за линией", None if viol is None else viol == 0, f"нарушений {viol}"),
-                  _chk("H4 не против", None if bias is None else bias != (-1 if side == "long" else 1), BIAS_RU.get(bias)),
+                  _chk("тренд 1d по стороне", _trend_ok(side, bias), BIAS_RU.get(bias)),
                   _chk("пробой / свип линии", None, f"до линии {_atr(_dist(close, now, atr))}")]
         sides[side] = _side(checks, valid, bool(last.get(f"tl_{side}_signal")), f"ждёт пробой линии ({name})" if valid else f"нет годной линии ({name})")
         geo.append(_line(last.get(f"_tl_{k}_t2"), ctx.bar_close_ms, _f(last.get(f"_tl_{k}_p2")), now, f"линия: {name}", side))
-    return sides, geo, f"H4: {BIAS_RU.get(bias)}"
+    return sides, geo, f"1d: {BIAS_RU.get(bias)}"
 
 
 def _chr_checks(p, last: dict, pre: str, side: str, close: float, level: float | None, atr: float | None) -> list[dict]:
     bias = last.get(BIAS_COLUMN)
     touches, decay = last.get(pre + "touches"), _f(last.get(pre + "comp_decay"))
     rub, height, risk = _f(last.get(pre + "comp_rub_atr")), _f(last.get(pre + "comp_height_atr")), _f(last.get(pre + "risk_atr"))
-    return [_chk("тренд H4 по стороне (жёстко)", _trend_ok(side, bias), BIAS_RU.get(bias)),
+    return [_chk("тренд 1d по стороне (жёстко)", _trend_ok(side, bias), BIAS_RU.get(bias)),
             _chk(f"касаний ≥ {p.min_touches}", None if touches is None else touches >= p.min_touches, f"{touches}"),
             _chk(f"затухание размаха ≤ {p.comp_decay:g}", None if decay is None else decay <= p.comp_decay, "—" if decay is None else f"{decay:.2f}"),
             _chk(f"трение об уровень ≤ {p.comp_rub_atr:g} ATR", None if rub is None else rub <= p.comp_rub_atr, _atr(rub)),
@@ -253,7 +254,7 @@ def _chr_h(s, ctx: FeatureContext) -> tuple[dict, list, str]:
         sides[side] = _side(checks, level is not None, bool(last.get(f"chh_{side}_signal")), "ждёт поджатие и пробой уровня")
         geo += [_line(t0, ctx.bar_close_ms, level, level, "уровень", side),
                 _line(last.get(pre + "squeeze_start_t"), last.get(pre + "squeeze_last_t"), _f(last.get(pre + "squeeze_2")), _f(last.get(pre + "squeeze_1")), "поджатие", side)]
-    return sides, geo, f"H4: {BIAS_RU.get(last.get(BIAS_COLUMN))}"
+    return sides, geo, f"1d: {BIAS_RU.get(last.get(BIAS_COLUMN))}"
 
 
 def _chr_t(s, ctx: FeatureContext) -> tuple[dict, list, str]:
@@ -273,7 +274,7 @@ def _chr_t(s, ctx: FeatureContext) -> tuple[dict, list, str]:
             geo += [_line(last.get(pre + "anchor1_time"), ctx.bar_close_ms, _f(last.get(pre + "anchor1_price")), level, "наклонная линия", side),
                     _line(last.get(pre + "squeeze_start_t"), last.get(pre + "squeeze_last_t"), _f(last.get(pre + "squeeze_2")), _f(last.get(pre + "squeeze_1")),
                           "поджатие", side)]
-    return sides, geo, f"H4: {BIAS_RU.get(last.get(BIAS_COLUMN))}"
+    return sides, geo, f"1d: {BIAS_RU.get(last.get(BIAS_COLUMN))}"
 
 
 BUILDERS: dict[str, Callable] = {
@@ -290,6 +291,15 @@ def view(strategy, ctx: FeatureContext, candles: int = 150) -> dict[str, Any]:
         signals = ()  # без стакана и ленты (MicroStructure) детектор не считается: показываются только уровни
     else:
         signals = analyze(ctx)[0] if analyze is not None else strategy.detect(ctx)
+    if D.TREND_ONLY:  # 2026-10-26: бот торгует только по тренду дневки (Оркестратор, trend_column) - показываем то же самое
+        daily = ctx.frame[D1_BIAS][-1] if D1_BIAS in ctx.frame.columns else None
+        daily = None if daily is None else int(daily)
+        signals = tuple(sg for sg in signals if _trend_ok(sg.direction.value, daily))
+        for side, sd in sides.items():
+            if not any(c["label"].startswith("тренд 1d") for c in sd["checks"]):
+                sd["checks"].insert(0, _chk("тренд 1d по стороне", _trend_ok(side, daily), BIAS_RU.get(daily)))
+            if not _trend_ok(side, daily):
+                sd["stage"], sd["text"] = 0, f"против тренда 1d ({BIAS_RU.get(daily)}) - не торгует"
     for sig in signals:  # настоящий сигнал детектора: его геометрия (вход, SL, линии) - поверх
         geo += [{**g, "side": sig.direction.value, "signal": True} for g in sig.geometry]
         sides[sig.direction.value]["stage"] = 3

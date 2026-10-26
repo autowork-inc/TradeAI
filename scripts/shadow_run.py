@@ -44,6 +44,7 @@ import aiohttp
 
 import config
 from features import defaults as D
+from features.mtf import D1_BIAS
 from features.smc import SmcParams
 from orchestrator.core import Orchestrator, Route
 from orchestrator.feature_engine import FeatureEngine
@@ -313,7 +314,10 @@ async def shadow_main(opts: Options) -> None:
                                         cache_path=config.DATA_DIR / config.NEWS_CACHE_NAME, tag_only=config.NEWS_FILTER_MODE != "block")
                     gates.append(news)
                 # новые сигналы - только по отслеживаемым монетам (live-уровень, Binance Test, MT5); OBI_Breakout - ещё и только где есть стакан (live-уровень), см. config.STRATEGY_SYMBOLS
+                if D.TREND_ONLY and not D.HTF_FILTER_ENABLED:
+                    raise ConfigError("TREND_ONLY (торговля только по тренду дневки) требует HTF_FILTER_ENABLED: без фида 1d тренда нет")
                 orch = Orchestrator(strategies, {s.name: Route(Mode.SHADOW, sink) for s in strategies}, events, recorder=recorder, signal_gates=gates,
+                                  trend_column=D1_BIAS if D.TREND_ONLY else None,
                                   symbol_filter=(lambda n, s: universe.tracked(s) and strategy_allowed(n, s)) if universe is not None
                                   else (lambda n, s: s in signal_symbols and strategy_allowed(n, s)))
 
@@ -330,10 +334,11 @@ async def shadow_main(opts: Options) -> None:
                         state_.append(SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=syms, interval=D.HTF_INTERVAL, history_bars=D.HTF_HISTORY_BARS,
                                                    emit_latest_on_start=True))
                         if mtf:
-                            state_ += [SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=syms, interval=D.MTF_STRUCT_INTERVAL,
-                                                    history_bars=D.MTF_STRUCT_HISTORY_BARS, emit_latest_on_start=True),
-                                       SmcKlineFeed(api, session, FeatureEngine(SmcParams(), min_bars=D1_MIN_BARS), symbols=syms, interval=D.MTF_BIAS_INTERVAL,
-                                                    history_bars=D.MTF_BIAS_HISTORY_BARS, emit_latest_on_start=True)]
+                            state_.append(SmcKlineFeed(api, session, FeatureEngine(SmcParams()), symbols=syms, interval=D.MTF_STRUCT_INTERVAL,
+                                                       history_bars=D.MTF_STRUCT_HISTORY_BARS, emit_latest_on_start=True))
+                        # дневка - всегда: с 2026-10-26 по её тренду торгуют ВСЕ стратегии (и 15m тоже)
+                        state_.append(SmcKlineFeed(api, session, FeatureEngine(SmcParams(), min_bars=D1_MIN_BARS), symbols=syms, interval=D.MTF_BIAS_INTERVAL,
+                                                   history_bars=D.MTF_BIAS_HISTORY_BARS, emit_latest_on_start=True))
                     return work_, state_
 
                 # Рабочие фиды (контексты идут стратегиям): 15m (opts.interval) всегда, 5m - для SMC_Pro_Trend. Фиды состояния (1h, 1d, 4h) стратегиям не идут.
@@ -371,9 +376,10 @@ async def shadow_main(opts: Options) -> None:
                     mt5_feed = Mt5KlineFeed(mt5_client, FeatureEngine(SmcParams()), broker_name=mt5_link.broker_name, symbols=mt5_wanted,
                                             history_bars=opts.history, emit=mtf, link=mt5_link)
                     if htf_feed is not None:
-                        views = [mt5_feed.htf_view(FeatureEngine(SmcParams()))]
+                        # дневка - всегда (2026-10-26: тренд всех стратегий по 1d), 1h - только для SMC_Pro_Trend
+                        views = [mt5_feed.htf_view(FeatureEngine(SmcParams())), mt5_feed.d1_view(FeatureEngine(SmcParams(), min_bars=D1_MIN_BARS))]
                         if mtf:
-                            views += [mt5_feed.h1_view(FeatureEngine(SmcParams())), mt5_feed.d1_view(FeatureEngine(SmcParams(), min_bars=D1_MIN_BARS))]
+                            views.append(mt5_feed.h1_view(FeatureEngine(SmcParams())))
                         htf_feed = MultiFeed([htf_feed, *views])
                     # Порядок: производный 15m раньше первичного M5 - M5 последним забирает снимок хранилища цикла (см. mt5_feeds.py)
                     feed = MultiFeed([feed, mt5_feed.m15_view(FeatureEngine(SmcParams())), mt5_feed])
