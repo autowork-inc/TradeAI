@@ -131,6 +131,8 @@ if %N% GEQ 90 goto fail
 timeout /t 1 /nobreak >nul
 goto retry
 :done
+set "_MEIPASS2="
+set "PYINSTALLER_RESET_ENVIRONMENT=1"
 start "" "%EXE%"
 del "%~f0"
 exit /b 0
@@ -149,6 +151,17 @@ def write_swap_script(new: Path, exe: Path, directory: Path) -> Path:
     return script
 
 
+def clean_launch_env(env: dict[str, str]) -> dict[str, str]:
+    """Окружение для запуска НОВОГО .exe из работающего старого (однофайловая сборка PyInstaller).
+
+    Старый процесс держит в переменных окружения путь к своей временной папке `_MEIxxxx` (`_MEIPASS2`, `_PYI_*`); новый .exe, унаследовав их, ищет
+    python312.dll в чужой папке, которую старый процесс при выходе уже удалил: «Failed to load Python DLL ... python312.dll. LoadLibrary: Не найден
+    указанный модуль». Поэтому эти переменные убираем, а `PYINSTALLER_RESET_ENVIRONMENT=1` велит загрузчику считать запуск чистым (1.9.2)."""
+    clean = {k: v for k, v in env.items() if not (k.upper().startswith("_PYI") or k.upper() == "_MEIPASS2")}
+    clean["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return clean
+
+
 def launch_swap(script: Path) -> None:
     """Запустить помощника так, чтобы он пережил завершение клиента: клиент при выходе убивает своё дерево процессов (taskkill /T), поэтому помощник
     стартует через PowerShell Start-Process - у него не остаётся родителя, и дерево до него не дотягивается."""
@@ -156,6 +169,7 @@ def launch_swap(script: Path) -> None:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         subprocess.run(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], check=True, timeout=30, creationflags=flags,
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       env=clean_launch_env(dict(os.environ)))
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError(f"Не удалось запустить установку обновления: {exc}") from exc

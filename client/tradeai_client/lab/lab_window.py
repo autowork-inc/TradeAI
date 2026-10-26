@@ -15,7 +15,7 @@ from tradeai_client.lab import detect, market, match, remote, setups, store, tun
 log = logging.getLogger("tradeai_client.lab")
 WEB_DIR = Path(__file__).resolve().parent.parent / "lab_web"
 CHART_LIB = Path(__file__).resolve().parent.parent / "chart_web" / "lightweight-charts.js"
-ANALYZE_BARS = 600  # окно, на котором бот «смотрит» (быстро и как у трейдера на экране)
+ANALYZE_BARS = 1500  # окно, на котором бот «смотрит»: уровни и ликвидность сохраняются и вне экрана (1.9.2)
 
 
 def _js_json(value: Any) -> str:
@@ -115,6 +115,41 @@ class LabApi:
         except remote.RemoteError as exc:
             sent = str(exc)
         return _ok(id=ls["id"], sent=sent)
+
+    # ---- слепки рынка с комментарием
+    def save_snapshot(self, snap: dict) -> dict[str, Any]:
+        """Слепок: картинка графика с линиями (ваши и бота) + комментарий + данные момента. Локально - всегда, на сервер - если есть связь."""
+        try:
+            meta = store.save_snapshot({**snap, "author": snap.get("author") or self._s["author"]}, self._root)
+        except store.StoreError as exc:
+            return _err(exc)
+        sent = None
+        try:
+            remote.push_snapshot(self._s["server"].get("url", ""), self._s["server"].get("key", ""), self._space, store.load_snapshot(meta["id"], self._root, with_image=True))
+            sent = True
+        except (remote.RemoteError, store.StoreError) as exc:
+            sent = str(exc)
+        return _ok(id=meta["id"], sent=sent)
+
+    def list_snapshots(self) -> dict[str, Any]:
+        try:
+            return _ok(items=store.list_snapshots(self._root))
+        except store.StoreError as exc:
+            return _err(exc)
+
+    def get_snapshot(self, snap_id: str) -> dict[str, Any]:
+        try:
+            m = store.load_snapshot(snap_id, self._root, with_image=True)
+        except store.StoreError as exc:
+            return _err(exc)
+        return _ok(snapshot={k: m[k] for k in ("id", "created", "author", "symbol", "tf", "t", "comment", "image")})
+
+    def delete_snapshot(self, snap_id: str) -> dict[str, Any]:
+        try:
+            store.delete_snapshot(snap_id, self._root)
+        except store.StoreError as exc:
+            return _err(exc)
+        return _ok()
 
     def list_lessons(self) -> dict[str, Any]:
         try:

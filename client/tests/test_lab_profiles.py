@@ -153,7 +153,7 @@ class FakeServer:
     """Сервер как в api/lab.py: каталог на каждое пространство."""
 
     def __init__(self):
-        self.data = {"santa": {"lessons": {}, "vocab": []}, "chr": {"lessons": {}, "vocab": []}}
+        self.data = {"santa": {"lessons": {}, "vocab": [], "snaps": {}}, "chr": {"lessons": {}, "vocab": [], "snaps": {}}}
 
     def install(self, monkeypatch):
         sp = lambda space: self.data[remote._sp(space)]  # noqa: E731
@@ -162,6 +162,9 @@ class FakeServer:
         monkeypatch.setattr(remote, "push_lesson", lambda b, k, space, ls: sp(space)["lessons"].__setitem__(ls["id"], ls))
         monkeypatch.setattr(remote, "get_vocab", lambda b, k, space: list(sp(space)["vocab"]))
         monkeypatch.setattr(remote, "push_vocab", lambda b, k, space, items: sp(space).__setitem__("vocab", list(items)))
+        monkeypatch.setattr(remote, "list_snapshots", lambda b, k, space: [{"id": i} for i in sp(space)["snaps"]])
+        monkeypatch.setattr(remote, "get_snapshot", lambda b, k, space, i: sp(space)["snaps"][i])
+        monkeypatch.setattr(remote, "push_snapshot", lambda b, k, space, m: sp(space)["snaps"].__setitem__(m["id"], m))
 
 
 def test_sync_exchanges_only_inside_own_space(tmp_path, monkeypatch):
@@ -171,17 +174,17 @@ def test_sync_exchanges_only_inside_own_space(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADEAI_LAB_DIR", str(tmp_path / "pc_santa"))
     store.save_lesson(level_lesson("SANTA"), store.lab_dir("SANTA"))
     store.add_term("Имбаланс", "box", root=store.lab_dir("SANTA"))
-    assert lab_sync.sync("u", "k", "SANTA") == {"space": "santa", "up": 1, "down": 0, "terms": 1}
+    assert lab_sync.sync("u", "k", "SANTA") == {"space": "santa", "up": 1, "down": 0, "terms": 1, "snap_up": 0, "snap_down": 0}
     # ПК CHR: свой урок уходит в chr, урок SANTA не приходит
     monkeypatch.setenv("TRADEAI_LAB_DIR", str(tmp_path / "pc_chr"))
     store.save_lesson(level_lesson("CHR", "ETHUSDT"), store.lab_dir("CHR"))
-    assert lab_sync.sync("u", "k", "CHR") == {"space": "chr", "up": 1, "down": 0, "terms": 0}
+    assert lab_sync.sync("u", "k", "CHR") == {"space": "chr", "up": 1, "down": 0, "terms": 0, "snap_up": 0, "snap_down": 0}
     assert len(srv.data["santa"]["lessons"]) == 1 and len(srv.data["chr"]["lessons"]) == 1
     assert [x["author"] for x in srv.data["chr"]["lessons"].values()] == ["CHR"] and srv.data["chr"]["vocab"] == []
     assert [x["symbol"] for x in store.list_lessons(store.lab_dir("CHR"))] == ["ETHUSDT"]
     # второй ПК SANTA получает только уроки SANTA и его понятия
     monkeypatch.setenv("TRADEAI_LAB_DIR", str(tmp_path / "pc_santa2"))
-    assert lab_sync.sync("u", "k", "SANTA") == {"space": "santa", "up": 0, "down": 1, "terms": 1}
+    assert lab_sync.sync("u", "k", "SANTA") == {"space": "santa", "up": 0, "down": 1, "terms": 1, "snap_up": 0, "snap_down": 0}
     assert [x["author"] for x in store.list_lessons(store.lab_dir("SANTA"))] == ["SANTA"]
     assert store.list_lessons(store.lab_dir("CHR")) == []
 
@@ -246,3 +249,83 @@ def test_tune_never_makes_agreement_worse_and_is_deterministic():
         tuned, _ = detect.run(bars, IV["15m"], ["level"], a["params"])
         s = match.compare({**lesson, "complete_types": ["level"]}, tuned)["by_type"]["level"]
         assert (s["tp"], s["fn"], s["fp"]) == (rep["after"]["tp"], rep["after"]["fn"], rep["after"]["fp"])
+
+
+
+# ------------------------------------------------------------------------------------------ 1.9.2: слепки с комментарием, 1D, уровни вне экрана
+
+
+PNG = "data:image/png;base64," + __import__("base64").b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 64).decode()
+
+
+def snap(comment="Здесь вход, потому что уровень отработал 3 раза", **kw):
+    r = rows(60)
+    return {"symbol": "wldusdt", "tf": "1d", "comment": comment, "image": PNG, "bars": r, "t": r[-1][0], "drawings": [{"id": "a", "tool": "hline", "term": "level"}],
+            "bot_objects": [{"type": "level", "kind": "hline", "p1": 1.0}], **kw}
+
+
+def test_snapshot_keeps_picture_comment_and_market_data_per_profile(base):
+    s, c = store.lab_dir("SANTA"), store.lab_dir("CHR")
+    meta = store.save_snapshot(snap(author="SANTA"), s)
+    assert meta["symbol"] == "WLDUSDT" and meta["tf"] == "1d" and len(meta["bars"]) == 60 and meta["drawings"][0]["term"] == "level"
+    assert (s / "snapshots" / f"{meta['id']}.png").read_bytes().startswith(b"\x89PNG")
+    full = store.load_snapshot(meta["id"], s, with_image=True)
+    assert full["image"] == PNG and full["comment"].startswith("Здесь вход")
+    assert [x["id"] for x in store.list_snapshots(s)] == [meta["id"]] and store.list_snapshots(c) == []
+    with pytest.raises(store.StoreError):
+        store.load_snapshot(meta["id"], c)
+    store.delete_snapshot(meta["id"], s)
+    assert store.list_snapshots(s) == [] and not list((s / "snapshots").iterdir())
+
+
+@pytest.mark.parametrize("bad", [{"comment": "  "}, {"image": "data:image/png;base64,@@@"}, {"image": "data:image/png;base64," + "AAAA"}, {"image": ""}, {"tf": "2h"}, {"symbol": "../x"}])
+def test_snapshot_rejects_empty_comment_and_broken_input(base, bad):
+    with pytest.raises(store.StoreError):
+        store.save_snapshot({**snap(), **bad}, store.lab_dir("SANTA"))
+    assert store.list_snapshots(store.lab_dir("SANTA")) == []
+
+
+def test_snapshot_bridge_and_sync_stay_inside_the_profile(tmp_path, monkeypatch):
+    srv = FakeServer()
+    srv.install(monkeypatch)
+    monkeypatch.setenv("TRADEAI_LAB_DIR", str(tmp_path / "pc1"))
+    api = lab_window.LabApi({"profile": "CHR", "author": "CHR", "server": {"url": "u", "key": "k"}})
+    saved = api.save_snapshot(snap())
+    assert saved["ok"] and saved["sent"] is True and list(srv.data["chr"]["snaps"]) == [saved["id"]] and srv.data["santa"]["snaps"] == {}
+    assert api.save_snapshot(snap(comment=""))["ok"] is False
+    got = api.get_snapshot(saved["id"])["snapshot"]
+    assert got["image"] == PNG and got["author"] == "CHR" and api.list_snapshots()["items"][0]["comment"].startswith("Здесь вход")
+    # второй ПК CHR получает слепок, ПК SANTA - нет
+    monkeypatch.setenv("TRADEAI_LAB_DIR", str(tmp_path / "pc2"))
+    assert lab_sync.sync("u", "k", "CHR")["snap_down"] == 1 and len(store.list_snapshots(store.lab_dir("CHR"))) == 1
+    monkeypatch.setenv("TRADEAI_LAB_DIR", str(tmp_path / "pc3"))
+    assert lab_sync.sync("u", "k", "SANTA")["snap_down"] == 0 and store.list_snapshots(store.lab_dir("SANTA")) == []
+    assert api.delete_snapshot(saved["id"])["ok"] is True and api.list_snapshots()["items"] == []
+
+
+def test_daily_timeframe_works_end_to_end(base):
+    from tradeai_client.lab import market
+
+    assert market.IV["1d"] == 86400
+    bars = [store.to_bar([1_700_000_000 + i * 86400, 100 + i * 0.1, 101 + i * 0.1, 99 + i * 0.1, 100.5 + i * 0.1, 10, 5]) for i in range(120)]
+    objs, ctx = detect.run(bars, market.IV["1d"])
+    assert objs and set(detect.DETECTORS) == set(ctx.out)
+    lesson = store.save_lesson({"symbol": "BTCUSDT", "tf": "1d", "bars": [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"], b["bv"]] for b in bars], "drawings": []}, store.lab_dir("SANTA"))
+    assert lesson["tf"] == "1d" and lesson["iv"] == 86400
+
+
+def test_levels_and_liquidity_are_found_over_the_whole_analysis_window():
+    """1.9.2: уровни и ликвидность живут по всему окну (1500 свечей), а не только 300/200 последних - иначе за краем экрана они пропадали."""
+    assert detect.DEFAULT_PARAMS["level"]["lookback"] >= 1500 and detect.DEFAULT_PARAMS["liquidity"]["lookback"] >= 1500
+    assert lab_window.ANALYZE_BARS >= 1500
+    bars = _bars(1200)
+    objs, _ = detect.run(bars, IV["15m"], ["level", "liquidity"])
+    old = [o for o in objs if o["type"] in ("level", "liquidity") and o["kind"] == "hline" and o["t1"] < bars[-400]["t"]]
+    assert old, "уровни/ликвидность старше 400 свечей должны оставаться"
+
+
+def test_page_has_done_cancel_snapshot_and_1d_controls():
+    html = lab_window.build_html({"author": "SANTA"})
+    assert 'id="m-cancel"' in html and 'id="m-skip"' not in html and "Без подписи</button>" not in html
+    assert 'id="b-snap"' in html and 'id="s-ok"' in html and "'1d'" in html and "takeScreenshot" in html
+    assert "▲ " in html and "flushHLabels" in html

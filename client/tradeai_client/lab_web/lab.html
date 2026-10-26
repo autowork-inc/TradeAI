@@ -15,6 +15,7 @@
     <span id="tfs"></span>
     <input id="date" type="datetime-local" title="Момент на графике (ваше время): всё после него скрыто до реплея">
     <button class="btn" id="b-go" title="Открыть монету, таймфрейм и момент">Перейти</button>
+    <button class="btn" id="b-snap" title="Слепок рынка: сохранить картинку графика со всеми линиями (вашими и бота) и написать комментарий к этому моменту">💬 Комментарий</button>
     <button class="btn" id="b-rand" title="Случайная монета из топ-15, случайный таймфрейм и дата">🎲 Случайный</button>
     <span class="sep"></span>
     <button class="btn" id="b-play" title="Реплей: свечи идут дальше (пробел)">▶ Play</button>
@@ -67,7 +68,16 @@
     <h3 id="m-title">Что это?</h3>
     <div id="m-terms"></div>
     <textarea id="m-note" rows="3" placeholder="Почему вы это так видите: «отскакивала 3 раза», «гэп, заполнен позже», «нет объёма на покупку»…"></textarea>
-    <div class="mrow"><button class="btn on" id="m-ok">Готово</button><button class="btn" id="m-skip">Без подписи</button></div>
+    <div class="mrow"><button class="btn" id="m-cancel" title="Закрыть; новый рисунок удаляется с графика (Esc)">Отмена</button><button class="btn on" id="m-ok">Готово</button></div>
+  </div>
+</div>
+<div id="snapmodal" class="hidden">
+  <div class="mbox wide">
+    <h3 id="s-title">Комментарий к моменту рынка</h3>
+    <img id="s-img" alt="слепок графика">
+    <textarea id="s-note" rows="4" placeholder="Что здесь важно и почему: «вход был здесь, потому что…», «этот уровень не работает, потому что…», «бот ошибся тут, потому что…»"></textarea>
+    <div class="muted" id="s-info"></div>
+    <div class="mrow"><button class="btn" id="s-cancel">Отмена</button><button class="btn on" id="s-ok">Сохранить слепок</button></div>
   </div>
 </div>
 <script>/*__LIB__*/</script>

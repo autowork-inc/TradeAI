@@ -699,3 +699,12 @@ def test_phone_tap_opens_the_trade_chart_while_desktop_keeps_double_click(fx):
     desktop = HistoryView(Host())
     drow = desktop._row(trade)
     assert drow.on_double_tap is not None  # настольный клиент: одиночный клик выделяет, двойной открывает
+
+
+
+def test_new_exe_is_started_without_the_old_processs_pyinstaller_environment(tmp_path):
+    """CHR 2026-10-26: после автообновления «Failed to load Python DLL _MEI…\\python312.dll» - новый .exe унаследовал _MEIPASS2/_PYI_* старого."""
+    env = updater.clean_launch_env({"PATH": "x", "_MEIPASS2": r"C:\Temp\_MEI1", "_PYI_APPLICATION_HOME_DIR": "a", "_pyi_archive_file": "b", "APPDATA": "c"})
+    assert env == {"PATH": "x", "APPDATA": "c", "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+    script = updater.write_swap_script(tmp_path / "A.exe.new", tmp_path / "A.exe", tmp_path).read_text(encoding="utf-8")
+    assert script.index('set "_MEIPASS2="') < script.index('start "" "%EXE%"') and "PYINSTALLER_RESET_ENVIRONMENT=1" in script

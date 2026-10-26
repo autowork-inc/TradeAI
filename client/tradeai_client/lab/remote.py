@@ -70,3 +70,16 @@ def push_vocab(base: str, key: str, space: str, custom: list[dict]) -> None:
 
 def get_vocab(base: str, key: str, space: str) -> list[dict]:
     return _req(base, key, "GET", f"/api/lab/{_sp(space)}/vocab")["items"]
+
+
+def push_snapshot(base: str, key: str, space: str, snap: dict) -> None:
+    """snap - метаданные слепка + "image" (data URL PNG)."""
+    _req(base, key, "PUT", f"/api/lab/{_sp(space)}/snapshots/{urllib.parse.quote(snap['id'])}", snap)
+
+
+def list_snapshots(base: str, key: str, space: str) -> list[dict]:
+    return _req(base, key, "GET", f"/api/lab/{_sp(space)}/snapshots")["items"]
+
+
+def get_snapshot(base: str, key: str, space: str, snap_id: str) -> dict:
+    return _req(base, key, "GET", f"/api/lab/{_sp(space)}/snapshots/{urllib.parse.quote(snap_id)}")

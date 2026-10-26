@@ -74,6 +74,26 @@ def test_unknown_space_is_rejected(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+def test_snapshots_per_profile_with_picture(tmp_path):
+    import base64
+
+    c = client(tmp_path)
+    png = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 64).decode()
+    body = {"id": "20261026-120000-snap01", "symbol": "WLDUSDT", "tf": "1d", "comment": "вход здесь", "author": "CHR", "t": 1790000000, "image": png, "bars": [], "drawings": []}
+    assert c.put("/api/lab/chr/snapshots/20261026-120000-snap01", json=body).status_code == 200
+    assert (tmp_path / "chr" / "snapshots" / "20261026-120000-snap01.png").read_bytes().startswith(b"\x89PNG")
+    meta = (tmp_path / "chr" / "snapshots" / "20261026-120000-snap01.json").read_text(encoding="utf-8")
+    assert "image\"" not in meta and "вход здесь" in meta  # картинка отдельным файлом, не внутри JSON
+    got = c.get("/api/lab/chr/snapshots/20261026-120000-snap01").json()
+    assert got["image"] == png and got["comment"] == "вход здесь"
+    assert [x["id"] for x in c.get("/api/lab/chr/snapshots").json()["items"]] == ["20261026-120000-snap01"]
+    assert c.get("/api/lab/santa/snapshots").json()["items"] == [] and c.get("/api/lab/santa/snapshots/20261026-120000-snap01").status_code == 404
+    for bad in ({**body, "comment": " "}, {**body, "image": "data:image/png;base64,@@"}, {**body, "image": "data:image/png;base64,AAAA"}, {**body, "tf": "2h"}, {**body, "id": "other-id-123"}):
+        assert c.put("/api/lab/chr/snapshots/20261026-120000-snap01", json=bad).status_code in (413, 422)
+    assert c.delete("/api/lab/santa/snapshots/20261026-120000-snap01").status_code == 404
+    assert c.delete("/api/lab/chr/snapshots/20261026-120000-snap01").status_code == 200 and not list((tmp_path / "chr" / "snapshots").iterdir())
+
+
 def test_not_configured(tmp_path):
     app = FastAPI()
     lab.install(app, lambda: None, None)

@@ -39,7 +39,7 @@ def lab_dir(profile: str) -> Path:
     base = base_dir()
     _migrate_legacy(base)
     d = base / space_of(profile)
-    for sub in ("lessons", "strategies"):
+    for sub in ("lessons", "strategies", "snapshots"):
         (d / sub).mkdir(parents=True, exist_ok=True)
     return d
 
@@ -192,6 +192,93 @@ def load_lessons(root: Path) -> list[dict[str, Any]]:
 def delete_lesson(lesson_id: str, root: Path) -> None:
     load_lesson(lesson_id, root)
     (root / "lessons" / f"{lesson_id}.json").unlink(missing_ok=True)
+
+
+# ------------------------------------------------------------------------------------------ слепки рынка с комментарием (1.9.2)
+
+SNAP_MAX_IMAGE = 3_000_000
+SNAP_MAX_BARS = 400
+_PNG_PREFIX = "data:image/png;base64,"
+_ID = re.compile(r"[0-9A-Za-z_-]{6,64}")
+
+
+def clean_snapshot(raw: dict) -> tuple[dict[str, Any], bytes]:
+    """Слепок = картинка графика (ваши линии и линии бота) + комментарий + данные того же момента (свечи, рисунки, объекты бота).
+    -> (метаданные для JSON, байты PNG). Картинку читает разработчик, чтобы учесть комментарий в логике бота."""
+    import base64
+    if not isinstance(raw, dict):
+        raise StoreError("Слепок: ожидается объект")
+    sym, tf = str(raw.get("symbol") or "").upper(), str(raw.get("tf") or "")
+    if not re.fullmatch(r"[A-Z0-9]{2,24}", sym) or tf not in detect_iv():
+        raise StoreError("Слепок: неверная монета или таймфрейм")
+    comment = str(raw.get("comment") or "").strip()[:3000]
+    if not comment:
+        raise StoreError("Напишите комментарий: что здесь важно и почему")
+    image = str(raw.get("image") or "")
+    if not image.startswith(_PNG_PREFIX):
+        raise StoreError("Слепок: нет картинки графика")
+    try:
+        png = base64.b64decode(image[len(_PNG_PREFIX):], validate=True)
+    except ValueError as exc:
+        raise StoreError("Слепок: картинка повреждена") from exc
+    if not png.startswith(b"\x89PNG") or len(png) > SNAP_MAX_IMAGE:
+        raise StoreError("Слепок: картинка не PNG или слишком большая")
+    bars = [to_bar(b) for b in (raw.get("bars") or [])][-SNAP_MAX_BARS:]
+    drawings = [d for d in (raw.get("drawings") or []) if isinstance(d, dict)][:300]
+    bot_objects = [o for o in (raw.get("bot_objects") or []) if isinstance(o, dict)][:600]
+    sid = str(raw.get("id") or new_id())
+    if not _ID.fullmatch(sid):
+        raise StoreError("Слепок: неверный id")
+    meta = {"id": sid, "version": 1, "created": raw.get("created") or int(time.time()), "author": str(raw.get("author") or "")[:40], "symbol": sym, "tf": tf,
+            "iv": detect_iv()[tf], "t": int(raw.get("t") or (bars[-1]["t"] if bars else 0)), "comment": comment, "lesson_id": str(raw.get("lesson_id") or ""),
+            "view": raw.get("view") if isinstance(raw.get("view"), dict) else {}, "bars": bars, "drawings": drawings, "bot_objects": bot_objects,
+            "strategy": str(raw.get("strategy") or ""), "image_file": f"{sid}.png"}
+    return meta, png
+
+
+def save_snapshot(raw: dict, root: Path) -> dict[str, Any]:
+    meta, png = clean_snapshot(raw)
+    folder = root / "snapshots"
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        (folder / meta["image_file"]).write_bytes(png)
+    except OSError as exc:
+        raise StoreError(f"Не удалось сохранить картинку слепка: {exc}") from exc
+    _write(folder / f"{meta['id']}.json", meta)
+    return meta
+
+
+def list_snapshots(root: Path) -> list[dict[str, Any]]:
+    out = []
+    for f in sorted((root / "snapshots").glob("*.json"), reverse=True):
+        try:
+            m = _read(f, None)
+        except StoreError:
+            continue
+        if m:
+            out.append({k: m.get(k) for k in ("id", "created", "author", "symbol", "tf", "t", "comment", "lesson_id")})
+    return out
+
+
+def load_snapshot(snap_id: str, root: Path, with_image: bool = False) -> dict[str, Any]:
+    import base64
+    if not _ID.fullmatch(snap_id or ""):
+        raise StoreError("неверный id слепка")
+    m = _read(root / "snapshots" / f"{snap_id}.json", None)
+    if m is None:
+        raise StoreError(f"слепок {snap_id} не найден")
+    if with_image:
+        try:
+            m = {**m, "image": _PNG_PREFIX + base64.b64encode((root / "snapshots" / m["image_file"]).read_bytes()).decode("ascii")}
+        except OSError as exc:
+            raise StoreError(f"картинка слепка {snap_id} не читается: {exc}") from exc
+    return m
+
+
+def delete_snapshot(snap_id: str, root: Path) -> None:
+    m = load_snapshot(snap_id, root)
+    (root / "snapshots" / f"{snap_id}.json").unlink(missing_ok=True)
+    (root / "snapshots" / m.get("image_file", f"{snap_id}.png")).unlink(missing_ok=True)
 
 
 # ------------------------------------------------------------------------------------------ стратегии

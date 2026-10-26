@@ -5,6 +5,7 @@
 Это единственное место, кроме избранного, куда API пишет: только в свой каталог, с проверкой формата и размера; торговлю и БД бота не трогает."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Path as PathParam
 
 LESSON_ID = r"^[0-9A-Za-z_-]{6,64}$"
 MAX_LESSON_BYTES = 3_000_000
+MAX_SNAPSHOT_IMAGE = 3_000_000
 MAX_BARS = 3000
 MAX_DRAWINGS = 500
 NAME = re.compile(r"^[0-9A-Za-zА-Яа-яЁё _-]{1,60}$")
@@ -64,7 +66,7 @@ def install(app: FastAPI, auth: Callable, directory: Path | None) -> None:
         if directory is None:
             raise HTTPException(status_code=503, detail="lab_not_configured")
         d = directory / space  # space проверен шаблоном пути: только santa | chr
-        for sub in ("lessons", "strategies"):
+        for sub in ("lessons", "strategies", "snapshots"):
             (d / sub).mkdir(parents=True, exist_ok=True)
         return d
 
@@ -114,6 +116,65 @@ def install(app: FastAPI, auth: Callable, directory: Path | None) -> None:
             raise HTTPException(status_code=422, detail="bad_vocab")
         await asyncio.to_thread(_write, root(space) / "vocab.json", items)
         return {"saved": len(items)}
+
+    # --- слепки рынка с комментарием (1.9.2): JSON с данными момента + PNG графика (ваши линии и линии бота) рядом
+    @app.get("/api/lab/{space}/snapshots", dependencies=[Depends(auth)])
+    async def snapshots(space: Space) -> dict[str, Any]:
+        def scan() -> list[dict]:
+            out = []
+            for f in sorted((root(space) / "snapshots").glob("*.json"), reverse=True):
+                try:
+                    m = _read(f)
+                    out.append({k: m.get(k) for k in ("id", "created", "author", "symbol", "tf", "t", "comment", "lesson_id")})
+                except (OSError, ValueError, AttributeError):
+                    continue
+            return out
+        return {"items": await asyncio.to_thread(scan)}
+
+    @app.get("/api/lab/{space}/snapshots/{snap_id}", dependencies=[Depends(auth)])
+    async def snapshot(space: Space, snap_id: Annotated[str, PathParam(pattern=LESSON_ID)]) -> dict[str, Any]:
+        base = root(space) / "snapshots"
+        if not (base / f"{snap_id}.json").exists() or not (base / f"{snap_id}.png").exists():
+            raise HTTPException(status_code=404, detail="not_found")
+
+        def load() -> dict:
+            m = _read(base / f"{snap_id}.json")
+            return {**m, "image": "data:image/png;base64," + base64.b64encode((base / f"{snap_id}.png").read_bytes()).decode("ascii")}
+        return await asyncio.to_thread(load)
+
+    @app.put("/api/lab/{space}/snapshots/{snap_id}", dependencies=[Depends(auth)])
+    async def put_snapshot(space: Space, snap_id: Annotated[str, PathParam(pattern=LESSON_ID)], body: Annotated[dict, Body()]) -> dict[str, Any]:
+        image = body.get("image")
+        if body.get("id") != snap_id or not isinstance(image, str) or not image.startswith("data:image/png;base64,"):
+            raise HTTPException(status_code=422, detail="bad_snapshot")
+        if not re.fullmatch(r"[A-Z0-9]{2,24}", str(body.get("symbol") or "")) or body.get("tf") not in ("1m", "5m", "15m", "1h", "4h", "1d") or not str(body.get("comment") or "").strip():
+            raise HTTPException(status_code=422, detail="bad_snapshot")
+        try:
+            png = base64.b64decode(image[len("data:image/png;base64,"):], validate=True)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="bad_image") from None
+        if not png.startswith(b"\x89PNG") or len(png) > MAX_SNAPSHOT_IMAGE:
+            raise HTTPException(status_code=413, detail="image_too_large")
+        meta = {k: v for k, v in body.items() if k != "image"}
+        if len(json.dumps(meta, ensure_ascii=False).encode("utf-8")) > MAX_LESSON_BYTES:
+            raise HTTPException(status_code=413, detail="snapshot_too_large")
+        meta.update(image_file=f"{snap_id}.png", received_at=int(time.time()))
+        base = root(space) / "snapshots"
+
+        def store() -> None:
+            (base / f"{snap_id}.png").write_bytes(png)
+            _write(base / f"{snap_id}.json", meta)
+        await asyncio.to_thread(store)
+        return {"saved": snap_id}
+
+    @app.delete("/api/lab/{space}/snapshots/{snap_id}", dependencies=[Depends(auth)])
+    async def delete_snapshot(space: Space, snap_id: Annotated[str, PathParam(pattern=LESSON_ID)]) -> dict[str, Any]:
+        base = root(space) / "snapshots"
+        if not (base / f"{snap_id}.json").exists():
+            raise HTTPException(status_code=404, detail="not_found")
+        (base / f"{snap_id}.json").unlink()
+        (base / f"{snap_id}.png").unlink(missing_ok=True)
+        return {"deleted": snap_id}
 
     @app.get("/api/lab/{space}/strategies", dependencies=[Depends(auth)])
     async def strategies(space: Space) -> dict[str, Any]:

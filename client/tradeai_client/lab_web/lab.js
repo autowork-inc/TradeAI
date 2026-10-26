@@ -7,7 +7,7 @@
   'use strict';
   const CFG = window.__CFG__ || {};
   const $ = (id) => document.getElementById(id);
-  const TFS = ['1m', '5m', '15m', '1h', '4h'];
+  const TFS = ['1m', '5m', '15m', '1h', '4h', '1d'];
   const IV = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
   const pad = (n) => String(n).padStart(2, '0');
   const S = {
@@ -197,7 +197,7 @@
     if (S.busy || !S.all.length) return;
     S.busy = true;
     try {
-      const rows = visible().slice(-600).map(toRow);
+      const rows = visible().slice(-1500).map(toRow);
       const r = await call('analyze', rows, S.tf, S.strategy, !!withSetups);
       if (!r.ok) { toast('Бот: ' + r.error, 6000); return; }
       S.bot = r;
@@ -289,13 +289,38 @@
   const pt = (p) => { const x = X(p.t), y = Y(p.p); return (x == null || y == null) ? null : { x, y }; };
   function farPoint(a, b) { const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1, k = 20000 / len; return { x: a.x + dx * k, y: a.y + dy * k }; }
 
+  /* Подписи горизонталей (уровни, ликвидность - ваши и бота) собираются за кадр и рисуются справа без наложения друг на друга.
+   * Горизонталь за верхним/нижним краем экрана не пропадает: у края стоит стрелка с ценой (▲ выше экрана, ▼ ниже). */
+  let hLabels = [];
+  function hlineLabel(text, y, P, color) {
+    const out = y < 0 ? -1 : y > P.h ? 1 : 0;
+    hLabels.push({ text: (out < 0 ? '▲ ' : out > 0 ? '▼ ' : '') + text, y: out < 0 ? 0 : out > 0 ? P.h : y, color, edge: out });
+  }
+  function flushHLabels(ctx, P) {
+    const GAP = 17, list = hLabels; hLabels = [];
+    if (!list.length) return;
+    list.sort((a, b) => a.y - b.y);
+    let prev = -1e9;
+    for (const l of list) { l.yy = Math.min(Math.max(l.y, 10, prev + GAP), P.h - 10); prev = l.yy; }
+    let next = 1e9;
+    for (let i = list.length - 1; i >= 0; i--) { list[i].yy = Math.min(list[i].yy, next - GAP); next = list[i].yy; }
+    ctx.font = '12px "Segoe UI",sans-serif';
+    for (const l of list) {
+      const w = ctx.measureText(l.text).width + 8, x = Math.max(0, P.w - w - 6);
+      if (l.edge === 0 && Math.abs(l.yy - l.y) > 2) { ctx.strokeStyle = rgba(l.color, 0.5); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(P.w - 4, l.y); ctx.lineTo(P.w - 4, l.yy); ctx.stroke(); }
+      label(ctx, l.text, x, l.yy, l.color, l.edge ? 'rgba(11,14,20,.95)' : null);
+    }
+  }
   function drawBotObj(ctx, o, P, mark) {
     const t = termOf(o.type); const col = mark === 'extra' ? '#ff9800' : (t ? t.color : '#c9d1d9');
     const dash = mark === 'extra' ? [6, 4] : null;
     if (o.kind === 'hline') {
       const x1 = Xbar(o.t1), x2 = Xbar(o.t2), y = Y(o.p1); if (x1 == null || x2 == null || y == null) return;
-      seg(ctx, { x: x1, y }, { x: Math.max(x2, x1 + 4), y }, rgba(col, 0.85), mark ? 2.5 : 1.5, dash || [8, 4]);
-      label(ctx, (mark === 'extra' ? 'лишнее: ' : '') + o.label, Math.max(0, Math.min(x2, P.w - 170)) - 4, y - 11, col);
+      const txt = (mark === 'extra' ? 'лишнее: ' : '') + o.label + ' · ' + fp(o.p1);
+      if (y < 0 || y > P.h) { hlineLabel(txt, y, P, col); return; }  // цена вне экрана: линию не видно, но уровень на месте - стрелка у края
+      if (x2 < 0) return;  // уровень закончился левее экрана
+      seg(ctx, { x: Math.max(x1, -50), y }, { x: Math.max(x2, x1 + 4), y }, rgba(col, 0.85), mark ? 2.5 : 1.5, dash || [8, 4]);
+      hlineLabel(txt, y, P, col);
     } else if (o.kind === 'box') {
       const x1 = X(o.t1), x2 = X(o.t2 + iv()), y1 = Y(o.p1), y2 = Y(o.p2);
       if (x1 == null || x2 == null || y1 == null || y2 == null) return;
@@ -344,6 +369,7 @@
     if (d.tool === 'hline') {
       const y = Y(d.p1.p); if (y == null) return;
       const x0 = Math.max(0, X(d.p1.t) ?? 0);
+      if (y < 0 || y > P.h) { hlineLabel((t ? t.name : 'без подписи') + ' · ' + fp(d.p1.p), y, P, t ? t.color : '#c9d1d9'); return; }  // ваш уровень за краем экрана - стрелка с ценой
       seg(ctx, { x: x0, y }, { x: P.w, y }, col, w); anchor = { x: Math.min(P.w - 200, x0 + 4), y };
     } else if (d.tool === 'point') {
       if (!a) return; ctx.beginPath(); ctx.arc(a.x, a.y, 6, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0e1117'; ctx.stroke();
@@ -378,6 +404,7 @@
     for (const t of S.botTrades) drawTradeBox(ctx, P, t, t.placed + iv(), false, true);
     if (S.mineLayer) for (const d of S.drawings) drawMine(ctx, d, P, d.id === S.selected, false);
     if (S.draft) drawMine(ctx, S.draft.d, P, false, true);
+    flushHLabels(ctx, P);
     ctx.restore();
   }
 
@@ -435,7 +462,7 @@
     S.drawings.push(d); S.compare = null;
     setTool('cursor'); select(d.id);
     if (d.tool === 'long' || d.tool === 'short') { renderTradesPane(); return; }
-    askTerm(d);
+    askTerm(d, true);
   }
   function onDown(e) {
     if (e.button !== 0) return;
@@ -499,6 +526,8 @@
     S.drawings = []; S.selected = null; S.compare = null; renderMarkPane(); renderTradesPane(); scheduleDraw();
   }
   function onKey(e) {
+    if (e.key === 'Escape' && S.modalCancel) { e.preventDefault(); S.modalCancel(); return; }
+    if (e.key === 'Escape' && !$('snapmodal').classList.contains('hidden')) { e.preventDefault(); closeSnap(); return; }
     if (/INPUT|TEXTAREA|SELECT/.test((e.target && e.target.tagName) || '')) return;
     if (e.key === 'Escape') { S.draft = null; setTool('cursor'); select(null); }
     else if ((e.key === 'Delete' || e.key === 'Backspace') && S.selected) deleteSelected();
@@ -507,7 +536,7 @@
   }
 
   /* ------------------------------------------------------------------ подпись рисунка */
-  function askTerm(d) {
+  function askTerm(d, isNew) {
     const box = $('m-terms'); box.textContent = '';
     let chosen = d.term;
     const kindOf = { trend: 'line', ray: 'line', hline: 'hline', rect: 'box', point: 'point' }[d.tool];
@@ -521,8 +550,71 @@
     }
     $('m-note').value = d.note || '';
     $('modal').classList.remove('hidden'); setTimeout(() => $('m-note').focus(), 30);
-    $('m-ok').onclick = () => { d.term = chosen; d.note = $('m-note').value.trim(); $('modal').classList.add('hidden'); renderMarkPane(); scheduleDraw(); };
-    $('m-skip').onclick = () => { $('modal').classList.add('hidden'); renderMarkPane(); scheduleDraw(); };
+    const close = () => { $('modal').classList.add('hidden'); S.modalCancel = null; };
+    $('m-ok').onclick = () => { d.term = chosen; d.note = $('m-note').value.trim(); close(); renderMarkPane(); scheduleDraw(); };
+    // «Отмена»: новый рисунок удаляется с графика, у существующего правка просто не применяется
+    S.modalCancel = () => {
+      close();
+      if (isNew) { S.drawings = S.drawings.filter((x) => x.id !== d.id); if (S.selected === d.id) S.selected = null; S.compare = null; }
+      renderMarkPane(); renderTradesPane(); scheduleDraw();
+    };
+    $('m-cancel').onclick = S.modalCancel;
+  }
+
+  /* ------------------------------------------------------------------ слепок рынка + комментарий */
+  function snapshotImage() {
+    // свечи (через встроенный снимок графика) + холст с линиями: ваши и бота, уровни, зоны, сделки - ровно то, что вы видите
+    const shot = chart.takeScreenshot();
+    const out = document.createElement('canvas'); out.width = shot.width; out.height = shot.height;
+    const g = out.getContext('2d'); g.drawImage(shot, 0, 0);
+    g.drawImage($('ov'), 0, 0, shot.width, shot.height);
+    return out.toDataURL('image/png');
+  }
+  function closeSnap() { $('snapmodal').classList.add('hidden'); S.snapDraft = null; $('s-note').readOnly = false; $('s-ok').style.display = ''; }
+  function openSnap() {
+    if (!S.all.length) return;
+    stop();
+    draw();  // свежий кадр с линиями
+    let image;
+    try { image = snapshotImage(); } catch (e) { toast('Не удалось снять слепок: ' + e.message, 6000); return; }
+    const vb = visible(), r = chart.timeScale().getVisibleLogicalRange();
+    const from = r ? logicalToTime(Math.max(0, r.from)) : vb[0].time, to = Math.min(r ? logicalToTime(r.to) : vb[vb.length - 1].time, vb[vb.length - 1].time);
+    const objs = (S.compare ? S.compare.objects : S.bot.objects).filter((o) => !S.hidden[o.type] && o.kind !== 'label');
+    S.snapDraft = { image, symbol: S.symbol, tf: S.tf, t: vb[vb.length - 1].time, bars: vb.slice(-400).map(toRow), view: { from_t: Math.round(from), to_t: Math.round(to) },
+      drawings: S.drawings.map((d) => { const { trade, ...rest } = d; return { ...rest, ...(trade ? { result: { status: trade.status, r: trade.r } } : {}) }; }),
+      bot_objects: objs, lesson_id: S.lessonId || '', strategy: S.strategy };
+    $('s-img').src = image; $('s-note').value = '';
+    $('s-info').textContent = S.symbol + ' ' + S.tf + ' · момент ' + fmtLocal(S.snapDraft.t + iv()) + ' · ваших рисунков ' + S.drawings.length + ' · объектов бота ' + objs.length;
+    $('snapmodal').classList.remove('hidden'); setTimeout(() => $('s-note').focus(), 30);
+  }
+  async function saveSnap() {
+    const d = S.snapDraft; if (!d) return;
+    const comment = $('s-note').value.trim();
+    if (!comment) { toast('Напишите комментарий: что здесь важно и почему'); return; }
+    $('s-ok').disabled = true;
+    const r = await call('save_snapshot', { ...d, comment });
+    $('s-ok').disabled = false;
+    if (!r.ok) { toast('Слепок не сохранён: ' + r.error, 7000); return; }
+    closeSnap();
+    toast('Слепок сохранён' + (r.sent === true ? ' и отправлен на сервер' : r.sent ? ' на ПК (сервер: ' + r.sent + ')' : ''), 6000);
+    renderSnapshots();
+  }
+  async function renderSnapshots() {
+    const box = $('snaps-list'); if (!box) return;
+    const r = await call('list_snapshots');
+    box.textContent = '';
+    if (!r.ok) { el('div', 'bad', esc(r.error), box); return; }
+    if (!r.items.length) { el('div', 'muted', 'Слепков пока нет. «💬 Комментарий» вверху: картинка графика со всеми линиями + ваш комментарий к этому моменту.', box); return; }
+    for (const x of r.items.slice(0, 40)) {
+      const it = el('div', 'item', '<div class="grow"><div class="what">' + esc(x.symbol + ' ' + x.tf + ' · ' + fmtLocal(x.t + (IV[x.tf] || 0))) + '</div><div class="note">' + esc((x.comment || '').slice(0, 160)) + '</div></div>', box);
+      it.title = 'Открыть слепок';
+      it.onclick = async () => {
+        const g = await call('get_snapshot', x.id); if (!g.ok) { toast(g.error, 6000); return; }
+        S.snapDraft = null; $('s-img').src = g.snapshot.image; $('s-note').value = g.snapshot.comment; $('s-note').readOnly = true;
+        $('s-info').textContent = g.snapshot.symbol + ' ' + g.snapshot.tf + ' · ' + fmtLocal(g.snapshot.t + (IV[g.snapshot.tf] || 0)) + (g.snapshot.author ? ' · ' + g.snapshot.author : '');
+        $('s-ok').style.display = 'none'; $('snapmodal').classList.remove('hidden');
+      };
+    }
   }
 
   /* ------------------------------------------------------------------ панели */
@@ -568,6 +660,9 @@
     const ls = el('button', 'btn', '📂 Мои уроки', btns); ls.onclick = showLessons;
     if (S.lessonId) el('div', 'muted', 'Урок: ' + esc(S.lessonId), l);
     el('div', null, null, l).id = 'lessons-list';
+    const sc = el('div', 'card', '<h3>Слепки рынка с комментариями</h3>', root);
+    el('div', null, null, sc).id = 'snaps-list';
+    renderSnapshots();
   }
 
   async function showLessons() {
@@ -760,6 +855,7 @@
     new ResizeObserver(() => { chart.resize($('chartbox').clientWidth, $('chartbox').clientHeight); scheduleDraw(); }).observe($('chartbox'));
     document.querySelectorAll('#tools [data-tool]').forEach((b) => { b.onclick = () => setTool(b.dataset.tool); });
     $('b-del').onclick = deleteSelected; $('b-clear').onclick = clearAll;
+    $('b-snap').onclick = openSnap; $('s-ok').onclick = saveSnap; $('s-cancel').onclick = closeSnap;
     const box = $('chartbox');
     box.addEventListener('mousedown', onDown, true);
     box.addEventListener('pointerdown', (e) => { const m = mouse(e); if (e.button === 0 && m.inPlot && (S.tool !== 'cursor' || pick(m.x, m.y) || (byId(S.selected) && pickHandle(byId(S.selected), m.x, m.y)))) e.stopPropagation(); }, true);
@@ -785,6 +881,6 @@
     await openSpot(o.symbol || 'BTCUSDT', o.tf || '15m', o.at_s || Math.floor(Date.now() / 1000));
     analyzeNow(false);
   }
-  window.__lab = { S, step, analyzeNow, runCompare, openSpot, get chart() { return chart; } };
+  window.__lab = { S, step, analyzeNow, runCompare, openSpot, draw, plot, Y, X, get chart() { return chart; } };
   init();
 })();

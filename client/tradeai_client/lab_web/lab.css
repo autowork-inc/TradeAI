@@ -56,6 +56,12 @@ th{color:var(--muted);font-weight:500}
 .btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 #modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100}
 #modal.hidden{display:none}
+#snapmodal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:110}
+#snapmodal.hidden{display:none}
+.mbox.wide{width:900px}
+#s-img{width:100%;max-height:52vh;object-fit:contain;border:1px solid var(--line);border-radius:8px;background:#0e1117;margin-bottom:8px}
+.snap{display:flex;gap:8px;align-items:flex-start}
+.snap img{width:92px;height:56px;object-fit:cover;border-radius:5px;border:1px solid var(--line);flex:none;background:#0e1117}
 .mbox{background:#151a23;border:1px solid var(--line);border-radius:12px;padding:14px;width:520px;max-width:92vw}
 .mbox h3{margin:0 0 10px}
 #m-terms{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;max-height:220px;overflow-y:auto}

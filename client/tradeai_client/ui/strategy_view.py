@@ -28,7 +28,7 @@ class StrategyLabView:
         self.host = host
         self._coin = ft.TextField(label="Монета", value="BTCUSDT", width=150, dense=True, border_color=w.BORDER)
         self._tf = ft.Dropdown(label="Таймфрейм", value="15m", width=120, dense=True, border_color=w.BORDER,
-                               options=[ft.DropdownOption(key=x, text=x) for x in ("1m", "5m", "15m", "1h", "4h")])
+                               options=[ft.DropdownOption(key=x, text=x) for x in ("1m", "5m", "15m", "1h", "4h", "1d")])
         self._date = ft.TextField(label="Момент", hint_text="ГГГГ-ММ-ДД ЧЧ:ММ (пусто - сейчас)", width=210, dense=True, border_color=w.BORDER)
         self._strategy = ft.Dropdown(label="Стратегия", width=260, dense=True, border_color=w.BORDER, on_select=self._strategy_changed)
         self._strategy_box = ft.Column(spacing=6)
