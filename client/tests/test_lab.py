@@ -48,7 +48,7 @@ def range_then_breakout():
 @pytest.fixture
 def lab_root(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADEAI_LAB_DIR", str(tmp_path / "lab"))
-    return tmp_path / "lab"
+    return store.lab_dir("SANTA")
 
 
 # ------------------------------------------------------------------------------------------ детекторы
@@ -145,34 +145,34 @@ def test_lesson_roundtrip_and_validation(lab_root):
     rows = [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"], b["bv"]] for b in walk(60)]
     saved = store.save_lesson({"symbol": "wldusdt", "tf": "15m", "bars": rows, "drawings": [
         {"id": "x", "tool": "rect", "term": "zone", "note": "отскакивала", "p1": {"t": rows[5][0], "p": 99}, "p2": {"t": rows[20][0], "p": 101}},
-        {"id": "bad", "tool": "spiral", "p1": {"t": 1, "p": 1}}], "notes": "разбор"})
+        {"id": "bad", "tool": "spiral", "p1": {"t": 1, "p": 1}}], "notes": "разбор"}, lab_root)
     assert saved["symbol"] == "WLDUSDT" and len(saved["drawings"]) == 1 and saved["bars"][0]["bv"] == rows[0][6]
-    assert store.list_lessons()[0]["terms"] == {"zone": 1}
-    assert store.load_lesson(saved["id"])["notes"] == "разбор"
+    assert store.list_lessons(lab_root)[0]["terms"] == {"zone": 1}
+    assert store.load_lesson(saved["id"], lab_root)["notes"] == "разбор"
     with pytest.raises(store.StoreError):
-        store.save_lesson({"symbol": "WLDUSDT", "tf": "15m", "bars": rows[:10]})
-    store.delete_lesson(saved["id"])
-    assert store.list_lessons() == []
+        store.save_lesson({"symbol": "WLDUSDT", "tf": "15m", "bars": rows[:10]}, lab_root)
+    store.delete_lesson(saved["id"], lab_root)
+    assert store.list_lessons(lab_root) == []
 
 
 def test_strategy_history_and_rollback(lab_root):
-    st = store.list_strategies()[0]
-    store.save_strategy({**st, "params": {"level": {"min_touches": 4}}}, "подбор")
-    store.save_strategy({**store.get_strategy(st["name"]), "enabled": ["zone"]}, "только зоны")
-    cur = store.get_strategy(st["name"])
+    st = store.list_strategies(lab_root)[0]
+    store.save_strategy({**st, "params": {"level": {"min_touches": 4}}}, "подбор", root=lab_root)
+    store.save_strategy({**store.get_strategy(st["name"], lab_root), "enabled": ["zone"]}, "только зоны", root=lab_root)
+    cur = store.get_strategy(st["name"], lab_root)
     assert cur["enabled"] == ["zone"] and len(cur["history"]) == 2
-    back = store.rollback_strategy(st["name"])
+    back = store.rollback_strategy(st["name"], root=lab_root)
     assert back["enabled"] != ["zone"] and back["params"] == {"level": {"min_touches": 4}}
     with pytest.raises(store.StoreError):
-        store.rollback_strategy(st["name"], steps=5)
+        store.rollback_strategy(st["name"], steps=5, root=lab_root)
 
 
 def test_custom_term_added_once_and_marked_without_detector(lab_root):
-    t = store.add_term("Имбаланс", "box", "#123456")
+    t = store.add_term("Имбаланс", "box", "#123456", root=lab_root)
     assert t.id.startswith("u_") and not t.detector
-    assert any(x.id == t.id for x in store.load_vocab())
+    assert any(x.id == t.id for x in store.load_vocab(lab_root))
     with pytest.raises(vocab.VocabError):
-        store.add_term("Имбаланс", "box")
+        store.add_term("Имбаланс", "box", root=lab_root)
 
 
 def test_random_spot_is_inside_history_with_room_for_replay():
@@ -194,7 +194,7 @@ def test_page_is_assembled_without_placeholders():
 
 def test_bridge_analyze_compare_and_save(lab_root, monkeypatch):
     sent = []
-    monkeypatch.setattr(lab_window.remote, "push_lesson", lambda url, key, ls: sent.append(ls["id"]))
+    monkeypatch.setattr(lab_window.remote, "push_lesson", lambda url, key, space, ls: sent.append((space, ls["id"])))
     api = lab_window.LabApi({"author": "SANTA", "server": {"url": "http://x", "key": "k"}})
     rows = [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"], b["bv"]] for b in walk(300)]
     r = api.analyze(rows, "15m", "", True)
@@ -204,7 +204,7 @@ def test_bridge_analyze_compare_and_save(lab_root, monkeypatch):
     c = api.compare(lesson)
     assert c["ok"] and c["report"]["by_type"]["level"]["tp"] == 1
     s = api.save_lesson(lesson)
-    assert s["ok"] and s["sent"] is True and sent == [s["id"]]
+    assert s["ok"] and s["sent"] is True and sent == [("santa", s["id"])]
     assert api.boot()["ok"] and api.list_lessons()["items"][0]["author"] == "SANTA"
 
 
@@ -229,17 +229,17 @@ def test_strategy_tab_lists_lessons_and_tunes(lab_root, monkeypatch):
     rows = [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"], b["bv"]] for b in walk(300)]
     objs, _ = detect.run([store.to_bar(r) for r in rows], IV, ["level"])
     lv = next(o for o in objs if o["type"] == "level")
-    store.save_lesson({"symbol": "BTCUSDT", "tf": "15m", "bars": rows, "author": "CHR", "drawings": [{"id": "u", "tool": "hline", "term": "level", "p1": {"t": lv["t1"], "p": lv["p1"]}}]})
+    store.save_lesson({"symbol": "BTCUSDT", "tf": "15m", "bars": rows, "author": "SANTA", "drawings": [{"id": "u", "tool": "hline", "term": "level", "p1": {"t": lv["t1"], "p": lv["p1"]}}]}, lab_root)
     host = _Host()
     v = StrategyLabView(host)
     asyncio.run(v.refresh())
     txt = " ".join(x.value for x in _walk(v.control) if isinstance(x, ft.Text) and isinstance(x.value, str))
-    assert "BTC 15m" in txt and "автор CHR" in txt and "Уровень 1" in txt
+    assert "BTC 15m" in txt and "автор SANTA" in txt and "профиля SANTA" in txt and "Уровень 1" in txt
     asyncio.run(v._tune())
     txt = " ".join(x.value for x in _walk(v._tune_box) if isinstance(x, ft.Text) and isinstance(x.value, str))
     assert "Уровень" in txt and "%" in txt
     asyncio.run(v._apply_tune())
-    assert store.get_strategy(store.active_name())["history"]
+    assert store.get_strategy(store.active_name(lab_root), lab_root)["history"]
 
 
 def _walk(c):

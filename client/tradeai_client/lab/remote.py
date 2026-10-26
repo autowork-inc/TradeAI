@@ -1,4 +1,5 @@
-"""Обмен уроками и стратегиями с сервером мониторинга (`/api/lab/*`, ключ X-API-Key): уроки одного трейдера видят другой трейдер и разработчик.
+"""Обмен уроками и стратегиями с сервером мониторинга (`/api/lab/*`, ключ X-API-Key) в пространстве профиля (santa | chr):
+уроки, словарь и стратегии одного профиля другой профиль не получает; разработчик читает оба каталога на сервере.
 
 Сервер - необязательная часть: нет связи - всё работает на локальных файлах (store.py), отправка повторяется при следующем сохранении/синхронизации."""
 
@@ -13,6 +14,16 @@ TIMEOUT_S = 20
 
 class RemoteError(Exception):
     """Сервер недоступен или отказал (текст показывается пользователю)."""
+
+
+SPACES = ("santa", "chr")
+
+
+def _sp(space: str) -> str:
+    """Пространство профиля на сервере (1.9.1): уроки SANTA и CHR лежат раздельно; неизвестное имя - ошибка, а не «общая» папка."""
+    if space not in SPACES:
+        raise RemoteError(f"неизвестный профиль уроков: {space!r}")
+    return space
 
 
 def _req(base: str, key: str, method: str, path: str, body: Any = None) -> Any:
@@ -33,29 +44,29 @@ def _req(base: str, key: str, method: str, path: str, body: Any = None) -> Any:
         raise RemoteError(f"сервер недоступен: {type(exc).__name__}") from exc
 
 
-def push_lesson(base: str, key: str, lesson: dict) -> None:
-    _req(base, key, "PUT", f"/api/lab/lessons/{urllib.parse.quote(lesson['id'])}", lesson)
+def push_lesson(base: str, key: str, space: str, lesson: dict) -> None:
+    _req(base, key, "PUT", f"/api/lab/{_sp(space)}/lessons/{urllib.parse.quote(lesson['id'])}", lesson)
 
 
-def list_lessons(base: str, key: str) -> list[dict]:
-    return _req(base, key, "GET", "/api/lab/lessons")["items"]
+def list_lessons(base: str, key: str, space: str) -> list[dict]:
+    return _req(base, key, "GET", f"/api/lab/{_sp(space)}/lessons")["items"]
 
 
-def get_lesson(base: str, key: str, lesson_id: str) -> dict:
-    return _req(base, key, "GET", f"/api/lab/lessons/{urllib.parse.quote(lesson_id)}")
+def get_lesson(base: str, key: str, space: str, lesson_id: str) -> dict:
+    return _req(base, key, "GET", f"/api/lab/{_sp(space)}/lessons/{urllib.parse.quote(lesson_id)}")
 
 
-def push_strategy(base: str, key: str, st: dict) -> None:
-    _req(base, key, "PUT", f"/api/lab/strategies/{urllib.parse.quote(st['name'])}", st)
+def push_strategy(base: str, key: str, space: str, st: dict) -> None:
+    _req(base, key, "PUT", f"/api/lab/{_sp(space)}/strategies/{urllib.parse.quote(st['name'])}", st)
 
 
-def list_strategies(base: str, key: str) -> list[dict]:
-    return _req(base, key, "GET", "/api/lab/strategies")["items"]
+def list_strategies(base: str, key: str, space: str) -> list[dict]:
+    return _req(base, key, "GET", f"/api/lab/{_sp(space)}/strategies")["items"]
 
 
-def push_vocab(base: str, key: str, custom: list[dict]) -> None:
-    _req(base, key, "PUT", "/api/lab/vocab", {"items": custom})
+def push_vocab(base: str, key: str, space: str, custom: list[dict]) -> None:
+    _req(base, key, "PUT", f"/api/lab/{_sp(space)}/vocab", {"items": custom})
 
 
-def get_vocab(base: str, key: str) -> list[dict]:
-    return _req(base, key, "GET", "/api/lab/vocab")["items"]
+def get_vocab(base: str, key: str, space: str) -> list[dict]:
+    return _req(base, key, "GET", f"/api/lab/{_sp(space)}/vocab")["items"]

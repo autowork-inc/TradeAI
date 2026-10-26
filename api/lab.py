@@ -1,5 +1,6 @@
 """`/api/lab/*` - обмен уроками Create Strategy (1.9.0): уроки, свои понятия словаря и стратегии трейдеров хранятся на сервере, чтобы их видели
-другие трейдеры и разработчик (по урокам пишутся новые детекторы). Файлы JSON в LAB_DIR (общий каталог ./data/lab, пишет только API).
+разработчик (по урокам пишутся новые детекторы) и другие ПК того же профиля. Файлы JSON в LAB_DIR/<santa|chr> (./data/lab, пишет только API);
+пространство в пути запроса, профили друг друга не видят.
 
 Это единственное место, кроме избранного, куда API пишет: только в свой каталог, с проверкой формата и размера; торговлю и БД бота не трогает."""
 
@@ -19,6 +20,9 @@ MAX_LESSON_BYTES = 3_000_000
 MAX_BARS = 3000
 MAX_DRAWINGS = 500
 NAME = re.compile(r"^[0-9A-Za-zА-Яа-яЁё _-]{1,60}$")
+# 1.9.1 (решение пользователя): у профилей SANTA и CHR своё видение рынка - уроки, словарь и стратегии лежат в LAB_DIR/santa и LAB_DIR/chr и не пересекаются
+SPACES = ("santa", "chr")
+Space = Annotated[str, PathParam(pattern=r"^(santa|chr)$")]
 
 
 def _write(path: Path, data: Any) -> None:
@@ -56,18 +60,19 @@ def meta(lesson: dict) -> dict:
 
 
 def install(app: FastAPI, auth: Callable, directory: Path | None) -> None:
-    def root() -> Path:
+    def root(space: str) -> Path:
         if directory is None:
             raise HTTPException(status_code=503, detail="lab_not_configured")
+        d = directory / space  # space проверен шаблоном пути: только santa | chr
         for sub in ("lessons", "strategies"):
-            (directory / sub).mkdir(parents=True, exist_ok=True)
-        return directory
+            (d / sub).mkdir(parents=True, exist_ok=True)
+        return d
 
-    @app.get("/api/lab/lessons", dependencies=[Depends(auth)])
-    async def lessons() -> dict[str, Any]:
+    @app.get("/api/lab/{space}/lessons", dependencies=[Depends(auth)])
+    async def lessons(space: Space) -> dict[str, Any]:
         def scan() -> list[dict]:
             out = []
-            for f in sorted((root() / "lessons").glob("*.json"), reverse=True):
+            for f in sorted((root(space) / "lessons").glob("*.json"), reverse=True):
                 try:
                     out.append(meta(_read(f)))
                 except (OSError, ValueError, KeyError):
@@ -75,46 +80,46 @@ def install(app: FastAPI, auth: Callable, directory: Path | None) -> None:
             return out
         return {"items": await asyncio.to_thread(scan)}
 
-    @app.get("/api/lab/lessons/{lesson_id}", dependencies=[Depends(auth)])
-    async def lesson(lesson_id: Annotated[str, PathParam(pattern=LESSON_ID)]) -> dict[str, Any]:
-        path = root() / "lessons" / f"{lesson_id}.json"
+    @app.get("/api/lab/{space}/lessons/{lesson_id}", dependencies=[Depends(auth)])
+    async def lesson(space: Space, lesson_id: Annotated[str, PathParam(pattern=LESSON_ID)]) -> dict[str, Any]:
+        path = root(space) / "lessons" / f"{lesson_id}.json"
         if not path.exists():
             raise HTTPException(status_code=404, detail="not_found")
         return await asyncio.to_thread(_read, path)
 
-    @app.put("/api/lab/lessons/{lesson_id}", dependencies=[Depends(auth)])
-    async def put_lesson(lesson_id: Annotated[str, PathParam(pattern=LESSON_ID)], body: Annotated[dict, Body()]) -> dict[str, Any]:
+    @app.put("/api/lab/{space}/lessons/{lesson_id}", dependencies=[Depends(auth)])
+    async def put_lesson(space: Space, lesson_id: Annotated[str, PathParam(pattern=LESSON_ID)], body: Annotated[dict, Body()]) -> dict[str, Any]:
         lesson = check_lesson(body, lesson_id)
         lesson["received_at"] = int(time.time())
-        await asyncio.to_thread(_write, root() / "lessons" / f"{lesson_id}.json", lesson)
+        await asyncio.to_thread(_write, root(space) / "lessons" / f"{lesson_id}.json", lesson)
         return {"saved": lesson_id}
 
-    @app.delete("/api/lab/lessons/{lesson_id}", dependencies=[Depends(auth)])
-    async def delete_lesson(lesson_id: Annotated[str, PathParam(pattern=LESSON_ID)]) -> dict[str, Any]:
-        path = root() / "lessons" / f"{lesson_id}.json"
+    @app.delete("/api/lab/{space}/lessons/{lesson_id}", dependencies=[Depends(auth)])
+    async def delete_lesson(space: Space, lesson_id: Annotated[str, PathParam(pattern=LESSON_ID)]) -> dict[str, Any]:
+        path = root(space) / "lessons" / f"{lesson_id}.json"
         if not path.exists():
             raise HTTPException(status_code=404, detail="not_found")
         path.unlink()
         return {"deleted": lesson_id}
 
-    @app.get("/api/lab/vocab", dependencies=[Depends(auth)])
-    async def vocab() -> dict[str, Any]:
-        path = root() / "vocab.json"
+    @app.get("/api/lab/{space}/vocab", dependencies=[Depends(auth)])
+    async def vocab(space: Space) -> dict[str, Any]:
+        path = root(space) / "vocab.json"
         return {"items": _read(path) if path.exists() else []}
 
-    @app.put("/api/lab/vocab", dependencies=[Depends(auth)])
-    async def put_vocab(body: Annotated[dict, Body()]) -> dict[str, Any]:
+    @app.put("/api/lab/{space}/vocab", dependencies=[Depends(auth)])
+    async def put_vocab(space: Space, body: Annotated[dict, Body()]) -> dict[str, Any]:
         items = body.get("items")
         if not isinstance(items, list) or len(items) > 200 or not all(isinstance(x, dict) and NAME.match(str(x.get("name") or "")) for x in items):
             raise HTTPException(status_code=422, detail="bad_vocab")
-        await asyncio.to_thread(_write, root() / "vocab.json", items)
+        await asyncio.to_thread(_write, root(space) / "vocab.json", items)
         return {"saved": len(items)}
 
-    @app.get("/api/lab/strategies", dependencies=[Depends(auth)])
-    async def strategies() -> dict[str, Any]:
+    @app.get("/api/lab/{space}/strategies", dependencies=[Depends(auth)])
+    async def strategies(space: Space) -> dict[str, Any]:
         def scan() -> list[dict]:
             out = []
-            for f in sorted((root() / "strategies").glob("*.json")):
+            for f in sorted((root(space) / "strategies").glob("*.json")):
                 try:
                     out.append(_read(f))
                 except (OSError, ValueError):
@@ -122,10 +127,10 @@ def install(app: FastAPI, auth: Callable, directory: Path | None) -> None:
             return out
         return {"items": await asyncio.to_thread(scan)}
 
-    @app.put("/api/lab/strategies/{name}", dependencies=[Depends(auth)])
-    async def put_strategy(name: str, body: Annotated[dict, Body()]) -> dict[str, Any]:
+    @app.put("/api/lab/{space}/strategies/{name}", dependencies=[Depends(auth)])
+    async def put_strategy(space: Space, name: str, body: Annotated[dict, Body()]) -> dict[str, Any]:
         if not NAME.match(name) or body.get("name") != name or len(json.dumps(body, ensure_ascii=False)) > 500_000:
             raise HTTPException(status_code=422, detail="bad_strategy")
         fname = hashlib.sha1(name.encode("utf-8")).hexdigest()[:16]  # имя файла - хэш: кириллица и пробелы в имени стратегии не доходят до ФС
-        await asyncio.to_thread(_write, root() / "strategies" / f"{fname}.json", {**body, "received_at": int(time.time())})
+        await asyncio.to_thread(_write, root(space) / "strategies" / f"{fname}.json", {**body, "received_at": int(time.time())})
         return {"saved": name}

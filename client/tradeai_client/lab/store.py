@@ -1,7 +1,9 @@
 """Хранилище полигона на ПК: уроки, стратегии (с историей версий для отката), свои понятия словаря.
 
 Папка - %APPDATA%\\TradeAI-Monitor\\lab (переживает обновление .exe). Файлы JSON; запись атомарная (через временный файл).
-Уроки дополнительно отправляются на сервер (remote.py), чтобы их видели разработчик и другие трейдеры; локальная копия - всегда."""
+1.9.1 (решение пользователя): у каждого профиля СВОЁ пространство - lab/santa и lab/chr (уроки, словарь, стратегии не пересекаются: видение рынка
+SANTA и CHR разное). Поэтому каталог (`root`) - обязательный аргумент всех функций: забыть профиль и записать «в общее» нельзя.
+Уроки дополнительно отправляются на сервер (remote.py) в пространство того же профиля; локальная копия - всегда."""
 
 import json
 import os
@@ -21,12 +23,51 @@ class StoreError(Exception):
     """Запись/чтение не удалось (текст показывается пользователю)."""
 
 
-def lab_dir() -> Path:
+def space_of(profile: str) -> str:
+    """Имя пространства профиля: SANTA -> santa, CHR -> chr (тот же список и умолчание, что у профилей клиента)."""
+    from tradeai_client import profiles
+    return profiles.normalize_profile(profile).lower()
+
+
+def base_dir() -> Path:
     from tradeai_client.settings import user_dir
-    d = Path(os.environ.get("TRADEAI_LAB_DIR") or (user_dir() / "lab"))
+    return Path(os.environ.get("TRADEAI_LAB_DIR") or (user_dir() / "lab"))
+
+
+def lab_dir(profile: str) -> Path:
+    """Каталог пространства профиля (создаётся при первом обращении)."""
+    base = base_dir()
+    _migrate_legacy(base)
+    d = base / space_of(profile)
     for sub in ("lessons", "strategies"):
         (d / sub).mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _migrate_legacy(base: Path) -> None:
+    """1.9.0 хранил всё в общем lab/: уроки уходят в пространство своего автора (CHR -> chr, иначе santa), стратегии и словарь - в santa."""
+    legacy = [p for p in (base / "lessons", base / "strategies", base / "vocab.json", base / "active.json") if p.exists()]
+    if not legacy:
+        return
+    for f in sorted((base / "lessons").glob("*.json")) if (base / "lessons").is_dir() else []:
+        try:
+            author = (_read(f, {}) or {}).get("author") or ""
+        except StoreError:
+            author = ""
+        dest = base / space_of(author) / "lessons"
+        dest.mkdir(parents=True, exist_ok=True)
+        os.replace(f, dest / f.name)
+    santa = base / space_of("SANTA")
+    for f in sorted((base / "strategies").glob("*.json")) if (base / "strategies").is_dir() else []:
+        (santa / "strategies").mkdir(parents=True, exist_ok=True)
+        os.replace(f, santa / "strategies" / f.name)
+    for name in ("vocab.json", "active.json"):
+        if (base / name).exists():
+            santa.mkdir(parents=True, exist_ok=True)
+            os.replace(base / name, santa / name)
+    for sub in ("lessons", "strategies"):
+        if (base / sub).is_dir() and not any((base / sub).iterdir()):
+            (base / sub).rmdir()
 
 
 def _write(path: Path, data: Any) -> None:
@@ -50,12 +91,11 @@ def _read(path: Path, default: Any = None) -> Any:
 # ------------------------------------------------------------------------------------------ словарь
 
 
-def load_vocab(root: Path | None = None) -> list[vocab.Term]:
-    return vocab.merge(_read((root or lab_dir()) / "vocab.json", []) or [])
+def load_vocab(root: Path) -> list[vocab.Term]:
+    return vocab.merge(_read(root / "vocab.json", []) or [])
 
 
-def add_term(name: str, kind: str, color: str = "#c9d1d9", hint: str = "", root: Path | None = None) -> vocab.Term:
-    root = root or lab_dir()
+def add_term(name: str, kind: str, color: str = "#c9d1d9", hint: str = "", *, root: Path) -> vocab.Term:
     term = vocab.custom_term(name, kind, color, hint)
     custom = _read(root / "vocab.json", []) or []
     if any(c.get("id") == term.id for c in custom) or term.id in vocab.BUILTIN_IDS:
@@ -111,15 +151,15 @@ def to_bar(b: Any) -> dict[str, Any]:
     return {"t": int(b[0]), "o": float(b[1]), "h": float(b[2]), "l": float(b[3]), "c": float(b[4]), "v": float(b[5]), "bv": float(b[6]) if len(b) > 6 and b[6] is not None else None}
 
 
-def save_lesson(raw: dict, root: Path | None = None) -> dict[str, Any]:
+def save_lesson(raw: dict, root: Path) -> dict[str, Any]:
     lesson = clean_lesson(raw)
-    _write((root or lab_dir()) / "lessons" / f"{lesson['id']}.json", lesson)
+    _write(root / "lessons" / f"{lesson['id']}.json", lesson)
     return lesson
 
 
-def list_lessons(root: Path | None = None) -> list[dict[str, Any]]:
+def list_lessons(root: Path) -> list[dict[str, Any]]:
     out = []
-    for f in sorted(((root or lab_dir()) / "lessons").glob("*.json"), reverse=True):
+    for f in sorted((root / "lessons").glob("*.json"), reverse=True):
         try:
             ls = _read(f, None)
         except StoreError:
@@ -136,22 +176,22 @@ def list_lessons(root: Path | None = None) -> list[dict[str, Any]]:
     return out
 
 
-def load_lesson(lesson_id: str, root: Path | None = None) -> dict[str, Any]:
+def load_lesson(lesson_id: str, root: Path) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9A-Za-z_-]{6,64}", lesson_id or ""):
         raise StoreError("неверный id урока")
-    ls = _read((root or lab_dir()) / "lessons" / f"{lesson_id}.json", None)
+    ls = _read(root / "lessons" / f"{lesson_id}.json", None)
     if ls is None:
         raise StoreError(f"урок {lesson_id} не найден")
     return ls
 
 
-def load_lessons(root: Path | None = None) -> list[dict[str, Any]]:
+def load_lessons(root: Path) -> list[dict[str, Any]]:
     return [load_lesson(x["id"], root) for x in list_lessons(root)]
 
 
-def delete_lesson(lesson_id: str, root: Path | None = None) -> None:
+def delete_lesson(lesson_id: str, root: Path) -> None:
     load_lesson(lesson_id, root)
-    ((root or lab_dir()) / "lessons" / f"{lesson_id}.json").unlink(missing_ok=True)
+    (root / "lessons" / f"{lesson_id}.json").unlink(missing_ok=True)
 
 
 # ------------------------------------------------------------------------------------------ стратегии
@@ -171,27 +211,25 @@ def _slug(name: str) -> str:
     return s
 
 
-def list_strategies(root: Path | None = None) -> list[dict[str, Any]]:
-    root = root or lab_dir()
+def list_strategies(root: Path) -> list[dict[str, Any]]:
     items = [_read(f, None) for f in sorted((root / "strategies").glob("*.json"))]
     items = [x for x in items if x]
     if not items:
         st = default_strategy()
-        save_strategy(st, "создана по умолчанию", root)
+        save_strategy(st, "создана по умолчанию", root=root)
         items = [st]
     return items
 
 
-def get_strategy(name: str, root: Path | None = None) -> dict[str, Any]:
-    st = _read((root or lab_dir()) / "strategies" / f"{_slug(name)}.json", None)
+def get_strategy(name: str, root: Path) -> dict[str, Any]:
+    st = _read(root / "strategies" / f"{_slug(name)}.json", None)
     if st is None:
         raise StoreError(f"стратегия «{name}» не найдена")
     return st
 
 
-def save_strategy(st: dict[str, Any], why: str = "", root: Path | None = None) -> dict[str, Any]:
+def save_strategy(st: dict[str, Any], why: str = "", *, root: Path) -> dict[str, Any]:
     """Сохранить стратегию; прежнее состояние параметров/понятий уходит в history (откат)."""
-    root = root or lab_dir()
     name = _slug(st.get("name", ""))
     path = root / "strategies" / f"{name}.json"
     old = _read(path, None)
@@ -207,23 +245,23 @@ def save_strategy(st: dict[str, Any], why: str = "", root: Path | None = None) -
     return clean
 
 
-def rollback_strategy(name: str, steps: int = 1, root: Path | None = None) -> dict[str, Any]:
+def rollback_strategy(name: str, steps: int = 1, *, root: Path) -> dict[str, Any]:
     st = get_strategy(name, root)
     hist = st.get("history") or []
     if len(hist) < steps:
         raise StoreError("Откатывать некуда: истории изменений меньше")
     prev = hist[-steps]
     st = {**st, "enabled": prev["enabled"], "params": prev["params"], "setup": prev.get("setup") or st["setup"], "history": hist[:-steps]}
-    _write((root or lab_dir()) / "strategies" / f"{_slug(name)}.json", {**st, "updated": int(time.time())})
+    _write(root / "strategies" / f"{_slug(name)}.json", {**st, "updated": int(time.time())})
     return st
 
 
-def active_name(root: Path | None = None) -> str:
-    got = _read((root or lab_dir()) / "active.json", {}) or {}
+def active_name(root: Path) -> str:
+    got = _read(root / "active.json", {}) or {}
     names = [s["name"] for s in list_strategies(root)]
     return got.get("name") if got.get("name") in names else names[0]
 
 
-def set_active(name: str, root: Path | None = None) -> None:
+def set_active(name: str, root: Path) -> None:
     get_strategy(name, root)
-    _write((root or lab_dir()) / "active.json", {"name": _slug(name)})
+    _write(root / "active.json", {"name": _slug(name)})

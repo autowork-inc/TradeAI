@@ -42,13 +42,16 @@ class LabApi:
     """Публичные методы - API страницы. Ошибки данных/сети возвращаются {"ok": false, "error"}, страница показывает их; ошибка кода - исключение в консоль."""
 
     def __init__(self, cfg: dict[str, Any]):
-        self._s = {"server": cfg.get("server") or {}, "author": cfg.get("author", "")}
+        profile = cfg.get("profile") or cfg.get("author") or ""
+        self._s = {"server": cfg.get("server") or {}, "author": cfg.get("author", "") or profile}
+        self._space = store.space_of(profile)  # 1.9.1: окно работает только в пространстве своего профиля (SANTA и CHR не пересекаются)
+        self._root = store.lab_dir(profile)
 
     # ---- справочники
     def boot(self) -> dict[str, Any]:
         try:
-            st = store.list_strategies()
-            return _ok(vocab=[t.to_dict() for t in store.load_vocab()], strategies=[s["name"] for s in st], active=store.active_name(),
+            st = store.list_strategies(self._root)
+            return _ok(vocab=[t.to_dict() for t in store.load_vocab(self._root)], strategies=[s["name"] for s in st], active=store.active_name(self._root), space=self._space,
                        author=self._s["author"], setups=list(setups.SETUPS), setup_names=setups.SETUP_RU)
         except (store.StoreError, OSError) as exc:
             return _err(exc)
@@ -82,7 +85,7 @@ class LabApi:
     def analyze(self, bars: list, tf: str, strategy: str = "", with_setups: bool = False) -> dict[str, Any]:
         """Разметка бота по свечам (последняя - закрытая на курсоре) + подсказки/сигналы на последней свече."""
         try:
-            st = store.get_strategy(strategy) if strategy else store.get_strategy(store.active_name())
+            st = store.get_strategy(strategy or store.active_name(self._root), self._root)
         except store.StoreError:
             st = store.default_strategy()
         bb = [store.to_bar(b) for b in bars][-ANALYZE_BARS:]
@@ -93,7 +96,7 @@ class LabApi:
     def compare(self, lesson: dict, strategy: str = "") -> dict[str, Any]:
         try:
             ls = store.clean_lesson(lesson)
-            st = store.get_strategy(strategy or store.active_name())
+            st = store.get_strategy(strategy or store.active_name(self._root), self._root)
         except store.StoreError as exc:
             return _err(exc)
         objs, _ = detect.run(ls["bars"], ls["iv"], st.get("enabled"), st.get("params"))
@@ -102,12 +105,12 @@ class LabApi:
     # ---- уроки
     def save_lesson(self, lesson: dict) -> dict[str, Any]:
         try:
-            ls = store.save_lesson({**lesson, "author": lesson.get("author") or self._s["author"]})
+            ls = store.save_lesson({**lesson, "author": lesson.get("author") or self._s["author"]}, self._root)
         except store.StoreError as exc:
             return _err(exc)
         sent = None
         try:
-            remote.push_lesson(self._s["server"].get("url", ""), self._s["server"].get("key", ""), ls)
+            remote.push_lesson(self._s["server"].get("url", ""), self._s["server"].get("key", ""), self._space, ls)
             sent = True
         except remote.RemoteError as exc:
             sent = str(exc)
@@ -115,45 +118,45 @@ class LabApi:
 
     def list_lessons(self) -> dict[str, Any]:
         try:
-            return _ok(items=store.list_lessons())
+            return _ok(items=store.list_lessons(self._root))
         except store.StoreError as exc:
             return _err(exc)
 
     def load_lesson(self, lesson_id: str) -> dict[str, Any]:
         try:
-            return _ok(lesson=store.load_lesson(lesson_id))
+            return _ok(lesson=store.load_lesson(lesson_id, self._root))
         except store.StoreError as exc:
             return _err(exc)
 
     # ---- словарь и стратегии
     def add_term(self, name: str, kind: str, color: str = "#c9d1d9", hint: str = "") -> dict[str, Any]:
         try:
-            t = store.add_term(name, kind, color, hint)
+            t = store.add_term(name, kind, color, hint, root=self._root)
         except (vocab.VocabError, store.StoreError) as exc:
             return _err(exc)
-        return _ok(term=t.to_dict(), vocab=[x.to_dict() for x in store.load_vocab()])
+        return _ok(term=t.to_dict(), vocab=[x.to_dict() for x in store.load_vocab(self._root)])
 
     def get_strategy(self, name: str = "") -> dict[str, Any]:
         try:
-            st = store.get_strategy(name or store.active_name())
+            st = store.get_strategy(name or store.active_name(self._root), self._root)
         except store.StoreError as exc:
             return _err(exc)
         return _ok(strategy=st, defaults=detect.DEFAULT_PARAMS)
 
     def set_active(self, name: str) -> dict[str, Any]:
         try:
-            store.set_active(name)
+            store.set_active(name, self._root)
         except store.StoreError as exc:
             return _err(exc)
         return _ok()
 
     def save_strategy(self, st: dict, why: str = "") -> dict[str, Any]:
         try:
-            saved = store.save_strategy(st, why)
+            saved = store.save_strategy(st, why, root=self._root)
         except store.StoreError as exc:
             return _err(exc)
         try:
-            remote.push_strategy(self._s["server"].get("url", ""), self._s["server"].get("key", ""), saved)
+            remote.push_strategy(self._s["server"].get("url", ""), self._s["server"].get("key", ""), self._space, saved)
         except remote.RemoteError:
             pass  # обмен с сервером - необязательный; локальная копия сохранена
         return _ok(strategy=saved)
@@ -161,8 +164,8 @@ class LabApi:
     def tune(self, strategy: str = "") -> dict[str, Any]:
         """Подбор параметров под ВСЕ уроки. Ничего не сохраняет: применяет apply_tune после просмотра отчёта."""
         try:
-            st = store.get_strategy(strategy or store.active_name())
-            lessons = store.load_lessons()
+            st = store.get_strategy(strategy or store.active_name(self._root), self._root)
+            lessons = store.load_lessons(self._root)
         except store.StoreError as exc:
             return _err(exc)
         if not lessons:
@@ -173,7 +176,7 @@ class LabApi:
 
     def apply_tune(self, strategy: str, params: dict) -> dict[str, Any]:
         try:
-            st = store.get_strategy(strategy)
+            st = store.get_strategy(strategy, self._root)
         except store.StoreError as exc:
             return _err(exc)
         return self.save_strategy({**st, "params": params}, "подбор под уроки")
@@ -184,7 +187,8 @@ def run_lab_window(cfg: dict[str, Any]) -> None:
 
     api = LabApi(cfg)
     page_cfg = {k: v for k, v in cfg.items() if k != "server"}
-    window = webview.create_window("TradeAI · Create Strategy", html=build_html(page_cfg), js_api=api, background_color="#0e1117", maximized=True,
+    who = (cfg.get("profile") or cfg.get("author") or "").upper()
+    window = webview.create_window(f"TradeAI · Create Strategy · {who}" if who else "TradeAI · Create Strategy",html=build_html(page_cfg), js_api=api, background_color="#0e1117", maximized=True,
                                    width=1600, height=950, focus=True)
 
     def show(win: Any) -> None:
@@ -197,7 +201,7 @@ _PROCS: list = []
 
 
 def open_lab(cfg: dict[str, Any]) -> "multiprocessing.process.BaseProcess":
-    """Открыть полигон в отдельном процессе. cfg: author, server {url, key}, open {symbol, tf, at_s} | lesson_id, strategy."""
+    """Открыть полигон в отдельном процессе. cfg: profile (SANTA | CHR - пространство уроков), author, server {url, key}, open {symbol, tf, at_s} | lesson_id, strategy."""
     if not _PROCS:
         import atexit
         atexit.register(terminate_all)  # окна полигона закрываются вместе с приложением

@@ -19,35 +19,62 @@ def lesson(lid="20261026-120000-abcdef", n=40):
 
 def test_lesson_put_list_get_delete(tmp_path):
     c = client(tmp_path)
-    assert c.put(f"/api/lab/lessons/{lesson()['id']}", json=lesson()).status_code == 200
-    items = c.get("/api/lab/lessons").json()["items"]
+    assert c.put(f"/api/lab/santa/lessons/{lesson()['id']}", json=lesson()).status_code == 200
+    items = c.get("/api/lab/santa/lessons").json()["items"]
     assert items[0]["terms"] == {"zone": 1} and items[0]["author"] == "CHR"
-    got = c.get(f"/api/lab/lessons/{lesson()['id']}").json()
+    got = c.get(f"/api/lab/santa/lessons/{lesson()['id']}").json()
     assert got["notes"] == "разбор" and got["received_at"]
-    assert c.delete(f"/api/lab/lessons/{lesson()['id']}").status_code == 200 and c.get("/api/lab/lessons").json()["items"] == []
+    assert c.delete(f"/api/lab/santa/lessons/{lesson()['id']}").status_code == 200 and c.get("/api/lab/santa/lessons").json()["items"] == []
 
 
 def test_lesson_validation(tmp_path):
     c = client(tmp_path)
     lid = lesson()["id"]
-    assert c.put(f"/api/lab/lessons/{lid}", json={**lesson(), "id": "other-id-1"}).status_code == 422
-    assert c.put(f"/api/lab/lessons/{lid}", json=lesson(n=5)).status_code == 422
-    assert c.put(f"/api/lab/lessons/{lid}", json={**lesson(), "symbol": "../etc"}).status_code == 422
-    assert c.put("/api/lab/lessons/..%2F..%2Fx", json=lesson()).status_code in (404, 422)
+    assert c.put(f"/api/lab/santa/lessons/{lid}", json={**lesson(), "id": "other-id-1"}).status_code == 422
+    assert c.put(f"/api/lab/santa/lessons/{lid}", json=lesson(n=5)).status_code == 422
+    assert c.put(f"/api/lab/santa/lessons/{lid}", json={**lesson(), "symbol": "../etc"}).status_code == 422
+    assert c.put("/api/lab/santa/lessons/..%2F..%2Fx", json=lesson()).status_code in (404, 422)
     assert not list(tmp_path.rglob("*.json"))  # отклонённое не записано никуда
 
 
 def test_vocab_and_strategies(tmp_path):
     c = client(tmp_path)
-    assert c.put("/api/lab/vocab", json={"items": [{"id": "u_imbalans", "name": "Имбаланс", "kind": "box"}]}).status_code == 200
-    assert c.get("/api/lab/vocab").json()["items"][0]["name"] == "Имбаланс"
-    assert c.put("/api/lab/vocab", json={"items": [{"name": "<script>"}]}).status_code == 422
-    assert c.put("/api/lab/strategies/Моя стратегия", json={"name": "Моя стратегия", "params": {}}).status_code == 200
-    assert c.get("/api/lab/strategies").json()["items"][0]["name"] == "Моя стратегия"
-    assert c.put("/api/lab/strategies/x", json={"name": "y"}).status_code == 422
+    assert c.put("/api/lab/santa/vocab", json={"items": [{"id": "u_imbalans", "name": "Имбаланс", "kind": "box"}]}).status_code == 200
+    assert c.get("/api/lab/santa/vocab").json()["items"][0]["name"] == "Имбаланс"
+    assert c.put("/api/lab/santa/vocab", json={"items": [{"name": "<script>"}]}).status_code == 422
+    assert c.put("/api/lab/santa/strategies/Моя стратегия", json={"name": "Моя стратегия", "params": {}}).status_code == 200
+    assert c.get("/api/lab/santa/strategies").json()["items"][0]["name"] == "Моя стратегия"
+    assert c.put("/api/lab/santa/strategies/x", json={"name": "y"}).status_code == 422
+
+
+def test_profiles_never_see_each_other(tmp_path):
+    """1.9.1: у SANTA и CHR своё видение рынка - уроки, словарь и стратегии в разных каталогах и в разных путях API."""
+    c = client(tmp_path)
+    santa, chr_ = lesson("20261026-120000-santa1"), {**lesson("20261026-120000-chr001"), "author": "CHR", "symbol": "ETHUSDT"}
+    assert c.put(f"/api/lab/santa/lessons/{santa['id']}", json=santa).status_code == 200
+    assert c.put(f"/api/lab/chr/lessons/{chr_['id']}", json=chr_).status_code == 200
+    assert [x["id"] for x in c.get("/api/lab/santa/lessons").json()["items"]] == [santa["id"]]
+    assert [x["id"] for x in c.get("/api/lab/chr/lessons").json()["items"]] == [chr_["id"]]
+    assert c.get(f"/api/lab/chr/lessons/{santa['id']}").status_code == 404 and c.get(f"/api/lab/santa/lessons/{chr_['id']}").status_code == 404
+    assert c.delete(f"/api/lab/chr/lessons/{santa['id']}").status_code == 404  # удалить чужой урок через своё пространство нельзя
+    assert c.put("/api/lab/chr/vocab", json={"items": [{"id": "u_x", "name": "Свое CHR", "kind": "box"}]}).status_code == 200
+    assert c.get("/api/lab/santa/vocab").json()["items"] == []
+    assert c.put("/api/lab/chr/strategies/Моя стратегия", json={"name": "Моя стратегия", "params": {"level": {"k": 2}}}).status_code == 200
+    assert c.get("/api/lab/santa/strategies").json()["items"] == []
+    assert c.get("/api/lab/chr/strategies").json()["items"][0]["params"] == {"level": {"k": 2}}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["chr", "santa"]
+    assert (tmp_path / "santa" / "lessons" / f"{santa['id']}.json").exists() and (tmp_path / "chr" / "lessons" / f"{chr_['id']}.json").exists()
+
+
+def test_unknown_space_is_rejected(tmp_path):
+    c = client(tmp_path)
+    for bad in ("other", "SANTA", "..", "lessons"):
+        assert c.get(f"/api/lab/{bad}/lessons").status_code in (404, 422)
+    assert c.get("/api/lab/lessons").status_code in (404, 422)  # старый общий путь 1.9.0 закрыт
+    assert not list(tmp_path.iterdir())
 
 
 def test_not_configured(tmp_path):
     app = FastAPI()
     lab.install(app, lambda: None, None)
-    assert TestClient(app).get("/api/lab/lessons").status_code == 503
+    assert TestClient(app).get("/api/lab/santa/lessons").status_code == 503
